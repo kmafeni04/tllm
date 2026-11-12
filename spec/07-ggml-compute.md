@@ -127,7 +127,7 @@ what ggml returns from this operation.
 
 - Linux x86_64 only: no macOS, no Windows, no other architecture, no prebuilt download; the source is compiled.
 - No other operation, type or backend: no add, normalise, rope, softmax or row gather, no quantised tensor, no attention, no CUDA, Metal, Vulkan or BLAS, no thread count, no buffer reuse between calls.
-- No model: nothing loads a GGUF, and neither `serve` nor `bench` changes.
+- No model: `serve` loads a GGUF through `weights.load` under `08`, and nothing reads a weight through this library.
 
 ## Tests
 

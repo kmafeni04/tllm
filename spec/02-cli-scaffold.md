@@ -70,7 +70,7 @@ one in `../targs/types/lde-test.d.tl` or generate it with tlcat, and put `types`
 ## Non-goals
 
 - No config reading: the JSON dependency, the config file, its schema and its default location are a later spec, so `--config` is never opened and no file is read or checked.
-- No engine work: no command loads a model, checks a model path or measures a token rate, and `bench` opens no port and answers no request. `bench` stops at the refusal line.
+- No engine work: no command measures a token rate, and `bench` opens no port, answers no request and loads nothing. `serve` loads and maps a model under `08`, and `bench` stops at the refusal line.
 - No shell completions, no `--version`, and no logging beyond the lines above.
 
 ## Tests

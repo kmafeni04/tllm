@@ -102,6 +102,61 @@ local function model_of(command: targs.Parser): string | number | nil
   end
 end
 
+local function sorted_names(models: {string: string}): {string}
+  local names: {string} = {}
+  for name in pairs(models) do
+    names[#names + 1] = name
+  end
+  table.sort(names)
+  return names
+end
+
+local record Chosen
+  name: string
+  path: string
+end
+
+local function chosen_model(
+  models: {string: string},
+  word: string | nil,
+  path_word: boolean,
+  write_err: function(string)
+): Chosen | nil
+  if word is string then
+    if path_word then
+      if not config.has_file(word) then
+        write_err(
+          one_line("serve: model path " .. word .. " is not a readable file")
+        )
+        return nil
+      end
+      return {name = word, path = word}
+    end
+    local configured = models[word]
+    if configured is nil then
+      write_err(one_line("serve: unknown model " .. word))
+      return nil
+    end
+    return {name = word, path = configured}
+  end
+
+  local names = sorted_names(models)
+  if #names == 0 then
+    write_err(one_line("serve: no model configured"))
+    return nil
+  end
+  if #names > 1 then
+    write_err(
+      one_line(
+        "serve: no model given; configured models are "
+          .. table.concat(names, ", ")
+      )
+    )
+    return nil
+  end
+  return {name = names[1], path = models[names[1]]}
+end
+
 local function process_environment(): {string: string}
   local environment: {string: string} = {}
   local xdg = os.getenv("XDG_CONFIG_HOME")
@@ -174,24 +229,20 @@ local function serve_code(
   local bind_host = given_host or file_host or "127.0.0.1"
   local bind_port = given_port or file_port or 8080
 
-  if word is string then
-    if path_word then
-      if not config.has_file(word) then
-        write_err(
-          one_line("serve: model path " .. word .. " is not a readable file")
-        )
-        return 1
-      end
-    elseif models[word] == nil then
-      write_err(one_line("serve: unknown model " .. word))
-      return 1
-    end
-  elseif next(models) == nil then
-    write_err(one_line("serve: no model configured"))
+  local chosen = chosen_model(models, word, path_word, write_err)
+  if chosen is nil then
     return 1
   end
 
-  return start({host = bind_host, port = bind_port}, write_err)
+  return start(
+    {
+      host = bind_host,
+      port = bind_port,
+      name = chosen.name,
+      path = chosen.path,
+    },
+    write_err
+  )
 end
 
 local function bench_outcome(command: targs.Parser): Outcome

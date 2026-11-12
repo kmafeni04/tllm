@@ -170,6 +170,7 @@ test.it(
     local endpoint = received as serve.Endpoint
     test.equal(endpoint.host, "127.0.0.1")
     test.equal(endpoint.port, 9090)
+    test.equal(endpoint.name, "m")
     test.equal(received_err, write_err)
 
     cli.run({"serve", "m"}, write_out, write_err, stub, environment)
@@ -177,6 +178,7 @@ test.it(
     endpoint = received as serve.Endpoint
     test.equal(endpoint.host, "127.0.0.1")
     test.equal(endpoint.port, 8080)
+    test.equal(endpoint.name, "m")
 
     fs.rmdir(base)
   end

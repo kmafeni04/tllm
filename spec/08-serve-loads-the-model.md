@@ -1,6 +1,6 @@
 # 08: Open the model at serve start, name it in /health, and resolve one configured entry
 
-**Status**: pending   **Depends on**: 04, 06
+**Status**: done   **Depends on**: 04, 06
 
 ## Problem & context
 
@@ -79,7 +79,7 @@ mapped until the process ends.
 - FR-005 (US-003) WHEN the model word names a configured entry, THE SYSTEM SHALL call the start function with an endpoint whose `name` is that word and whose `path` is that entry's `path`.
 - FR-006 (US-003) WHEN the model word is a path, THE SYSTEM SHALL call the start function with an endpoint whose `name` and `path` are both that word.
 - FR-007 (US-004) WHEN no model word is given and the config holds exactly one entry, THE SYSTEM SHALL call the start function with an endpoint whose `name` is that entry's key and whose `path` is that entry's `path`.
-- FR-008 (US-002) IF no model word is given and the config holds more than one entry, THEN THE SYSTEM SHALL write one line through the stderr writer naming every configured model in ascending byte order, and return exit code 1 without calling a start function.
+- FR-008 (US-002) IF no model word is given and the config holds more than one entry, THEN THE SYSTEM SHALL refuse, as `04/FR-010` states.
 - FR-009 (US-001) WHEN `build` returns a server, THE SYSTEM SHALL hold that server's model in a table declared in `tllm.serve` whose keys are the servers `build` returned, and call no release on its mapping.
 - FR-010 (US-001) WHEN `model_of(server)` is called with a server `build` returned, THE SYSTEM SHALL return the model it holds, whose `name` is that endpoint's `name`, whose `path` is that endpoint's `path`, and whose `handle` is the handle `weights.load` returned for that path.
 - FR-011 (US-001) IF `model_of` is called with a server `build` did not return, THEN THE SYSTEM SHALL return nil.
@@ -102,10 +102,4 @@ mapped until the process ends.
 
 ## Amendments
 
-- `03/FR-002`: `build` takes an endpoint that holds `name` and `path` beside host and port, maps the named file, and returns `tltp.Server | nil, string | nil`. The helper in `03`'s Tests takes a GGUF fixture path and a name, and every case that builds a server uses it. The Problem & context line saying the engine is absent and no model is loaded, and the Non-goals line saying the resolved model is not passed to `start`, are replaced.
-- `03/FR-003`: the `/health` body holds a second member, `model`, the endpoint's name, beside `status` with the value `ok`. `03`'s T-002 is removed, because the body is asserted once, in `08/T-001`, over a real fixture.
-- `03/FR-007`: the endpoint that `serve_code` passes to `start` holds `name` and `path` beside `host` and `port`, and the start function's declared parameter type names all four. `03`'s T-005 asserts `host` and `port` on the endpoint it captures rather than the whole table, and passes `m` as the model word, so the endpoint's `name` is `m`.
-- `04/FR-010`: the resolution also refuses, with one line naming every configured model in ascending byte order and exit code 1, when no model word is given and `models` holds more than one entry. The Problem & context sentences saying one entry or several counts as resolved and that the choice is not passed to the server are replaced, the paragraph beginning `Nothing loads a model: the engine is still absent.` is replaced whole so that it no longer says nothing loads a model and no longer says the existence check is the only thing serve does with a model, and the Non-goals line saying the resolved model is not passed to `build` or `start` and that `/health` is unchanged is replaced.
-- `02/FR-001`: the Non-goals line saying no command loads a model or checks a model path, and that `bench` stops at the refusal line, is replaced: `serve` loads and maps a model under `08`.
-- `06/FR-003`: the Non-goals line saying neither command loads a model and that the model `04` resolves still stops at its existence check is replaced: `serve` maps the model through `weights.load`.
-- `07/FR-002`: the Non-goals line saying nothing loads a GGUF and that neither `serve` nor `bench` changes is replaced: `serve` loads a GGUF through `weights.load`.
+- None.

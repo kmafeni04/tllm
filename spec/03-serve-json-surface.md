@@ -10,7 +10,7 @@ answer.
 
 This spec turns `serve` into a server: it opens a socket on the host and port the call named,
 answers `GET /health` with a JSON body, and answers every failure with one error envelope. The
-engine is absent and stays absent: no model is loaded and no completion route exists.
+engine's maths is absent: `08` maps and names the model, and no route reads a weight.
 
 `tltp` 0.3.5 (registry) is the server. Its `mock_request` method answers a request out of the
 routing table with no socket, so every answer here is tested in-process under `lde run test`.
@@ -46,13 +46,13 @@ Two facts about the pinned release that this spec depends on:
 
 - FR-001 (US-001) THE SYSTEM SHALL declare the dependency `tltp` at `^0.3.5` in `lde.json` and hold in `types/` the `json` declaration copied from `tltp`'s `types/`, so that every `.tl` file typechecks without the project importing `json` directly.
   Not testable: read `lde.json` and `types/`, and `lde run check` exits 0.
-- FR-002 (US-004) WHEN `require("tllm.serve").build({host = "127.0.0.1", port = 9090})` is called, THE SYSTEM SHALL return a `tltp.Server` whose config holds port 9090 and `bind_host` `127.0.0.1`, answering requests through `mock_request` without opening a socket.
-- FR-003 (US-002) WHEN a GET request for `/health` is answered, THE SYSTEM SHALL answer status 200, content type `application/json`, and a body that decodes to an object whose single member is `status` with the value `ok`.
+- FR-002 (US-004) WHEN `require("tllm.serve").build({host = "127.0.0.1", port = 9090, name = "m", path = P})` is called with `P` naming a GGUF file, THE SYSTEM SHALL map that file and return a `tltp.Server` whose config holds port 9090 and `bind_host` `127.0.0.1`, answering requests through `mock_request` without opening a socket, and nil as its second return value.
+- FR-003 (US-002) WHEN a GET request for `/health` is answered, THE SYSTEM SHALL answer status 200, content type `application/json`, and a body that decodes to an object whose members are `status` with the value `ok` and `model` with the value the endpoint's `name`.
 - FR-004 (US-003) WHEN a request matches no route, THE SYSTEM SHALL answer status 404, content type `application/json`, and a body that decodes to an object whose single member is `error`, an object whose members are `message` with the value `not found` and `type` with the value `not_found`, with no redirect answered in its place.
 - FR-005 (US-003) WHEN a request for `/health` carries a method other than GET, THE SYSTEM SHALL answer status 404, content type `application/json`, and the body `FR-004` describes.
 - FR-006 (US-001) WHEN `tllm serve` runs with valid arguments, THE SYSTEM SHALL build the server with `build`, bind the host and port it was given, answer requests over that socket until the process ends, and hold the process open while doing so, so that the start function returns only when the server could not start.
   Not testable: `lde run -- serve --host 127.0.0.1 --port 9090` then `curl -i 127.0.0.1:9090/health` answers `200 OK`, `curl -i 127.0.0.1:9090/nope` answers `404 NotFound`, and the command does not return until it is stopped.
-- FR-007 (US-001) WHEN `run(args, write_out, write_err, start, environment)` dispatches the `serve` command, THE SYSTEM SHALL call `start({host, port}, write_err)` with the given value for each of `host` and `port` that the flag gave, the config file's value for each that the flag did not give and the file sets, and `127.0.0.1` and `8080` for each that neither sets, write nothing to either writer itself except one line through the stderr writer for a config or model failure, and return the integer `start` returns, where `start` is an optional fourth parameter of type `function({host: string, port: integer}, function(string)): integer` that defaults to `require("tllm.serve").start`, and `environment` is an optional fifth parameter, a table of strings that defaults to the process environment.
+- FR-007 (US-001) WHEN `run(args, write_out, write_err, start, environment)` dispatches the `serve` command, THE SYSTEM SHALL call `start({host, port, name, path}, write_err)` with the given value for each of `host` and `port` that the flag gave, the config file's value for each that the flag did not give and the file sets, and `127.0.0.1` and `8080` for each that neither sets, the `name` and `path` the model resolution gives, write nothing to either writer itself except one line through the stderr writer for a config or model failure, and return the integer `start` returns, where `start` is an optional fourth parameter of type `function(serve.Endpoint, function(string)): integer` that defaults to `require("tllm.serve").start`, and `environment` is an optional fifth parameter, a table of strings that defaults to the process environment.
 - FR-008 (US-001) IF `--host` is given and is not four dot-separated decimal numbers each from 0 to 255, with no leading zero on a part of more than one digit, THEN THE SYSTEM SHALL write one line naming the host to stderr, return exit code 1, and call no start function.
 - FR-009 (US-001) IF the socket cannot be bound, THEN THE SYSTEM SHALL write the error the server raised as one line through the stderr writer and return exit code 1.
   Not testable: a second `lde run -- serve` on the same port prints the reason and exits 1.
@@ -61,18 +61,17 @@ Two facts about the pinned release that this spec depends on:
 ## Non-goals
 
 - No config for `bench`: `bench` reads no file and keeps ignoring `--config` under `02/FR-004`; `serve`'s file, its schema and its model paths arrive in `04`.
-- No engine: no model is loaded or opened beyond the existence check `04/FR-008` and `04/FR-009` make, the resolved model is not passed to `start`, and there is no completion route, no streaming, no request body decoding and no error logging beyond the JSON answer.
+- No engine: the model `08` maps is not read past `weights.load`, there is no completion route, no streaming, no request body decoding and no error logging beyond the JSON answer.
 - No hostname resolution, no TLS, no graceful shutdown and no signal handling: the process ends when it is killed.
 
 ## Tests
 
-- T-001 (FR-002): `builds a server for the given host and port`, proves `build({host = "127.0.0.1", port = 9090})` returns a server whose `config.port` is 9090 and whose `config.bind_host` is `127.0.0.1`, and whose routes answer `mock_request` with no socket open.
-- T-002 (FR-003): `health answers json`, proves a GET for `/health` answers status `OK`, content type `application/json`, and a body decoding to `{status = "ok"}`.
-- T-003 (FR-004): `unrouted paths answer json 404`, proves a GET for an unregistered path and a GET for an unregistered path ending in `/` each answer status `NotFound`, content type `application/json`, and a body decoding to `{error = {message = "not found", type = "not_found"}}`.
-- T-004 (FR-005): `wrong method answers json 404`, proves a POST for `/health` answers status `NotFound` with the same decoded body as T-003.
-- T-005 (FR-007): `serve starts with the given host and port`, proves `run({"serve", "--host", "127.0.0.1", "--port", "9090"}, out, err, stub, environment)` calls `stub` with `{host = "127.0.0.1", port = 9090}` and `err`, writes nothing through either writer and returns the stub's code, and that `run({"serve", "m"}, out, err, stub, environment)` passes `127.0.0.1` and `8080`, where both calls pass an `environment` naming temporary directories and a config file whose `models` holds the entry `m` with an existing `path`, the second call passing `m` as the model word while the first gives no word and resolves that entry under `04/FR-010`.
+- T-001 (FR-002): covered by `08/T-001`, `a gguf is mapped at build and a bad file is refused`, which builds over a one-tensor GGUF fixture with the name `m` and proves `config.port` 9090, `config.bind_host` `127.0.0.1` and answers through `mock_request` with no socket open.
+- T-003 (FR-004): `unrouted paths answer json 404`, proves on a server built over a one-tensor GGUF fixture with the name `m` that a GET for an unregistered path and a GET for an unregistered path ending in `/` each answer status `NotFound`, content type `application/json`, and a body decoding to `{error = {message = "not found", type = "not_found"}}`.
+- T-004 (FR-005): `wrong method answers json 404`, proves on a server built over a one-tensor GGUF fixture with the name `m` that a POST for `/health` answers status `NotFound` with the same decoded body as T-003.
+- T-005 (FR-007): `serve starts with the given host and port`, proves `run({"serve", "--host", "127.0.0.1", "--port", "9090"}, out, err, stub, environment)` calls `stub` with an endpoint whose `host` is `127.0.0.1` and whose `port` is 9090, and with `err`, writes nothing through either writer and returns the stub's code, and that `run({"serve", "m"}, out, err, stub, environment)` passes `127.0.0.1` and `8080`, where both calls pass an `environment` naming temporary directories and a config file whose `models` holds the entry `m` with an existing `path`, and the second call passes `m` as the model word, so the endpoint's `name` is `m`.
 - T-006 (FR-008): `bad host is a usage error`, proves `--host localhost`, `--host 127.0.0.999` and `--host 127.0.0.01` each return 1, write one stderr line and call no start function.
-- T-007 (FR-010): `route error answers json 500`, proves a registered route that calls `error("boom")` answers status `InternalServerError`, content type `application/json`, and a body decoding to `{error = {message = "internal error", type = "internal_error"}}`.
+- T-007 (FR-010): `route error answers json 500`, proves on a server built over a one-tensor GGUF fixture with the name `m` that a registered route calling `error("boom")` answers status `InternalServerError`, content type `application/json`, and a body decoding to `{error = {message = "internal error", type = "internal_error"}}`.
 
 ## Open questions
 

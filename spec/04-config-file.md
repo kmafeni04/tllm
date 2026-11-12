@@ -37,16 +37,16 @@ be duplicated and kept unique by a rule. `path` is the only per-model setting fo
 The model word is `MODEL` from `02/FR-003`. It resolves one way or the other: a word ending in the
 literal `.gguf` or holding a `/` is a file path, and anything else is a key of `models`. A key
 spelled like a path can therefore never be selected by name, which is left as it is: keys are for
-names, and nothing forbids the spelling. With no word given, a `models` holding one entry or
-several still counts as resolved, since nothing picks between entries until a model is loaded and
-the choice is not passed to the server.
+names, and nothing forbids the spelling. With no word given, a `models` holding one entry
+resolves to that entry, and one holding several is refused, because nothing picks between them.
 
-Nothing loads a model: the engine is still absent. An entry's `path` is checked for existence
+The model is opened in `build`, not here: `08` maps it there, after this spec has checked the
+path is a file. An entry's `path` is checked for existence here
 because a config that points nowhere should fail at the point a person wrote it, not at the point
-a request arrives, and that check is the only thing serve does with a model. The chosen model is
-not passed to the server, so the HTTP surface does not change. A first run that writes the starter
-file exits 1 because nothing is listening: the file was created, but the server did not start, so
-a script must not read that run as a success.
+a request arrives. The resolved model reaches `build` and `start` through the endpoint, and
+`/health` names it. A first run that writes the starter file exits 1 because nothing is
+listening: the file was created, but the server did not start, so a script must not read that run
+as a success.
 
 The starter file (`US-001`) and the path word (`US-004`) are here rather than in two specs: both
 decide the same question, whether a file exists and which model it names, and neither has a
@@ -92,14 +92,14 @@ resolution). The first fault found is the one line written.
 - FR-007 (US-003) IF `host` is set and is not four dot-separated decimal parts each from 0 to 255 with no leading zero on a part of more than one digit, or `port` is set and is not an integer from 1 to 65535, or `models` is set and is not a table whose every value is a table holding a `path` string and no key other than `path`, THEN THE SYSTEM SHALL write one line through the stderr writer naming what is at fault, `host` then `port` then `models` when several are, and the model name for a fault inside an entry, whether or not the same key was given as a flag, and return exit code 1 without calling a start function.
 - FR-008 (US-003) IF a model entry's `path` does not name an existing readable file, or names a directory, THEN THE SYSTEM SHALL write one line through the stderr writer naming the model and its path and return exit code 1 without calling a start function.
 - FR-009 (US-004) WHEN the model word ends in the literal `.gguf`, compared case-sensitively, or holds a `/`, THE SYSTEM SHALL treat it as a file path and start with it whether or not a config file was read, and IF that path does not name an existing readable file, or names a directory, THEN THE SYSTEM SHALL write one line through the stderr writer naming it and return exit code 1 without calling a start function.
-- FR-010 (US-003) IF no model can be resolved, because the model word is given, is not a path and is not a key of `models`, or because no word is given and `models` holds no entry, THEN THE SYSTEM SHALL write one line through the stderr writer naming the word when one was given and saying no model is configured when none was, and return exit code 1 without calling a start function.
+- FR-010 (US-003) IF no model can be resolved, because the model word is given, is not a path and is not a key of `models`, or because no word is given and `models` holds no entry, THEN THE SYSTEM SHALL write one line through the stderr writer naming the word when one was given and saying no model is configured when none was, and return exit code 1 without calling a start function, and IF no word is given and `models` holds more than one entry, THEN THE SYSTEM SHALL write one line through the stderr writer naming every configured model in ascending byte order and return exit code 1 without calling a start function.
 - FR-011 (US-002) WHEN a file is read, THE SYSTEM SHALL pass `start` the flag's value for each of `host` and `port` that was given, the file's value for each that was not given and the file sets, and `127.0.0.1` and `8080` for each that neither sets, then return the integer `start` returns.
 - FR-012 (US-001) THE SYSTEM SHALL declare `fs` at `^0.3.0` in `lde.json`, hold its declaration at `types/fs.d.tl` as `02` and `03` hold theirs, and take every existence check, the directory creation and the starter file's write through it, so that nothing in the config path needs `ffi` or `os.execute`.
   Not testable: `lde.json` and the imports are read in the tree, and `lde run check` exits 0.
 
 ## Non-goals
 
-- No engine: nothing is loaded or opened beyond the existence check, the resolved model is not passed to `build` or `start`, and `/health`, the 404 answer and the 500 answer are unchanged.
+- No engine: `serve` maps the model through `weights.load` under `08` and reads no weight, and the 404 answer and the 500 answer are unchanged.
 - No `bench`: it keeps ignoring `--config` and reads no file, as `02/FR-004` leaves it.
 - No per-model settings beyond `path`, no `TLLM_CONFIG` variable, no router behaviour (loading on request, a resident-model limit, idle sleep) and no `/v1/models` route.
 

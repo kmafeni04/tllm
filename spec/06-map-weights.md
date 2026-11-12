@@ -155,7 +155,7 @@ table is checked against the rows above.
 ## Non-goals
 
 - No dequantisation and no forward pass: a tensor's bytes stay as stored, no type is decoded to floats, and no model family, layer or plugin is named.
-- No serve and no bench: neither command loads a model, and the model `04` resolves still stops at its existence check.
+- No bench: `bench` loads no model, and `serve` maps the model through `weights.load` under `08`.
 - No copy and no shard: nothing is read into a buffer, nothing is cached, the mapping is read-only, and a model split across several files is loaded one file at a time.
 
 ## Tests
