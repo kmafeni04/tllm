@@ -16,6 +16,6 @@ These rules bind every spec in this folder.
 - Every declaration is `local`. A global is allowed only as a type definition for an external
   library.
 - Dependencies may come from anywhere: the lde registry, luarocks, git, or a local path.
-- Source is Teal only, run on LuaJIT through lde.
+- Source is Teal only, run on LuaJIT through lde, except the lde build script at the package root, which lde runs only when it is named `build.lua`.
 - The core stays small: a feature a plugin can carry does not belong in the core.
 - Every `.tl` file typechecks and is formatted.

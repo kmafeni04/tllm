@@ -6,6 +6,12 @@
 			"git": "https://codeberg.org/kmafeni04/ansicolor-lua.git",
 			"sha256": "6b7c75db84154e35c05f9bc9350922a2f091b479d26213c0d6bb6afc6f4f72df"
 		},
+		"argparse": {
+			"archive": "https://luarocks.org/argparse-0.7.2-1.src.rock"
+		},
+		"compat53": {
+			"archive": "https://luarocks.org/compat53-0.15.1-1.src.rock"
+		},
 		"fs": {
 			"branch": "master",
 			"commit": "1eb37f6c375066d84b7a308e288f07ff2cfdd906",
@@ -55,6 +61,9 @@
 			"git": "https://codeberg.org/kmafeni04/targs.git",
 			"sha256": "02cf23d7001cb317559cbe25d21a15195b72834c808f9cf99236898c4b7b0852"
 		},
+		"tl": {
+			"archive": "https://luarocks.org/tl-0.24.8-1.src.rock"
+		},
 		"tltp": {
 			"branch": "main",
 			"commit": "ecd39e4171937b488a92a173589d9fe407449366",
@@ -71,6 +80,6 @@
 			"sha256": "7816c24519cf959658d29cb9625777febb812422e6fd312884d131a44025630a"
 		}
 	},
-	"manifestHash": "c5bc61da2e01f992",
+	"manifestHash": "7ee65d5bc645c4a0",
 	"version": "1"
 }

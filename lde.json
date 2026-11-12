@@ -24,6 +24,9 @@
 	"devDependencies": {
 		"lde-test": {
 			"git": "https://github.com/lde-org/lde"
+		},
+		"tl": {
+			"luarocks": "tl"
 		}
 	}
 }
