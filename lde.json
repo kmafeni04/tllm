@@ -8,5 +8,14 @@
 		"test": "lde test --jobs 1",
 		"format": "lde x rocks:cerulean --indent 2 --line-length 80 $(find . -name '*.tl' -not -path './target/*')"
 	},
-	"dependencies": {}
+	"dependencies": {
+		"targs": {
+			"version": "^0.5.0"
+		}
+	},
+	"devDependencies": {
+		"lde-test": {
+			"git": "https://github.com/lde-org/lde"
+		}
+	}
 }

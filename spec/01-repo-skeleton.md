@@ -10,8 +10,8 @@ no formatter. Every later spec in this engine will claim something works, and no
 repository currently lets a person confirm or refute that claim.
 
 This spec makes the repository verifiable: one command to typecheck, one to format, a test command
-wired so that the first test needs no further setup, an entry point that loads the same way a user
-loads it, and the binding rules written down once so that contributors and agents stop guessing
+wired so that the first test needs no further setup, an entry point that starts the same CLI a user
+runs, and the binding rules written down once so that contributors and agents stop guessing
 them. The engine itself is not part of this spec; it arrives in later ones. Writing those rules
 down is documentation work rather than toolchain work, and it rides along because the rules are what
 every later spec is measured against.
@@ -27,7 +27,7 @@ in `lde.json` as package scripts.
 ## User stories
 
 - US-001 (P1) As the engine author, I want one command to typecheck and one to format the code, plus a test script ready for the first test, so that every later change is verified the same way.
-- US-002 (P1) As a contributor, I want the package to load by its published name, so that code that requires it gets the same entry point a user imports.
+- US-002 (P1) As a contributor, I want the package to start the CLI when it runs, so that the command line is the application's single entry point.
 - US-003 (P1) As a contributor, I want the project's binding rules written in the spec folder, so that what I build matches the project without asking.
 
 ## Functional requirements
@@ -46,15 +46,15 @@ in `lde.json` as package scripts.
   Not testable: `lde.json` holds the script, and `lde run format` formats every `.tl` file.
 - FR-007 (US-001) WHEN the format script runs on an already formatted tree, THE SYSTEM SHALL exit with status 0 and leave every `.tl` file in the project except those under `target/` byte-identical.
   Not testable: two `lde run format` runs leave `git diff` empty.
-- FR-008 (US-002) THE SYSTEM SHALL make `src/init.tl` return a table, so that `require("tllm")` yields that table.
-  Not testable: loading the package returns a table.
+- FR-008 (US-002) THE SYSTEM SHALL make `src/init.tl` the application entry point, not a module: it runs the CLI and exits with its code, returns no table, and `require("tllm")` is no longer a contract.
+  Not testable: `lde run -- serve` runs the CLI, and requiring the package runs the same entry point.
 - FR-009 (US-003) THE SYSTEM SHALL hold in `spec/README.md` a `## Constraints` section stating that declarations are local with globals only for external library type definitions, that dependency sources are unrestricted, that source is Teal on LuaJIT, that the core stays small with features carried by plugins, and that every Teal file typechecks and is formatted.
   Not testable: `spec/README.md` is the artifact; read the file.
 
 ## Non-goals
 
 - No engine behavior: no model reading, no kernels, no tokenizer, no sampling, no sessions, no storage tiering.
-- No plugin API and no core module beyond an entry point that returns an empty table.
+- No plugin API, and no core module beyond the CLI dispatcher and the entry point that runs it.
 - No per-file check or format invocation: both gates cover the whole project.
 - No type definitions for external libraries and no documentation generation.
 

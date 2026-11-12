@@ -1,3 +1,3 @@
 return {
-	include_dir = { "target" },
+	include_dir = { "target", "types" },
 }
