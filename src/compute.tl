@@ -37,6 +37,18 @@ ggml_context *ggml_init(struct ggml_init_params params);
 void ggml_free(ggml_context *ctx);
 ggml_tensor *ggml_new_tensor_2d(ggml_context *ctx, int type, int64_t ne0, int64_t ne1);
 ggml_tensor *ggml_new_tensor_4d(ggml_context *ctx, int type, int64_t ne0, int64_t ne1, int64_t ne2, int64_t ne3);
+ggml_tensor *ggml_new_tensor_3d(ggml_context *ctx, int type, int64_t ne0, int64_t ne1, int64_t ne2);
+ggml_tensor *ggml_view_2d(ggml_context *ctx, ggml_tensor *a, int64_t ne0, int64_t ne1, size_t nb1, size_t offset);
+ggml_tensor *ggml_reshape_2d(ggml_context *ctx, ggml_tensor *a, int64_t ne0, int64_t ne1);
+ggml_tensor *ggml_reshape_3d(ggml_context *ctx, ggml_tensor *a, int64_t ne0, int64_t ne1, int64_t ne2);
+ggml_tensor *ggml_repeat(ggml_context *ctx, ggml_tensor *a, ggml_tensor *b);
+ggml_tensor *ggml_concat(ggml_context *ctx, ggml_tensor *a, ggml_tensor *b, int dim);
+ggml_tensor *ggml_scale(ggml_context *ctx, ggml_tensor *a, float s);
+ggml_tensor *ggml_sub(ggml_context *ctx, ggml_tensor *a, ggml_tensor *b);
+ggml_tensor *ggml_silu(ggml_context *ctx, ggml_tensor *a);
+ggml_tensor *ggml_softplus(ggml_context *ctx, ggml_tensor *a);
+ggml_tensor *ggml_exp(ggml_context *ctx, ggml_tensor *a);
+ggml_tensor *ggml_ssm_conv(ggml_context *ctx, ggml_tensor *sx, ggml_tensor *c);
 ggml_tensor *ggml_mul_mat(ggml_context *ctx, ggml_tensor *a, ggml_tensor *b);
 ggml_tensor *ggml_get_rows(ggml_context *ctx, ggml_tensor *a, ggml_tensor *b);
 ggml_tensor *ggml_rms_norm(ggml_context *ctx, ggml_tensor *a, float eps);
@@ -75,6 +87,24 @@ local record Library
   ggml_new_tensor_4d: function(
     ffi.CData, integer, integer, integer, integer, integer
   ): ffi.CData
+  ggml_new_tensor_3d: function(
+    ffi.CData, integer, integer, integer, integer
+  ): ffi.CData
+  ggml_view_2d: function(
+    ffi.CData, ffi.CData, integer, integer, integer, integer
+  ): ffi.CData
+  ggml_reshape_2d: function(ffi.CData, ffi.CData, integer, integer): ffi.CData
+  ggml_reshape_3d: function(
+    ffi.CData, ffi.CData, integer, integer, integer
+  ): ffi.CData
+  ggml_repeat: function(ffi.CData, ffi.CData, ffi.CData): ffi.CData
+  ggml_concat: function(ffi.CData, ffi.CData, ffi.CData, integer): ffi.CData
+  ggml_scale: function(ffi.CData, ffi.CData, number): ffi.CData
+  ggml_sub: function(ffi.CData, ffi.CData, ffi.CData): ffi.CData
+  ggml_silu: function(ffi.CData, ffi.CData): ffi.CData
+  ggml_softplus: function(ffi.CData, ffi.CData): ffi.CData
+  ggml_exp: function(ffi.CData, ffi.CData): ffi.CData
+  ggml_ssm_conv: function(ffi.CData, ffi.CData, ffi.CData): ffi.CData
   ggml_mul_mat: function(ffi.CData, ffi.CData, ffi.CData): ffi.CData
   ggml_get_rows: function(ffi.CData, ffi.CData, ffi.CData): ffi.CData
   ggml_rms_norm: function(ffi.CData, ffi.CData, number): ffi.CData
@@ -148,6 +178,11 @@ local record compute
     eps: number
     positions: integer
     experts_used: integer
+    linear_key_heads: integer | nil
+    linear_key_length: integer | nil
+    linear_value_heads: integer | nil
+    linear_value_length: integer | nil
+    linear_conv_kernel: integer | nil
   end
 
   record Attention
@@ -161,6 +196,12 @@ local record compute
     scores: function(FeedForward, {number}): {number} | nil, string | nil
   end
 
+  record LinearAttention
+    block: function(
+      LinearAttention, {number}, string, integer
+    ): {number} | nil, string | nil
+  end
+
   load: function(path?: string): Backend | nil, string | nil
   attach: function(Backend, weights.Handle): Maths | nil, string | nil
   attend: function(
@@ -169,6 +210,9 @@ local record compute
   feed_forward: function(
     Backend, weights.Handle, Geometry
   ): FeedForward | nil, string | nil
+  linear_attention: function(
+    Backend, weights.Handle, Geometry
+  ): LinearAttention | nil, string | nil
   top_token: function(
     Attention, FeedForward, {number}, {string}, integer
   ): integer | nil, string | nil
@@ -201,6 +245,27 @@ end
 local record FeedForwardState
   mapped: Mapped
   geometry: compute.Geometry
+end
+
+local record LinearShape
+  key_heads: integer
+  key_length: integer
+  value_heads: integer
+  value_length: integer
+  conv_kernel: integer
+end
+
+local record LinearKept
+  history: ffi.CData
+  state: ffi.CData
+  count: integer
+end
+
+local record LinearState
+  mapped: Mapped
+  shape: LinearShape
+  eps: number
+  prefixes: {string: LinearKept}
 end
 
 local record BlockTensors
@@ -264,6 +329,32 @@ local SCORE_NAMES: {string} = {"output_norm.weight", "output.weight"}
 local SCORE_TYPES: {string: {string: boolean}} = {
   ["output_norm.weight"] = F32_ONLY,
   ["output.weight"] = WEIGHTS,
+}
+
+local LINEAR_NAMES: {string} = {
+  "attn_norm.weight",
+  "attn_qkv.weight",
+  "attn_gate.weight",
+  "ssm_beta.weight",
+  "ssm_alpha.weight",
+  "ssm_conv1d.weight",
+  "ssm_a",
+  "ssm_dt.bias",
+  "ssm_norm.weight",
+  "ssm_out.weight",
+}
+
+local LINEAR_TYPES: {string: {string: boolean}} = {
+  ["attn_norm.weight"] = F32_ONLY,
+  ["attn_qkv.weight"] = WEIGHTS,
+  ["attn_gate.weight"] = WEIGHTS,
+  ["ssm_beta.weight"] = F32_ONLY,
+  ["ssm_alpha.weight"] = F32_ONLY,
+  ["ssm_conv1d.weight"] = F32_ONLY,
+  ["ssm_a"] = F32_ONLY,
+  ["ssm_dt.bias"] = F32_ONLY,
+  ["ssm_norm.weight"] = F32_ONLY,
+  ["ssm_out.weight"] = WEIGHTS,
 }
 
 -- the library each loaded backend reads, so attach needs no field the
@@ -1631,6 +1722,468 @@ local function feed_forward_scores(
   return values
 end
 
+local function linear_shape_of(
+  geometry: compute.Geometry
+): LinearShape | nil, string | nil
+  local key_heads = geometry.linear_key_heads
+  if key_heads is nil then
+    return nil, "linear_attention: geometry has no linear_key_heads"
+  end
+  if key_heads < 1 then
+    return nil, "linear_attention: linear_key_heads " .. key_heads
+  end
+  local key_length = geometry.linear_key_length
+  if key_length is nil then
+    return nil, "linear_attention: geometry has no linear_key_length"
+  end
+  if key_length < 1 then
+    return nil, "linear_attention: linear_key_length " .. key_length
+  end
+  local value_heads = geometry.linear_value_heads
+  if value_heads is nil then
+    return nil, "linear_attention: geometry has no linear_value_heads"
+  end
+  if value_heads < 1 then
+    return nil, "linear_attention: linear_value_heads " .. value_heads
+  end
+  if value_heads % key_heads ~= 0 then
+    return nil,
+      "linear_attention: linear_value_heads "
+        .. value_heads
+        .. " of "
+        .. key_heads
+        .. " linear_key_heads"
+  end
+  local value_length = geometry.linear_value_length
+  if value_length is nil then
+    return nil, "linear_attention: geometry has no linear_value_length"
+  end
+  if value_length < 1 then
+    return nil, "linear_attention: linear_value_length " .. value_length
+  end
+  local conv_kernel = geometry.linear_conv_kernel
+  if conv_kernel is nil then
+    return nil, "linear_attention: geometry has no linear_conv_kernel"
+  end
+  if conv_kernel < 1 then
+    return nil, "linear_attention: linear_conv_kernel " .. conv_kernel
+  end
+  if geometry.eps < 0 then
+    return nil, "linear_attention: eps " .. geometry.eps
+  end
+  return {
+    key_heads = key_heads,
+    key_length = key_length,
+    value_heads = value_heads,
+    value_length = value_length,
+    conv_kernel = conv_kernel,
+  }
+end
+
+local function linear_shape_refusal(
+  mapped: Mapped, prefix: string, count: integer, shape: LinearShape
+): string | nil
+  local head_rows = shape.key_heads * shape.key_length
+  local rows = 2 * head_rows + shape.value_heads * shape.value_length
+  local channels = shape.value_heads * shape.value_length
+
+  local function dims_of(suffix: string): {integer}
+    return (mapped.tensors[prefix .. suffix] as Tensor).dims
+  end
+  local function name_of(suffix: string): string
+    return prefix .. suffix
+  end
+
+  local norm = name_of("attn_norm.weight")
+  local norm_dims = dims_of("attn_norm.weight")
+  local refusal = count_refusal(norm, #norm_dims, 1, "dimensions")
+    or count_refusal(norm, (norm_dims[1] or 0) as integer, count, "numbers")
+  if refusal then
+    return refusal
+  end
+
+  local qkv = name_of("attn_qkv.weight")
+  local qkv_dims = dims_of("attn_qkv.weight")
+  refusal = count_refusal(qkv, #qkv_dims, 2, "dimensions")
+    or count_refusal(qkv, (qkv_dims[1] or 0) as integer, count, "numbers")
+    or count_refusal(qkv, (qkv_dims[2] or 0) as integer, rows, "rows")
+  if refusal then
+    return refusal
+  end
+
+  local gate = name_of("attn_gate.weight")
+  local gate_dims = dims_of("attn_gate.weight")
+  refusal = count_refusal(gate, #gate_dims, 2, "dimensions")
+    or count_refusal(gate, (gate_dims[1] or 0) as integer, count, "numbers")
+    or count_refusal(gate, (gate_dims[2] or 0) as integer, channels, "rows")
+  if refusal then
+    return refusal
+  end
+
+  local beta = name_of("ssm_beta.weight")
+  local beta_dims = dims_of("ssm_beta.weight")
+  refusal = count_refusal(beta, #beta_dims, 2, "dimensions")
+    or count_refusal(beta, (beta_dims[1] or 0) as integer, count, "numbers")
+    or count_refusal(
+      beta, (beta_dims[2] or 0) as integer, shape.value_heads, "rows"
+    )
+  if refusal then
+    return refusal
+  end
+
+  local alpha = name_of("ssm_alpha.weight")
+  local alpha_dims = dims_of("ssm_alpha.weight")
+  refusal = count_refusal(alpha, #alpha_dims, 2, "dimensions")
+    or count_refusal(alpha, (alpha_dims[1] or 0) as integer, count, "numbers")
+    or count_refusal(
+      alpha, (alpha_dims[2] or 0) as integer, shape.value_heads, "rows"
+    )
+  if refusal then
+    return refusal
+  end
+
+  local conv = name_of("ssm_conv1d.weight")
+  local conv_dims = dims_of("ssm_conv1d.weight")
+  refusal = count_refusal(conv, #conv_dims, 2, "dimensions")
+    or count_refusal(
+      conv, (conv_dims[1] or 0) as integer, shape.conv_kernel, "numbers per row"
+    ) or count_refusal(conv, (conv_dims[2] or 0) as integer, rows, "rows")
+  if refusal then
+    return refusal
+  end
+
+  local a = name_of("ssm_a")
+  local a_dims = dims_of("ssm_a")
+  refusal = count_refusal(a, #a_dims, 1, "dimensions")
+    or count_refusal(
+      a, (a_dims[1] or 0) as integer, shape.value_heads, "numbers"
+    )
+  if refusal then
+    return refusal
+  end
+
+  local dt = name_of("ssm_dt.bias")
+  local dt_dims = dims_of("ssm_dt.bias")
+  refusal = count_refusal(dt, #dt_dims, 1, "dimensions")
+    or count_refusal(
+      dt, (dt_dims[1] or 0) as integer, shape.value_heads, "numbers"
+    )
+  if refusal then
+    return refusal
+  end
+
+  local ssm_norm = name_of("ssm_norm.weight")
+  local ssm_norm_dims = dims_of("ssm_norm.weight")
+  refusal = count_refusal(ssm_norm, #ssm_norm_dims, 1, "dimensions")
+    or count_refusal(
+      ssm_norm,
+      (ssm_norm_dims[1] or 0) as integer,
+      shape.value_length,
+      "numbers"
+    )
+  if refusal then
+    return refusal
+  end
+
+  local out = name_of("ssm_out.weight")
+  local out_dims = dims_of("ssm_out.weight")
+  refusal = count_refusal(out, #out_dims, 2, "dimensions")
+    or count_refusal(
+      out, (out_dims[1] or 0) as integer, channels, "numbers per row"
+    ) or count_refusal(out, (out_dims[2] or 0) as integer, count, "rows")
+  if refusal then
+    return refusal
+  end
+  return nil
+end
+
+local function linear_prefix_of(
+  state: LinearState, prefix: string
+): LinearKept | nil, string | nil
+  local shape = state.shape
+  local head_rows = shape.key_heads * shape.key_length
+  local rows = 2 * head_rows + shape.value_heads * shape.value_length
+  -- one float stands in for an empty history, so the field never holds nil
+  local history_floats = (shape.conv_kernel - 1) * rows
+  if history_floats < 1 then
+    history_floats = 1
+  end
+  local state_floats = shape.key_length * shape.value_length * shape.value_heads
+
+  local made_history, history = pcall(ffi.new, "float[?]", history_floats)
+  if not made_history then
+    return nil,
+      "block: no history of " .. (history_floats * F32_BYTES) .. " bytes"
+  end
+  local made_state, buffer = pcall(ffi.new, "float[?]", state_floats)
+  if not made_state then
+    return nil, "block: no state of " .. (state_floats * F32_BYTES) .. " bytes"
+  end
+
+  local kept: LinearKept = {
+    history = history as ffi.CData,
+    state = buffer as ffi.CData,
+    count = 0,
+  } as LinearKept
+  state.prefixes[prefix] = kept
+  return kept
+end
+
+local function linear_press(
+  state: LinearState, hidden: {number}, prefix: string, position: integer
+): {number} | nil, string | nil
+  local mapped = state.mapped
+  local shape = state.shape
+  local fault = first_fault(mapped, "block", prefix, LINEAR_NAMES, LINEAR_TYPES)
+  if fault then
+    return nil, fault
+  end
+  fault = linear_shape_refusal(mapped, prefix, #hidden, shape)
+  if fault then
+    return nil, fault
+  end
+
+  local kept = state.prefixes[prefix]
+  local expected = 0
+  if not (kept is nil) then
+    expected = kept.count
+  end
+  if position < 0 then
+    return nil, "block: prefix " .. prefix .. " position " .. position
+  end
+  if position ~= expected then
+    return nil,
+      "block: prefix "
+        .. prefix
+        .. " position "
+        .. position
+        .. ", the next is "
+        .. expected
+  end
+  if kept is nil then
+    local made, failure = linear_prefix_of(state, prefix)
+    if not (made is LinearKept) then
+      return nil, failure
+    end
+    kept = made
+  end
+
+  local lib = mapped.lib
+  local descriptors = mapped.descriptors
+  local key_heads = shape.key_heads
+  local key_length = shape.key_length
+  local value_heads = shape.value_heads
+  local value_length = shape.value_length
+  local kernel = shape.conv_kernel
+  local rows = 2 * key_heads * key_length + value_heads * value_length
+  local channels = value_heads * value_length
+  local count = #hidden
+  local eps = state.eps
+  local state_floats = key_length * value_length * value_heads
+  local head_bytes = key_length * F32_BYTES
+  local value_head_bytes = value_length * F32_BYTES
+  local head_scale = 1 / math.sqrt(key_length)
+
+  -- four copies of the state, the convolution window and the heads' vectors,
+  -- each with room to spare
+  local vector_floats = count + kernel * rows + 2 * channels
+  local head_floats = key_length * value_heads
+  local data_floats = 4 * state_floats + 8 * vector_floats + 8 * head_floats
+  local arena_size = arena_for(lib, 96, data_floats * F32_BYTES)
+  local arena = libc.aligned_alloc(ARENA_ALIGN, arena_size)
+  if arena is nil then
+    return nil, "block: no context of " .. arena_size .. " bytes"
+  end
+
+  local params = arena_params(arena_size)
+  params.mem_buffer = arena
+  local ctx = lib.ggml_init(params)
+  local graph = lib.ggml_new_graph(ctx)
+
+  local normalised = lib.ggml_mul(
+    ctx,
+    lib.ggml_rms_norm(ctx, vector_of(lib, ctx, hidden), eps),
+    descriptors[prefix .. "attn_norm.weight"]
+  )
+  local projected = lib.ggml_mul_mat(
+    ctx, descriptors[prefix .. "attn_qkv.weight"], normalised
+  )
+  local gates = lib.ggml_mul_mat(
+    ctx, descriptors[prefix .. "attn_gate.weight"], normalised
+  )
+  local betas = lib.ggml_sigmoid(
+    ctx,
+    lib.ggml_mul_mat(ctx, descriptors[prefix .. "ssm_beta.weight"], normalised)
+  )
+  local decay = lib.ggml_exp(
+    ctx,
+    lib.ggml_mul(
+      ctx,
+      lib.ggml_softplus(
+        ctx,
+        lib.ggml_add(
+          ctx,
+          lib.ggml_mul_mat(
+            ctx, descriptors[prefix .. "ssm_alpha.weight"], normalised
+          ),
+          descriptors[prefix .. "ssm_dt.bias"]
+        )
+      ),
+      descriptors[prefix .. "ssm_a"]
+    )
+  )
+
+  local current = lib.ggml_reshape_3d(ctx, projected, 1, rows, 1)
+  local window = current
+  if kernel > 1 then
+    local past = lib.ggml_new_tensor_3d(ctx, GGML_TYPE_F32, kernel - 1, rows, 1)
+    local past_view = past as TensorView
+    past_view.data = kept.history
+    window = lib.ggml_concat(ctx, past, current, 0)
+  end
+  local convolved = lib.ggml_silu(
+    ctx,
+    lib.ggml_ssm_conv(ctx, window, descriptors[prefix .. "ssm_conv1d.weight"])
+  )
+
+  local queries = lib.ggml_scale(
+    ctx,
+    lib.ggml_rms_norm(
+      ctx,
+      lib.ggml_view_2d(ctx, convolved, key_length, key_heads, head_bytes, 0),
+      eps / key_length
+    ),
+    head_scale
+  )
+  local reads = lib.ggml_scale(
+    ctx,
+    lib.ggml_rms_norm(
+      ctx,
+      lib.ggml_view_2d(
+        ctx,
+        convolved,
+        key_length,
+        key_heads,
+        head_bytes,
+        key_heads * head_bytes
+      ),
+      eps / key_length
+    ),
+    head_scale
+  )
+  local values = lib.ggml_reshape_3d(
+    ctx,
+    lib.ggml_view_2d(
+      ctx,
+      convolved,
+      value_length,
+      value_heads,
+      value_head_bytes,
+      2 * key_heads * head_bytes
+    ),
+    value_length,
+    1,
+    value_heads
+  )
+
+  local shapes = lib.ggml_new_tensor_2d(
+    ctx, GGML_TYPE_F32, key_length, value_heads
+  )
+  local head_queries = lib.ggml_reshape_3d(
+    ctx, lib.ggml_repeat(ctx, queries, shapes), key_length, 1, value_heads
+  )
+  local head_reads = lib.ggml_reshape_3d(
+    ctx, lib.ggml_repeat(ctx, reads, shapes), key_length, 1, value_heads
+  )
+
+  local stored_state = lib.ggml_new_tensor_3d(
+    ctx, GGML_TYPE_F32, key_length, value_length, value_heads
+  )
+  local state_view = stored_state as TensorView
+  state_view.data = kept.state
+  local decayed = lib.ggml_mul(
+    ctx, stored_state, lib.ggml_reshape_3d(ctx, decay, 1, 1, value_heads)
+  )
+  local corrections = lib.ggml_mul(
+    ctx,
+    lib.ggml_sub(ctx, values, lib.ggml_mul_mat(ctx, decayed, head_reads)),
+    lib.ggml_reshape_3d(ctx, betas, 1, 1, value_heads)
+  )
+  local updated = lib.ggml_add(
+    ctx,
+    decayed,
+    lib.ggml_mul_mat(
+      ctx,
+      lib.ggml_reshape_3d(ctx, head_reads, 1, key_length, value_heads),
+      lib.ggml_reshape_3d(ctx, corrections, 1, value_length, value_heads)
+    )
+  )
+  local scanned = lib.ggml_scale(
+    ctx, lib.ggml_mul_mat(ctx, updated, head_queries), head_scale
+  )
+  local gated = lib.ggml_mul(
+    ctx,
+    lib.ggml_mul(
+      ctx,
+      lib.ggml_rms_norm(ctx, scanned, eps),
+      descriptors[prefix .. "ssm_norm.weight"]
+    ),
+    lib.ggml_silu(
+      ctx, lib.ggml_reshape_3d(ctx, gates, value_length, 1, value_heads)
+    )
+  )
+  local output = lib.ggml_mul_mat(
+    ctx,
+    descriptors[prefix .. "ssm_out.weight"],
+    lib.ggml_reshape_2d(ctx, gated, channels, 1)
+  )
+
+  lib.ggml_build_forward_expand(graph, output)
+  lib.ggml_build_forward_expand(graph, updated)
+
+  local backend = lib.ggml_backend_cpu_init()
+  local status: integer = GGML_STATUS_SUCCESS
+  if not (backend is nil) then
+    status = lib.ggml_backend_graph_compute(backend, graph)
+    lib.ggml_backend_free(backend)
+  end
+
+  local numbers: {number} = {}
+  if not (backend is nil) and status == GGML_STATUS_SUCCESS then
+    numbers = floats_of(lib, output, count)
+
+    local next_state = ffi.cast("float*", lib.ggml_get_data(updated)) as Floats
+    local kept_state = ffi.cast("float*", kept.state) as Floats
+    for cell = 0, state_floats - 1 do
+      kept_state[cell] = next_state[cell]
+    end
+    if kernel > 1 then
+      -- the past tensor reads a channel's taps consecutively, oldest first
+      local slots = kernel - 1
+      local history = ffi.cast("float*", kept.history) as Floats
+      local fresh = ffi.cast("float*", lib.ggml_get_data(projected)) as Floats
+      for channel = 0, rows - 1 do
+        for slot = 0, slots - 2 do
+          history[channel * slots + slot] = history[channel * slots + slot + 1]
+        end
+        history[channel * slots + slots - 1] = fresh[channel]
+      end
+    end
+    kept.count = position + 1
+  end
+
+  lib.ggml_free(ctx)
+  libc.free(arena)
+
+  if backend is nil then
+    return nil, "block: no backend"
+  end
+  if status ~= GGML_STATUS_SUCCESS then
+    return nil, "block: compute returned " .. status
+  end
+  return numbers
+end
+
 function compute.load(path?: string): compute.Backend | nil, string | nil
   local location = path or DEFAULT_PATH
   local opened, lib = pcall(load_library, location)
@@ -1783,6 +2336,41 @@ function compute.feed_forward(
     return feed_forward_scores(state, hidden)
   end
   return feed_forward
+end
+
+function compute.linear_attention(
+  backend: compute.Backend, handle: weights.Handle, geometry: compute.Geometry
+): compute.LinearAttention | nil, string | nil
+  local lib = LIBRARIES[backend]
+  if lib is nil then
+    return nil, "linear_attention: backend was not loaded by compute.load"
+  end
+  local shape, geometry_line = linear_shape_of(geometry)
+  if not (shape is LinearShape) then
+    return nil, geometry_line
+  end
+
+  local mapped, map_failure = mapped_of(lib, handle, "linear_attention")
+  if mapped is nil then
+    return nil, map_failure
+  end
+
+  local state: LinearState = {
+    mapped = mapped,
+    shape = shape,
+    eps = geometry.eps,
+    prefixes = {},
+  }
+  local linear = {} as compute.LinearAttention
+  linear.block = function(
+    _: compute.LinearAttention,
+    hidden: {number},
+    prefix: string,
+    position: integer
+  ): {number} | nil, string | nil
+    return linear_press(state, hidden, prefix, position)
+  end
+  return linear
 end
 
 local function summed(left: {number}, right: {number}): {number}

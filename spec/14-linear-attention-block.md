@@ -1,6 +1,6 @@
 # 14: The linear-attention block
 
-**Status**: pending   **Depends on**: 13
+**Status**: done   **Depends on**: 13
 
 ## Problem & context
 
@@ -47,6 +47,13 @@ the key head whose index is its own modulo the key head count (`i21 % args.ne01`
 that kernel). The result is normalised per value head with `ssm_norm` as gain, gated by
 silu of the gate numbers, and projected by `ssm_out`.
 
+That fused op requires the key and value lengths to be equal and scales its scan by the
+value length, so the block does not call it: it composes the same steps out of ggml's
+matrix product, scale, subtract, add, `ggml_softplus`, `ggml_ssm_conv`, `ggml_rms_norm`,
+`ggml_silu` and `ggml_exp`, which keeps a key length and a value length that differ
+apart and scales by the key length as FR-007 says. Every number the block returns is
+still ggml's own arithmetic over the mapped weights.
+
 This spec adds `compute.linear_attention(backend, handle, geometry)` and one record,
 `LinearAttention`, with one operation, `block`. No existing requirement or fixture
 changes: the five numbers this needs are added to `12`'s `Geometry` as optional fields,
@@ -80,11 +87,11 @@ local record compute
     eps: number
     positions: integer
     experts_used: integer
-    linear_key_heads?: integer
-    linear_key_length?: integer
-    linear_value_heads?: integer
-    linear_value_length?: integer
-    linear_conv_kernel?: integer
+    linear_key_heads: integer | nil
+    linear_key_length: integer | nil
+    linear_value_heads: integer | nil
+    linear_value_length: integer | nil
+    linear_conv_kernel: integer | nil
   end
 
   record LinearAttention
@@ -175,8 +182,8 @@ end
   convolution, decay, state update, norms, gating and projection are ggml's arithmetic
   and not a second implementation of them.
   Not testable: the fixtures' heads hold two numbers each, and over so few numbers any
-  accumulation order returns the same numbers to within 1e-5, so what proves this is a
-  reader finding the ggml calls the block makes.
+  accumulation order returns the same numbers to within the tests' tolerance, so what
+  proves this is a reader finding the ggml calls the block makes.
 - FR-010 (US-002) WHEN a block call is accepted, THE SYSTEM SHALL keep under `prefix`
   the projected numbers in channel `c` at the positions
   `position - linear_conv_kernel + 2` to `position` as that prefix's convolution
@@ -262,7 +269,7 @@ end
   at base 10000, `eps` 0, 4 positions, 1 expert used, 2 linear key heads of 2 numbers, 2
   linear value heads of 2 numbers and a convolution kernel of 2, that
   `compute.linear_attention(backend, handle, geometry)` returns nil as its second value,
-  that `block({1,1}, "blk.0.", 0)` returns `{100, 241.4213562}` to within 1e-5, the 100
+  that `block({1,1}, "blk.0.", 0)` returns `{100, 241.4213562}` to a relative 1e-5, the 100
   wide gate saturating `11/FR-008`'s silu at 100 times the gated norm, the 100 wide
   values saturating silu at their convolved numbers, and the second output adding the
   second head's gated 141.4213562 to the first head's 100, that a second handle's
@@ -272,7 +279,7 @@ end
   1e-5, the epsilon reaching the hidden norm, both L2 norms and the gated norm.
 - T-002 (FR-004, FR-005, FR-007, FR-010): `a second token reads the conv history and
   the state`, proves on T-001's fixture that after `block({1,1}, "blk.0.", 0)`,
-  `block({1,0}, "blk.0.", 1)` returns `{193.2903421, 251.3696764}` to within 1e-5, the
+  `block({1,0}, "blk.0.", 1)` returns `{193.2903421, 251.3696764}` to a relative 1e-5, the
   second token's projected numbers
   `{2.8284271,0,0,1.4142136,5.6568542,0,0,1.4142136,141.4213562,0,0,0}` and the first
   token's `{2,0,0,4,4,0,0,6,100,100,0,200}` under the `{0.5, 1}` taps and silued to
@@ -314,9 +321,9 @@ end
   `attn_gate.weight` and position 2 the line holds `attn_gate.weight`; and that a
   refused call leaves the history and state where they were: on a fresh handle, after
   `block({1,1}, "blk.0.", 1)` is refused, `block({1,1}, "blk.0.", 0)` returns
-  `{100, 241.4213562}` to within 1e-5, and after that, `block({1,1}, "blk.0.", 0)` is
-  refused and `block({1,0}, "blk.0.", 1)` returns `{193.2903421, 251.3696764}` to within
-  1e-5.
+  `{100, 241.4213562}` to a relative 1e-5, and after that, `block({1,1}, "blk.0.", 0)` is
+  refused and `block({1,0}, "blk.0.", 1)` returns `{193.2903421, 251.3696764}` to a
+  relative 1e-5.
 - T-004 (FR-006, FR-007, FR-008): `each value head reads the key head it belongs to`,
   proves with a second fixture holding, under `blk.0.`, `attn_norm.weight` 2 numbers of
   1; `attn_qkv.weight` 2 numbers per row over 16 rows, rows 1 and 2 `{1,0}` and `{0,0}`,
@@ -331,10 +338,20 @@ end
   geometry of 1 head, 1 key/value head, heads of 2 numbers, rope over 2 numbers at base
   10000, `eps` 0, 4 positions, 1 expert used, 2 linear key heads of 2 numbers, 4 linear
   value heads of 2 numbers and a convolution kernel of 1, that
-  `block({1,1}, "blk.0.", 0)` returns `{367.9124626, 304.6669094}` to within 1e-5, that
-  `block({1,2}, "blk.0.", 1)` on that handle returns `{209.3171647, 219.4780173}` to
-  within 1e-5, and that at position 1 value head `h` reading key head `floor(h / 2)`
+  `block({1,1}, "blk.0.", 0)` returns `{367.9124626, 304.6669094}` to a relative 1e-5, that
+  `block({1,2}, "blk.0.", 1)` on that handle returns `{209.3171647, 219.4780173}` to a
+  relative 1e-5, and that at position 1 value head `h` reading key head `floor(h / 2)`
   gives `{206.6115929, 221.2354228}` instead of what `h % linear_key_heads` gives.
+- T-005 (FR-005, FR-010): `a three-tap convolution reads its history in order`, proves
+  with T-001's fixture whose `ssm_conv1d.weight` holds 3 numbers per row over 12 rows,
+  each `{7, 11, 5}`, under `blk.0.`, and a geometry of 1 head, 1 key/value head, heads of
+  2 numbers, rope over 2 numbers at base 10000, `eps` 0, 4 positions, 1 expert used, 2
+  linear key heads of 2 numbers, 2 linear value heads of 2 numbers and a convolution
+  kernel of 3, that `block({1,1}, "blk.0.", 0)` returns `{100, 241.4213562}` to a
+  relative 1e-5 and that `block({1,0}, "blk.0.", 1)` on that handle returns
+  `{170.7414208, 304.1506948}` to a relative 1e-5, the second token's window holding a
+  zero at tap zero, the first token's projected numbers at tap one and its own at tap two,
+  which a history kept in the wrong order does not give.
 
 ## Open questions
 
