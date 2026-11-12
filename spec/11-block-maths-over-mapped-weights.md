@@ -1,6 +1,6 @@
 # 11: Do a block's maths over the mapped weights
 
-**Status**: pending   **Depends on**: 06, 07
+**Status**: done   **Depends on**: 06, 07
 
 ## Problem & context
 
@@ -13,12 +13,14 @@ head with rope, softmax a list of scores, and gate one list with another. None o
 This spec adds `compute.attach(backend, handle)` and one record, `Maths`, with eight operations.
 `attach` builds one ggml context whose tensors point at the weights handle's mapping, so attaching a
 23 GB model allocates tensor descriptors and no weight bytes. Each operation creates its own ggml
-context, builds its inputs and result there with the named weight tensor as `src0`, computes on the
-CPU backend, reads the result back as a Teal list, and frees that context, leaving the attached
-descriptors untouched. No dequantiser is written and no graph is exposed: the next spec composes
-these operations into one token through the layers. The eight belong in the core because the next
-spec composes them and ggml is already the core's maths; a plugin would need this contract in the
-core before it could be written.
+context, builds its inputs and result there with the named weight tensor as an input (for a
+three-dimensional tensor, a descriptor over the matrix the index selects), computes on the CPU
+backend, reads the result back as a Teal list, and frees that context, leaving the attached
+descriptors untouched. `load` keeps the library it opened under the backend it returns, so `attach`
+reaches the same library without a field the published record does not hold. No dequantiser is
+written and no graph is exposed: the next spec composes these operations into one token through the
+layers. The eight belong in the core because the next spec composes them and ggml is already the
+core's maths; a plugin would need this contract in the core before it could be written.
 
 The local Qwen3.6 file names the shapes this must carry: 41 blocks, 2048 embedding numbers, a fused
 8192 wide attention projection, 256 experts whose gate and up tensors are 3-D with 256 matrices of
@@ -44,8 +46,10 @@ needs; positions that differ per section are a later spec, and the next spec's r
 model is what confirms the equivalence end to end.
 
 Refusals keep the shape `06` and `07` use: nil and one line, so a mistake in the next spec's wiring
-is a return value and the process stays up. `attach` allocates a small arena for tensor descriptors;
-the only failing path is that allocation, which the suite cannot make fail.
+is a return value and the process stays up. `attach` allocates a small arena for tensor descriptors,
+and it refuses a backend `compute.load` did not return, because the library it needs is kept under
+that handle. Only the arena failure is not in `## Tests`, because making that allocation fail needs
+a memory limit the suite cannot set.
 
 ```teal
 local weights = require("tllm.weights")
@@ -61,7 +65,7 @@ local record compute
 
   record Maths
     matvec: function(
-      Maths, string, {number}, integer?
+      Maths, string, {number}, index?: integer
     ): {number} | nil, string | nil
     row: function(Maths, string, integer): {number} | nil, string | nil
     norm: function(
@@ -93,9 +97,9 @@ end
 
 ## Functional requirements
 
-- FR-001 (US-001) WHEN `compute.attach(backend, handle)` is called, THE SYSTEM SHALL return a maths
-  handle whose operations read the tensors of that weights handle by name, and nil as its second
-  value.
+- FR-001 (US-001) WHEN `compute.attach(backend, handle)` is called with a `backend` that
+  `compute.load` returned, THE SYSTEM SHALL return a maths handle whose operations read the tensors
+  of that weights handle by name, and nil as its second value.
 - FR-002 (US-001) WHEN `maths:matvec(name, vector, index)` is called with a vector whose length is
   the named tensor's first dimension, THE SYSTEM SHALL return one number per row of the matrix that
   tensor names, each the sum over the row's positions of the row's decoded number times the
@@ -156,6 +160,8 @@ end
 - FR-014 (US-003) IF more than one refusal applies to a call, THEN THE SYSTEM SHALL report a tensor
   the handle does not hold before a tensor of a type the operation does not read, and both before a
   shape or number that does not fit.
+- FR-015 (US-003) IF `compute.attach` is given a backend that `compute.load` did not return, THEN THE
+  SYSTEM SHALL return nil and one line naming `attach`.
 
 ## Non-goals
 
@@ -211,6 +217,8 @@ end
   `rope({1,2,3,4}, -1, 4, 10000)`, `rope({1,2,3,4}, 0, 0, 10000)` and
   `rope({1,2,3,4}, 0, 4, 0)` returns nil and one line with no newline, and that the line
   `add({1}, {1,2})` returns holds `add`, `1` and `2`.
+- T-005 (FR-015): `a backend compute.load did not return is refused`, proves that
+  `compute.attach` given a backend built by hand returns nil and one line holding `attach`.
 
 ## Open questions
 
