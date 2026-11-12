@@ -208,3 +208,169 @@ test.it(
     test.includes(raw_failure as string, "3")
   end
 )
+
+local function unit_kinds(count: integer): {integer}
+  local kinds: {integer} = {}
+  for index = 1, count do
+    kinds[index] = 1
+  end
+  return kinds
+end
+
+local function encoding_file(
+  pre: string | nil, pieces: {string}, extra: {string}
+): string
+  local parts: {string} = {
+    pair("tokenizer.ggml.model", 8, text("gpt2")),
+    pair("tokenizer.ggml.tokens", 9, strings(pieces)),
+    pair("tokenizer.ggml.token_type", 9, ints(unit_kinds(#pieces))),
+  }
+  if pre ~= nil then
+    parts[#parts + 1] = pair("tokenizer.ggml.pre", 8, text(pre))
+  end
+  for _, entry in ipairs(extra) do
+    parts[#parts + 1] = entry
+  end
+  return header(0, #parts) .. table.concat(parts)
+end
+
+local function merges_entry(merges: {string}): string
+  return pair("tokenizer.ggml.merges", 9, strings(merges))
+end
+
+test.it(
+  "text becomes the ids its merges give",
+  function()
+    local pieces = {"a", "b", "c", "ab", "bc", "Ġ"}
+    local built = loaded(
+      encoding_file("gpt2", pieces, {merges_entry({"a b", "b c"})})
+    )
+
+    local ids, failure = built:encode("abc")
+    test.deepEqual(ids, {3, 2})
+    test.equal(failure, nil)
+
+    local reversed = loaded(
+      encoding_file("gpt2", pieces, {merges_entry({"b c", "a b"})})
+    )
+    ids, failure = reversed:encode("abc")
+    test.deepEqual(ids, {0, 4})
+    test.equal(failure, nil)
+
+    ids, failure = built:encode("a b")
+    test.deepEqual(ids, {0, 5, 1})
+    test.equal(failure, nil)
+
+    local decoded, decode_failure = built:decode({0, 5, 1})
+    test.equal(decoded, "a b")
+    test.equal(decode_failure, nil)
+
+    local fallback = loaded(
+      encoding_file("gpt2", {"a", "b"}, {merges_entry({"a b"})})
+    )
+    ids, failure = fallback:encode("ab")
+    test.deepEqual(ids, {0, 1})
+    test.equal(failure, nil)
+
+    ids, failure = built:encode("")
+    test.deepEqual(ids, {})
+    test.equal(failure, nil)
+  end
+)
+
+test.it(
+  "each scheme splits text into its own words",
+  function()
+    local pieces = {"A", "'", "S", "'S", "1", "2", "12", "a", "Ċ", "ĊĊ"}
+    local merges = {merges_entry({"' S", "1 2", "Ċ Ċ"})}
+    local gpt2 = loaded(encoding_file("gpt2", pieces, merges))
+    local qwen = loaded(encoding_file("qwen35", pieces, merges))
+
+    local ids, failure = gpt2:encode("A'S")
+    test.deepEqual(ids, {0, 1, 2})
+    test.equal(failure, nil)
+
+    ids, failure = gpt2:encode("12")
+    test.deepEqual(ids, {6})
+    test.equal(failure, nil)
+
+    ids, failure = gpt2:encode("a\n\na")
+    test.deepEqual(ids, {7, 8, 8, 7})
+    test.equal(failure, nil)
+
+    ids, failure = qwen:encode("A'S")
+    test.deepEqual(ids, {0, 3})
+    test.equal(failure, nil)
+
+    ids, failure = qwen:encode("12")
+    test.deepEqual(ids, {4, 5})
+    test.equal(failure, nil)
+
+    ids, failure = qwen:encode("a\n\na")
+    test.deepEqual(ids, {7, 9, 7})
+    test.equal(failure, nil)
+  end
+)
+
+test.it(
+  "text that cannot be encoded is refused",
+  function()
+    local no_merges = loaded(encoding_file("gpt2", {"a"}, {}))
+    local ids, failure = no_merges:encode("a")
+    test.equal(ids, nil)
+    test.includes(failure as string, "tokenizer.ggml.merges")
+
+    local numeric_merges = loaded(
+      encoding_file(
+        "gpt2", {"a", "b"}, {pair("tokenizer.ggml.merges", 9, ints({5}))}
+      )
+    )
+    ids, failure = numeric_merges:encode("a")
+    test.equal(ids, nil)
+    test.includes(failure as string, "tokenizer.ggml.merges")
+
+    local no_space = loaded(
+      encoding_file("gpt2", {"a", "b"}, {merges_entry({"\nab"})})
+    )
+    ids, failure = no_space:encode("a")
+    test.equal(ids, nil)
+    test.includes(failure as string, "tokenizer.ggml.merges")
+    test.equal((failure as string):find("\n"), nil)
+
+    local no_pre = loaded(encoding_file(nil, {"a"}, {merges_entry({})}))
+    ids, failure = no_pre:encode("a")
+    test.equal(ids, nil)
+    test.includes(failure as string, "tokenizer.ggml.pre")
+
+    local llama3 = loaded(encoding_file("llama3", {"a"}, {merges_entry({})}))
+    ids, failure = llama3:encode("a")
+    test.equal(ids, nil)
+    test.includes(failure as string, "llama3")
+
+    local missing_piece = loaded(
+      encoding_file("gpt2", {"a"}, {merges_entry({})})
+    )
+    ids, failure = missing_piece:encode("ab")
+    test.equal(ids, nil)
+    test.includes(failure as string, "98")
+
+    local valid = loaded(encoding_file("gpt2", {"a"}, {merges_entry({})}))
+    ids, failure = valid:encode("\255")
+    test.equal(ids, nil)
+    test.includes(failure as string, "not valid UTF-8")
+  end
+)
+
+test.it(
+  "a combining mark stays with the letters beside it",
+  function()
+    local built = loaded(
+      encoding_file(
+        "qwen35", {"e", "Ì", "ģ", "eÌ", "5"}, {merges_entry({"e Ì"})}
+      )
+    )
+    local ids, failure = built:encode("e\204\1295")
+    test.deepEqual(ids, {3, 2, 4})
+    test.equal(failure, nil)
+  end
+)

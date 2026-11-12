@@ -8,7 +8,8 @@
 	"scripts": {
 		"check": "ldx rocks:tl check -I target $(find . -name '*.tl' -not -path './target/*')",
 		"test": "lde test --jobs 1",
-		"format": "lde x rocks:cerulean --indent 2 --line-length 80 $(find . -name '*.tl' -not -path './target/*')"
+		"format": "lde x rocks:cerulean --indent 2 --line-length 80 $(find . -name '*.tl' -not -path './target/*')",
+		"gen_unicode": "lde run scripts/gen_unicode.tl"
 	},
 	"dependencies": {
 		"targs": {
@@ -19,6 +20,10 @@
 		},
 		"fs": {
 			"version": "^0.3.0"
+		},
+		"utf8lib": {
+			"version": "^0.1.0",
+			"package": "utf8"
 		}
 	},
 	"devDependencies": {

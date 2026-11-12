@@ -1,6 +1,6 @@
 # 10: Turn text into the model's token ids
 
-**Status**: pending   **Depends on**: 09
+**Status**: done   **Depends on**: 09
 
 ## Problem & context
 
@@ -8,10 +8,14 @@
 takes text and the next specs prefill from it, and neither can do that with `decode` alone.
 
 This spec adds one field to the tokenizer record, `encode`. `load` keeps reading the file through
-`gguf.read` and gains one thing: it also keeps the raw `tokenizer.ggml.pre` and
-`tokenizer.ggml.merges` entries and validates neither, so it still fails on exactly the files
-`09/FR-002` to `09/FR-004` refuse and every fault in those two keys belongs to `encode`. No tensor
-touched, no route, command or weight changed.
+`gguf.read` and gains two things: it keeps the raw `tokenizer.ggml.pre` and `tokenizer.ggml.merges`
+entries and validates neither, so it still fails on exactly the files `09/FR-002` to `09/FR-004`
+refuse and every fault in those two keys belongs to `encode`; and it maps each stored piece to the
+first id holding it, so a surviving symbol is resolved without scanning `tokenizer.ggml.tokens`.
+Text and pieces are validated and read through the `utf8` package, required as `utf8lib` so that
+`types/utf8lib.d.tl` states the API this code uses (`valid`, `codes`, `char`) instead of leaning on
+Teal's declaration of Lua's own `utf8`. No UTF-8 codec is written here. No tensor touched, no
+route, command or weight changed.
 
 ```teal
 local record tokenizer
@@ -37,10 +41,12 @@ Encoding is three steps, and each has to match the model (llama.cpp, `src/llama-
    survivor becomes the id of the piece with that text; a survivor no entry stores falls back to
    its own codepoints, one piece per codepoint (`FR-009`).
 
-The word rules classify codepoints as letters (Unicode general category L), numbers (category N,
-which covers the digits), marks (category M) and whitespace (the Unicode whitespace set), which
-llama.cpp takes from a generated table (`src/unicode-data.cpp`). The implementation carries those
-ranges; this spec fixes the classes, not a Unicode version.
+The word rules classify codepoints as letters (Unicode general category L), numbers (category N),
+marks (category M) and whitespace (the Unicode whitespace set), which llama.cpp takes from a
+generated table (`src/unicode-data.cpp`). The implementation carries those ranges in `tllm.unicode`,
+each class as sorted low and high pairs searched by halving; Unicode 16.0.0 is the version the
+shipped table holds, and `scripts/gen_unicode.tl` is what produces it, so this spec fixes the
+classes, and the data is regenerated rather than edited by hand.
 
 llama.cpp is looser than this spec in four places, on purpose. It looks a missing symbol up one
 byte at a time and drops every byte whose piece it cannot find; here each of the symbol's
@@ -89,10 +95,10 @@ model cannot be a test input.
   then `s`, `t`, `m` or `d`, or then `re`, `ve` or `ll`, every one of the letters in either case;
   one codepoint that is not CR, LF, a letter, a digit or a mark and then a run of letters and
   marks, or a run of letters and marks; one digit; a U+0020 character and then a run of codepoints
-  that are none of a whitespace, a letter, a mark or a digit, with every CR and LF that directly
-  follows that run; a run of whitespace codepoints holding a CR or LF, cut just after its last CR
-  or LF; all but the last of a run of two or more whitespace codepoints that more text follows; the
-  whole run of whitespace codepoints otherwise.
+  that are none of a whitespace, a letter, a mark or a digit, or such a run, with every CR and LF
+  that directly follows it; a run of whitespace codepoints holding a CR or LF, cut just after its
+  last CR or LF; all but the last of a run of two or more whitespace codepoints that more text
+  follows; the whole run of whitespace codepoints otherwise.
 - FR-007 (US-001) WHEN a word's bytes have become codepoints, THE SYSTEM SHALL join the adjacent
   pair whose left and right texts appear as an entry of `tokenizer.ggml.merges`, taking the pair
   whose entry comes first in that array at each step, until no adjacent pair appears in it.
@@ -140,13 +146,13 @@ model cannot be a test input.
   proves that a tokenizer built from a file stating `gpt2` with no `tokenizer.ggml.merges` loads
   and that `encode("a")` on it returns nil and a line naming that key, that a file whose merges
   hold an integer loads and whose `encode("a")` returns nil and a line naming that key, that a file
-  whose only merge entry is `ab`, with no space, loads and whose `encode("a")` returns nil and a
-  line naming that key, that a file with no `tokenizer.ggml.pre` loads and whose `encode("a")`
-  returns nil and a line naming that key, that a file stating `llama3` loads and whose
-  `encode("a")` returns nil and a line holding `llama3`, that a file whose pieces lack `b` and
-  whose merges are empty returns nil for `encode("ab")` and a line holding `98`, and that `encode`
-  of a string holding the single byte `0xFF` returns nil and a line saying the text is not valid
-  UTF-8.
+  whose only merge entry is a newline then `ab` loads and whose `encode("a")` returns nil and a
+  line naming that key and holding no newline, that a file with no `tokenizer.ggml.pre` loads and
+  whose `encode("a")` returns nil and a line naming that key, that a file stating `llama3` loads
+  and whose `encode("a")` returns nil and a line holding `llama3`, that a file whose pieces lack
+  `b` and whose merges are empty returns nil for `encode("ab")` and a line holding `98`, and that
+  `encode` of a string holding the single byte `0xFF` returns nil and a line saying the text is
+  not valid UTF-8.
 - T-004 (FR-006): `a combining mark stays with the letters beside it`, proves on a `qwen35` file
   whose pieces are `e`, `Ì`, `ģ`, `eÌ` and `5`, all type 1, and whose only merge is `e Ì`, that
   `encode("e\204\1295")` returns `{3, 2, 4}` and nil, the mark joining the letter word instead of
