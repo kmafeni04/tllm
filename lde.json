@@ -1,8 +1,12 @@
 {
 	"name": "tllm",
 	"version": "0.1.0",
+	"description": "An LLM inference engine written in Teal for LuaJIT",
+	"authors": ["Leonard Mafeni <komemafeni944@gmail.com>"],
 	"scripts": {
-		"check": "ldx rocks:tl check -I target src/init.tl"
+		"check": "ldx rocks:tl check -I target $(find . -name '*.tl' -not -path './target/*')",
+		"test": "lde test --jobs 1",
+		"format": "lde x rocks:cerulean --indent 2 --line-length 80 $(find . -name '*.tl' -not -path './target/*')"
 	},
 	"dependencies": {}
 }

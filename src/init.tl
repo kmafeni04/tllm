@@ -1,2 +1,3 @@
-local name: string = "world"
-print("Hello, " .. name .. "!")
+local tllm = {}
+
+return tllm
