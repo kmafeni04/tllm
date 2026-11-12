@@ -1,6 +1,6 @@
 # 12: One block's attention over a growing cache
 
-**Status**: pending   **Depends on**: 11
+**Status**: done   **Depends on**: 11
 
 ## Problem & context
 
@@ -181,8 +181,10 @@ end
   hidden norm: the hidden numbers become 0.7071068 each rather than 1, the value becomes
   `{1.4142136, 2.8284271}`, and the first head's gate of zero takes half of that, and then
   `block({1,0,0,0}, "blk.0.", 1)` on that handle returns `{0.8036810, 0.6851070, 0, 0}` to within
-  1e-5, the epsilon reaching the two per-head norms as well, since with `eps` 0 in those two norms
-  the same handle gives `{0.8117628, 0.6240896, 0, 0}`.
+  1e-5, the epsilon reaching the two per-head norms as well: a hand computation that leaves `eps`
+  out of those two norms gives `{0.8117628, 0.6240896, 0, 0}`, so the asserted numbers are what
+  separate them. One `eps` reaches all three norms, and a handle cannot be given one value for the
+  hidden norm and another for the per-head norms.
 - T-003 (FR-005, FR-008, FR-009, FR-010, FR-011, FR-013): `a name, type, shape or position that
   does not fit is refused with one line`, proves on T-001's fixture that a backend built by hand is
   refused with one line holding `attend`, that a geometry of 0 heads, of 0 key/value heads, of 3

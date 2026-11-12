@@ -139,8 +139,27 @@ local record compute
     ): {number} | nil, string | nil
   end
 
+  record Geometry
+    heads: integer
+    kv_heads: integer
+    head_length: integer
+    rope_dimensions: integer
+    rope_base: number
+    eps: number
+    positions: integer
+  end
+
+  record Attention
+    block: function(
+      Attention, {number}, string, integer
+    ): {number} | nil, string | nil
+  end
+
   load: function(path?: string): Backend | nil, string | nil
   attach: function(Backend, weights.Handle): Maths | nil, string | nil
+  attend: function(
+    Backend, weights.Handle, Geometry
+  ): Attention | nil, string | nil
 end
 
 local type Tensor = weights.Tensor
@@ -153,6 +172,28 @@ local record Mapped
   lib: Library
   tensors: {string: Tensor}
   descriptors: {string: ffi.CData}
+end
+
+local record Cache
+  keys: ffi.CData
+  values: ffi.CData
+  count: integer
+end
+
+local record AttentionState
+  mapped: Mapped
+  geometry: compute.Geometry
+  caches: {string: Cache}
+end
+
+local record BlockTensors
+  norm: Tensor
+  query: Tensor
+  key: Tensor
+  value: Tensor
+  query_norm: Tensor
+  key_norm: Tensor
+  output: Tensor
 end
 
 local libc = ffi.C as Libc
@@ -260,7 +301,7 @@ local function matvec(
 
   local arena_size = round_up(mem_size, ARENA_ALIGN)
   local arena = libc.aligned_alloc(ARENA_ALIGN, arena_size)
-  if arena == nil then
+  if arena is nil then
     return nil, "matvec: no context of " .. arena_size .. " bytes"
   end
 
@@ -293,7 +334,7 @@ local function matvec(
 
   local backend = lib.ggml_backend_cpu_init()
   local status: integer = GGML_STATUS_SUCCESS
-  if backend ~= nil then
+  if not (backend is nil) then
     status = lib.ggml_backend_graph_compute(backend, graph)
     lib.ggml_backend_free(backend)
   end
@@ -307,7 +348,7 @@ local function matvec(
   lib.ggml_free(ctx)
   libc.free(arena)
 
-  if backend == nil then
+  if backend is nil then
     return nil, "matvec: no backend"
   end
   if status ~= GGML_STATUS_SUCCESS then
@@ -350,6 +391,39 @@ local function tensor_of(
   return tensor
 end
 
+local function mapped_of(
+  lib: Library, handle: weights.Handle, operation: string
+): Mapped | nil, string | nil
+  local count = 0
+  for _ in pairs(handle.tensors) do
+    count = count + 1
+  end
+
+  local arena_size = arena_for(lib, count, 0)
+  local arena = libc.aligned_alloc(ARENA_ALIGN, arena_size)
+  if arena is nil then
+    return nil, operation .. ": no context of " .. arena_size .. " bytes"
+  end
+
+  local params = arena_params(arena_size)
+  params.mem_buffer = arena
+  params.no_alloc = true
+  local ctx = lib.ggml_init(params)
+
+  local descriptors: {string: ffi.CData} = {}
+  for name, tensor in pairs(handle.tensors) do
+    descriptors[name] = tensor_of(
+      lib, ctx, tensor.dims, tensor.kind.code, tensor.data
+    )
+  end
+
+  return {
+    lib = lib,
+    tensors = handle.tensors,
+    descriptors = descriptors,
+  }
+end
+
 local function vector_of(
   lib: Library, ctx: ffi.CData, values: {number}
 ): ffi.CData
@@ -366,7 +440,7 @@ local function run(
   build: function(ffi.CData): ffi.CData
 ): {number} | nil, string | nil
   local arena = libc.aligned_alloc(ARENA_ALIGN, arena_size)
-  if arena == nil then
+  if arena is nil then
     return nil, operation .. ": no context of " .. arena_size .. " bytes"
   end
 
@@ -379,20 +453,20 @@ local function run(
 
   local backend = lib.ggml_backend_cpu_init()
   local status: integer = GGML_STATUS_SUCCESS
-  if backend ~= nil then
+  if not (backend is nil) then
     status = lib.ggml_backend_graph_compute(backend, graph)
     lib.ggml_backend_free(backend)
   end
 
   local numbers: {number} = {}
-  if backend ~= nil and status == GGML_STATUS_SUCCESS then
+  if not (backend is nil) and status == GGML_STATUS_SUCCESS then
     numbers = floats_of(lib, result, count)
   end
 
   lib.ggml_free(ctx)
   libc.free(arena)
 
-  if backend == nil then
+  if backend is nil then
     return nil, operation .. ": no backend"
   end
   if status ~= GGML_STATUS_SUCCESS then
@@ -405,7 +479,7 @@ local function looked_up(
   mapped: Mapped, operation: string, name: string, readable: {string: boolean}
 ): Tensor | nil, string | nil
   local tensor = mapped.tensors[name]
-  if tensor == nil then
+  if tensor is nil then
     return nil, operation .. ": no tensor " .. name
   end
   if not readable[tensor.kind.name] then
@@ -439,7 +513,7 @@ local function matrix_vector(
 
   local location = tensor.data
   if depth == 3 then
-    if index == nil then
+    if index is nil then
       return nil,
         "matvec: tensor "
           .. name
@@ -456,7 +530,7 @@ local function matrix_vector(
     local stride = math.floor(tensor.bytes / dims[3])
     local base = ffi.cast("intptr_t", tensor.data) as integer
     location = ffi.cast("void *", base + index * stride) as ffi.CData
-  elseif index ~= nil then
+  elseif not (index is nil) then
     return nil,
       "matvec: tensor "
         .. name
@@ -710,6 +784,416 @@ local function sigmoid_gate(
   )
 end
 
+local function geometry_refusal(geometry: compute.Geometry): string | nil
+  if geometry.heads < 1 then
+    return "attend: heads " .. geometry.heads
+  end
+  if geometry.kv_heads < 1 then
+    return "attend: kv_heads " .. geometry.kv_heads
+  end
+  if geometry.heads % geometry.kv_heads ~= 0 then
+    return "attend: kv_heads "
+      .. geometry.kv_heads
+      .. " of "
+      .. geometry.heads
+      .. " heads"
+  end
+  if geometry.head_length < 1 then
+    return "attend: head_length " .. geometry.head_length
+  end
+  local dimensions = geometry.rope_dimensions
+  if
+    dimensions < 2 or dimensions % 2 ~= 0 or dimensions > geometry.head_length
+  then
+    return "attend: rope_dimensions "
+      .. dimensions
+      .. " of "
+      .. geometry.head_length
+  end
+  if geometry.rope_base <= 0 then
+    return "attend: rope_base " .. geometry.rope_base
+  end
+  if geometry.eps < 0 then
+    return "attend: eps " .. geometry.eps
+  end
+  if geometry.positions < 1 then
+    return "attend: positions " .. geometry.positions
+  end
+  return nil
+end
+
+local function block_failure(line: string): string
+  return "block: " .. (line:gsub("^[%a_]+:%s*", ""))
+end
+
+local function slice(values: {number}, first: integer, count: integer): {number}
+  local result: {number} = {}
+  for offset = 0, count - 1 do
+    result[offset + 1] = values[first + offset + 1]
+  end
+  return result
+end
+
+local function tensor_names(prefix: string): {string}
+  return {
+    prefix .. "attn_norm.weight",
+    prefix .. "attn_q.weight",
+    prefix .. "attn_k.weight",
+    prefix .. "attn_v.weight",
+    prefix .. "attn_q_norm.weight",
+    prefix .. "attn_k_norm.weight",
+    prefix .. "attn_output.weight",
+  }
+end
+
+local function count_refusal(
+  name: string, got: integer, wanted: integer, unit: string
+): string | nil
+  if got ~= wanted then
+    return "block: tensor "
+      .. name
+      .. " holds "
+      .. got
+      .. " "
+      .. unit
+      .. ", the geometry needs "
+      .. wanted
+  end
+  return nil
+end
+
+local function read_tensors(
+  mapped: Mapped,
+  prefix: string,
+  hidden_count: integer,
+  geometry: compute.Geometry
+): BlockTensors | nil, string | nil
+  local names = tensor_names(prefix)
+  for _, name in ipairs(names) do
+    local tensor = mapped.tensors[name]
+    if tensor is nil then
+      return nil, "block: no tensor " .. name
+    end
+  end
+  for _, name in ipairs(names) do
+    local kind = (mapped.tensors[name] as Tensor).kind.name
+    if not WEIGHTS[kind] then
+      return nil, "block: tensor " .. name .. " is " .. kind
+    end
+  end
+
+  local norm_name = prefix .. "attn_norm.weight"
+  local query_name = prefix .. "attn_q.weight"
+  local key_name = prefix .. "attn_k.weight"
+  local value_name = prefix .. "attn_v.weight"
+  local query_norm_name = prefix .. "attn_q_norm.weight"
+  local key_norm_name = prefix .. "attn_k_norm.weight"
+  local output_name = prefix .. "attn_output.weight"
+
+  local norm = mapped.tensors[norm_name] as Tensor
+  local query = mapped.tensors[query_name] as Tensor
+  local key = mapped.tensors[key_name] as Tensor
+  local value = mapped.tensors[value_name] as Tensor
+  local query_norm = mapped.tensors[query_norm_name] as Tensor
+  local key_norm = mapped.tensors[key_norm_name] as Tensor
+  local output = mapped.tensors[output_name] as Tensor
+
+  local heights = geometry.heads * geometry.head_length
+  local widths = geometry.kv_heads * geometry.head_length
+
+  local refusal = count_refusal(norm_name, #norm.dims, 1, "dimensions")
+    or count_refusal(
+      norm_name, (norm.dims[1] or 0) as integer, hidden_count, "numbers"
+    )
+  if refusal then
+    return nil, refusal
+  end
+  refusal = count_refusal(query_name, #query.dims, 2, "dimensions")
+    or count_refusal(
+      query_name, (query.dims[1] or 0) as integer, hidden_count, "numbers"
+    ) or count_refusal(
+    query_name, (query.dims[2] or 0) as integer, heights * 2, "rows"
+  )
+  if refusal then
+    return nil, refusal
+  end
+  refusal = count_refusal(key_name, #key.dims, 2, "dimensions")
+    or count_refusal(
+      key_name, (key.dims[1] or 0) as integer, hidden_count, "numbers"
+    ) or count_refusal(key_name, (key.dims[2] or 0) as integer, widths, "rows")
+  if refusal then
+    return nil, refusal
+  end
+  refusal = count_refusal(value_name, #value.dims, 2, "dimensions")
+    or count_refusal(
+      value_name, (value.dims[1] or 0) as integer, hidden_count, "numbers"
+    ) or count_refusal(
+    value_name, (value.dims[2] or 0) as integer, widths, "rows"
+  )
+  if refusal then
+    return nil, refusal
+  end
+  refusal = count_refusal(query_norm_name, #query_norm.dims, 1, "dimensions")
+    or count_refusal(
+      query_norm_name,
+      (query_norm.dims[1] or 0) as integer,
+      geometry.head_length,
+      "numbers"
+    )
+  if refusal then
+    return nil, refusal
+  end
+  refusal = count_refusal(key_norm_name, #key_norm.dims, 1, "dimensions")
+    or count_refusal(
+      key_norm_name,
+      (key_norm.dims[1] or 0) as integer,
+      geometry.head_length,
+      "numbers"
+    )
+  if refusal then
+    return nil, refusal
+  end
+  refusal = count_refusal(output_name, #output.dims, 2, "dimensions")
+    or count_refusal(
+      output_name, (output.dims[1] or 0) as integer, heights, "numbers"
+    ) or count_refusal(
+    output_name, (output.dims[2] or 0) as integer, hidden_count, "rows"
+  )
+  if refusal then
+    return nil, refusal
+  end
+
+  return {
+    norm = norm,
+    query = query,
+    key = key,
+    value = value,
+    query_norm = query_norm,
+    key_norm = key_norm,
+    output = output,
+  }
+end
+
+local function position_refusal(
+  prefix: string, position: integer, expected: integer, capacity: integer
+): string | nil
+  if position < 0 then
+    return "block: prefix " .. prefix .. " position " .. position
+  end
+  if position >= capacity then
+    return "block: prefix "
+      .. prefix
+      .. " position "
+      .. position
+      .. " of "
+      .. capacity
+  end
+  if position ~= expected then
+    return "block: prefix "
+      .. prefix
+      .. " position "
+      .. position
+      .. ", the next is "
+      .. expected
+  end
+  return nil
+end
+
+local function cache_of(
+  state: AttentionState, prefix: string
+): Cache | nil, string | nil
+  local stored = state.caches[prefix]
+  if not (stored is nil) then
+    return stored
+  end
+
+  local geometry = state.geometry
+  local count = geometry.positions * geometry.kv_heads * geometry.head_length
+  local made_keys, keys = pcall(ffi.new, "float[?]", count)
+  local made_values, values = pcall(ffi.new, "float[?]", count)
+  if not (made_keys and made_values) then
+    return nil, "block: no cache of " .. (count * F32_BYTES * 2) .. " bytes"
+  end
+
+  local cache = {
+    keys = keys as ffi.CData,
+    values = values as ffi.CData,
+    count = 0,
+  } as Cache
+  state.caches[prefix] = cache
+  return cache
+end
+
+local function attention_block(
+  state: AttentionState, hidden: {number}, prefix: string, position: integer
+): {number} | nil, string | nil
+  local geometry = state.geometry
+  local mapped = state.mapped
+  local tensors, refusal = read_tensors(mapped, prefix, #hidden, geometry)
+  if not (tensors is BlockTensors) then
+    return nil, refusal
+  end
+
+  local cache = state.caches[prefix]
+  local expected = 0
+  if not (cache is nil) then
+    expected = cache.count
+  end
+  local bad_position = position_refusal(
+    prefix, position, expected, geometry.positions
+  )
+  if bad_position then
+    return nil, bad_position
+  end
+  if cache is nil then
+    local made, failure = cache_of(state, prefix)
+    if not (made is Cache) then
+      return nil, failure
+    end
+    cache = made
+  end
+
+  local heads = geometry.heads
+  local kv_heads = geometry.kv_heads
+  local width = geometry.head_length
+  local eps = geometry.eps
+
+  local normalised, norm_failure = normalise(
+    mapped, hidden, prefix .. "attn_norm.weight", eps
+  )
+  if normalised is nil then
+    return nil, block_failure(norm_failure as string)
+  end
+  local queries, query_failure = matrix_vector(
+    mapped, prefix .. "attn_q.weight", normalised
+  )
+  if queries is nil then
+    return nil, block_failure(query_failure as string)
+  end
+  local read_keys, key_failure = matrix_vector(
+    mapped, prefix .. "attn_k.weight", normalised
+  )
+  if read_keys is nil then
+    return nil, block_failure(key_failure as string)
+  end
+  local read_values, value_failure = matrix_vector(
+    mapped, prefix .. "attn_v.weight", normalised
+  )
+  if read_values is nil then
+    return nil, block_failure(value_failure as string)
+  end
+
+  local query_norm_name = prefix .. "attn_q_norm.weight"
+  local key_norm_name = prefix .. "attn_k_norm.weight"
+  local rotated_queries: {{number}} = {}
+  local gates: {{number}} = {}
+  for head = 0, heads - 1 do
+    local offset = head * width * 2
+    local raw = slice(queries, offset, width)
+    local scaled, norm_line = normalise(mapped, raw, query_norm_name, eps)
+    if scaled is nil then
+      return nil, block_failure(norm_line as string)
+    end
+    local turned, rope_line = rotary(
+      mapped, scaled, position, geometry.rope_dimensions, geometry.rope_base
+    )
+    if turned is nil then
+      return nil, block_failure(rope_line as string)
+    end
+    rotated_queries[head + 1] = turned
+    gates[head + 1] = slice(queries, offset + width, width)
+  end
+
+  local rotated_keys: {{number}} = {}
+  local value_heads: {{number}} = {}
+  for head = 0, kv_heads - 1 do
+    local offset = head * width
+    local raw = slice(read_keys, offset, width)
+    local scaled, norm_line = normalise(mapped, raw, key_norm_name, eps)
+    if scaled is nil then
+      return nil, block_failure(norm_line as string)
+    end
+    local turned, rope_line = rotary(
+      mapped, scaled, position, geometry.rope_dimensions, geometry.rope_base
+    )
+    if turned is nil then
+      return nil, block_failure(rope_line as string)
+    end
+    rotated_keys[head + 1] = turned
+    value_heads[head + 1] = slice(read_values, offset, width)
+  end
+
+  local key_cells = ffi.cast("float*", cache.keys) as Floats
+  local value_cells = ffi.cast("float*", cache.values) as Floats
+  local scale = 1 / math.sqrt(width)
+  local group = heads / kv_heads
+  local combined: {number} = {}
+
+  for head = 0, heads - 1 do
+    local kv_head = math.floor(head / group)
+    local query = rotated_queries[head + 1]
+    local scores: {number} = {}
+    for past = 0, position - 1 do
+      local total: number = 0
+      for offset = 0, width - 1 do
+        total = total + query[offset + 1] * key_cells[(
+          past * kv_heads + kv_head
+        ) * width + offset]
+      end
+      scores[past + 1] = total * scale
+    end
+    local current: number = 0
+    local current_keys = rotated_keys[kv_head + 1]
+    for offset = 0, width - 1 do
+      current = current + query[offset + 1] * current_keys[offset + 1]
+    end
+    scores[position + 1] = current * scale
+
+    local attention_weights, soft_line = softmax(mapped, scores)
+    if attention_weights is nil then
+      return nil, block_failure(soft_line as string)
+    end
+
+    local attended: {number} = {}
+    local value_numbers = value_heads[kv_head + 1]
+    for offset = 0, width - 1 do
+      local total: number = 0
+      for past = 0, position - 1 do
+        total = total + attention_weights[past + 1] * value_cells[(
+          past * kv_heads + kv_head
+        ) * width + offset]
+      end
+      total = total + attention_weights[position + 1] * value_numbers[offset + 1]
+      attended[offset + 1] = total
+    end
+
+    local gated, gate_line = sigmoid_gate(mapped, gates[head + 1], attended)
+    if gated is nil then
+      return nil, block_failure(gate_line as string)
+    end
+    for offset = 1, width do
+      combined[#combined + 1] = gated[offset]
+    end
+  end
+
+  local result, output_failure = matrix_vector(
+    mapped, prefix .. "attn_output.weight", combined
+  )
+  if result is nil then
+    return nil, block_failure(output_failure as string)
+  end
+
+  for head = 0, kv_heads - 1 do
+    for offset = 0, width - 1 do
+      local index = (position * kv_heads + head) * width + offset
+      key_cells[index] = rotated_keys[head + 1][offset + 1]
+      value_cells[index] = value_heads[head + 1][offset + 1]
+    end
+  end
+  cache.count = position + 1
+  return result
+end
+
 function compute.load(path?: string): compute.Backend | nil, string | nil
   local location = path or DEFAULT_PATH
   local opened, lib = pcall(load_library, location)
@@ -740,37 +1224,13 @@ function compute.attach(
   backend: compute.Backend, handle: weights.Handle
 ): compute.Maths | nil, string | nil
   local lib = LIBRARIES[backend]
-  if lib == nil then
+  if lib is nil then
     return nil, "attach: backend was not loaded by compute.load"
   end
-  local count = 0
-  for _ in pairs(handle.tensors) do
-    count = count + 1
+  local mapped, map_failure = mapped_of(lib, handle, "attach")
+  if mapped is nil then
+    return nil, map_failure
   end
-
-  local arena_size = arena_for(lib, count, 0)
-  local arena = libc.aligned_alloc(ARENA_ALIGN, arena_size)
-  if arena == nil then
-    return nil, "attach: no context of " .. arena_size .. " bytes"
-  end
-
-  local params = arena_params(arena_size)
-  params.mem_buffer = arena
-  params.no_alloc = true
-  local ctx = lib.ggml_init(params)
-
-  local descriptors: {string: ffi.CData} = {}
-  for name, tensor in pairs(handle.tensors) do
-    descriptors[name] = tensor_of(
-      lib, ctx, tensor.dims, tensor.kind.code, tensor.data
-    )
-  end
-
-  local mapped: Mapped = {
-    lib = lib,
-    tensors = handle.tensors,
-    descriptors = descriptors,
-  }
 
   local maths = {} as compute.Maths
   maths.matvec = function(
@@ -818,6 +1278,37 @@ function compute.attach(
     return sigmoid_gate(mapped, gate, values)
   end
   return maths
+end
+
+function compute.attend(
+  backend: compute.Backend, handle: weights.Handle, geometry: compute.Geometry
+): compute.Attention | nil, string | nil
+  local lib = LIBRARIES[backend]
+  if lib is nil then
+    return nil, "attend: backend was not loaded by compute.load"
+  end
+  local refusal = geometry_refusal(geometry)
+  if refusal then
+    return nil, refusal
+  end
+
+  local mapped, map_failure = mapped_of(lib, handle, "attend")
+  if mapped is nil then
+    return nil, map_failure
+  end
+
+  local state: AttentionState = {
+    mapped = mapped,
+    geometry = geometry,
+    caches = {},
+  }
+  local attention = {} as compute.Attention
+  attention.block = function(
+    _: compute.Attention, hidden: {number}, prefix: string, position: integer
+  ): {number} | nil, string | nil
+    return attention_block(state, hidden, prefix, position)
+  end
+  return attention
 end
 
 return compute
