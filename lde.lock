@@ -6,6 +6,18 @@
 			"git": "https://codeberg.org/kmafeni04/ansicolor-lua.git",
 			"sha256": "6b7c75db84154e35c05f9bc9350922a2f091b479d26213c0d6bb6afc6f4f72df"
 		},
+		"fs": {
+			"branch": "master",
+			"commit": "1eb37f6c375066d84b7a308e288f07ff2cfdd906",
+			"exclude": [
+				"raw/bsd",
+				"raw/kqueue",
+				"raw/macos",
+				"raw/windows"
+			],
+			"git": "https://github.com/lde-org/fs.git",
+			"sha256": "9ee4920afc2333b8b58739f37fe691deacdd552fd01cca6aac2ac4d13dce789f"
+		},
 		"fstrings": {
 			"branch": "main",
 			"commit": "86cae053f453ab52b38f74342277ddbb4305fd36",
@@ -25,6 +37,12 @@
 		"luajit-tl-type": {
 			"archive": "https://luarocks.org/luajit-tl-type-0.0.2-1.src.rock"
 		},
+		"path": {
+			"branch": "master",
+			"commit": "72c972d5818a2b496666e00103f4d1b582c728fa",
+			"git": "https://github.com/lde-org/path.git",
+			"sha256": "83bb6b5301394dca2ee1036cf56c233382859cd09b5fe06e5218e7aef6d73530"
+		},
 		"sstream": {
 			"branch": "main",
 			"commit": "a841d0c04bdce243e758f2faccfbe2b257457eaa",
@@ -42,8 +60,17 @@
 			"commit": "ecd39e4171937b488a92a173589d9fe407449366",
 			"git": "https://codeberg.org/kmafeni04/tltp.git",
 			"sha256": "f6f2ff5db6f274863bef0c91f17ef89abf19f63f44edc6f60aeed8c6f6e9549a"
+		},
+		"utf8": {
+			"branch": "master",
+			"commit": "857f7dc99f3dcf970ed6f693953b02310c96f561",
+			"exclude": [
+				"raw/windows"
+			],
+			"git": "https://github.com/lde-org/utf8.git",
+			"sha256": "7816c24519cf959658d29cb9625777febb812422e6fd312884d131a44025630a"
 		}
 	},
-	"manifestHash": "4eb2a49e6cf4f737",
+	"manifestHash": "c5bc61da2e01f992",
 	"version": "1"
 }

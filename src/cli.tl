@@ -1,4 +1,5 @@
 local targs = require("targs")
+local config = require("tllm.config")
 local serve = require("tllm.serve")
 
 local cli = {}
@@ -73,7 +74,13 @@ local function add(
   entries: {Entry}, label: string, value: string | number | nil
 )
   if not (value is nil) then
-    entries[#entries + 1] = {label = label, text = tostring(value)}
+    local entry: Entry = {label = label}
+    if value is string then
+      entry.text = value
+    else
+      entry.text = tostring(value)
+    end
+    entries[#entries + 1] = entry
   end
 end
 
@@ -95,28 +102,26 @@ local function model_of(command: targs.Parser): string | number | nil
   end
 end
 
-local function valid_host(host: string): boolean
-  if not host:match("^%d+%.%d+%.%d+%.%d+$") then
-    return false
+local function process_environment(): {string: string}
+  local environment: {string: string} = {}
+  local xdg = os.getenv("XDG_CONFIG_HOME")
+  if xdg is string then
+    environment.XDG_CONFIG_HOME = xdg
   end
-  for part in host:gmatch("%d+") do
-    if #part > 1 and part:sub(1, 1) == "0" then
-      return false
-    end
-    local value = tonumber(part) as number
-    if value > 255 then
-      return false
-    end
+  local home = os.getenv("HOME")
+  if home is string then
+    environment.HOME = home
   end
-  return true
+  return environment
 end
 
 local function serve_code(
   command: targs.Parser,
   write_err: function(string),
-  start: function(serve.Endpoint, function(string)): integer
+  start: function(serve.Endpoint, function(string)): integer,
+  environment: {string: string}
 ): integer
-  local bind_port = 8080
+  local given_port: integer | nil = nil
   local port = command:get_option("port")
   if port is number then
     if not (port % 1 == 0 and port >= 1 and port <= 65535) then
@@ -127,19 +132,63 @@ local function serve_code(
       )
       return 1
     end
-    bind_port = port as integer
+    given_port = port as integer
   end
 
-  local bind_host = "127.0.0.1"
+  local given_host: string | nil = nil
   local host = command:get_option("host")
   if host is string then
-    if not valid_host(host) then
+    if not config.valid_host(host) then
       write_err(
         one_line("'--host' expects a dotted IPv4 address, got " .. host)
       )
       return 1
     end
-    bind_host = host
+    given_host = host
+  end
+
+  local word_value = model_of(command)
+  local word: string | nil = nil
+  if word_value is string then
+    word = word_value
+  end
+
+  local path_word = false
+  if word is string then
+    path_word = config.is_model_path(word)
+  end
+
+  local explicit = command:get_option("config")
+  local config_path: string | nil = nil
+  if explicit is string then
+    config_path = explicit
+  end
+
+  local ok, file_host, file_port, models = config.load(
+    environment, config_path, path_word, write_err
+  )
+  if not ok then
+    return 1
+  end
+
+  local bind_host = given_host or file_host or "127.0.0.1"
+  local bind_port = given_port or file_port or 8080
+
+  if word is string then
+    if path_word then
+      if not config.has_file(word) then
+        write_err(
+          one_line("serve: model path " .. word .. " is not a readable file")
+        )
+        return 1
+      end
+    elseif models[word] == nil then
+      write_err(one_line("serve: unknown model " .. word))
+      return 1
+    end
+  elseif next(models) == nil then
+    write_err(one_line("serve: no model configured"))
+    return 1
   end
 
   return start({host = bind_host, port = bind_port}, write_err)
@@ -172,7 +221,8 @@ function cli.run(
   args: {string},
   write_out: function(string),
   write_err: function(string),
-  start?: function(serve.Endpoint, function(string)): integer
+  start?: (function(serve.Endpoint, function(string)): integer),
+  environment?: {string: string}
 ): integer
   local parser = build()
   local ok, failure = parser:pparse(args)
@@ -190,7 +240,12 @@ function cli.run(
   local bench = parser:get_command("bench")
 
   if serve_command then
-    return serve_code(serve_command, write_err, start or serve.start)
+    return serve_code(
+      serve_command,
+      write_err,
+      start or serve.start,
+      environment or process_environment()
+    )
   end
 
   local outcome: Outcome

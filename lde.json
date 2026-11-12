@@ -2,7 +2,9 @@
 	"name": "tllm",
 	"version": "0.1.0",
 	"description": "An LLM inference engine written in Teal for LuaJIT",
-	"authors": ["Leonard Mafeni <komemafeni944@gmail.com>"],
+	"authors": [
+		"Leonard Mafeni <komemafeni944@gmail.com>"
+	],
 	"scripts": {
 		"check": "ldx rocks:tl check -I target $(find . -name '*.tl' -not -path './target/*')",
 		"test": "lde test --jobs 1",
@@ -14,6 +16,9 @@
 		},
 		"tltp": {
 			"version": "^0.3.5"
+		},
+		"fs": {
+			"version": "^0.3.0"
 		}
 	},
 	"devDependencies": {

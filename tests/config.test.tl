@@ -1,0 +1,382 @@
+local fs = require("fs")
+local test = require("lde-test")
+local cli = require("tllm.cli")
+local serve = require("tllm.serve")
+
+local STARTER = '{"host":"127.0.0.1","port":8080,"models":{}}'
+
+local record Run
+  code: integer
+  out: {string}
+  err: {string}
+  endpoint: serve.Endpoint | nil
+  starts: integer
+end
+
+local function run(args: {string}, environment: {string: string}): Run
+  local result: Run = {code = 0, out = {}, err = {}, starts = 0}
+  local function stub(
+    endpoint: serve.Endpoint, _write_err: function(string)
+  ): integer
+    result.endpoint = endpoint
+    result.starts = result.starts + 1
+    return 0
+  end
+  result.code = cli.run(
+    args,
+    function(text: string) result.out[#result.out + 1] = text end,
+    function(text: string) result.err[#result.err + 1] = text end,
+    stub,
+    environment
+  )
+  return result
+end
+
+local function temp_dir(): string
+  local base = os.tmpname()
+  os.remove(base)
+  fs.mkdirAll(base)
+  return base
+end
+
+local function cleanup(dirs: {string})
+  for _, dir in ipairs(dirs) do
+    fs.rmdir(dir)
+  end
+end
+
+local function model_file(dir: string): string
+  local file_path = dir .. "/m.gguf"
+  fs.write(file_path, "model")
+  return file_path
+end
+
+local function config_text(model_path: string, extras: string): string
+  local models = '"models":{"m":{"path":"' .. model_path .. '"}}'
+  if extras == "" then
+    return "{" .. models .. "}"
+  end
+  return "{" .. extras .. "," .. models .. "}"
+end
+
+local function write_config(xdg: string, text: string): string
+  local file_path = xdg .. "/tllm/config.json"
+  fs.mkdirAll(xdg .. "/tllm")
+  fs.write(file_path, text)
+  return file_path
+end
+
+test.it(
+  "config lookup reads xdg then home, --config replaces it",
+  function()
+    local xdg = temp_dir()
+    local home = temp_dir()
+    local third = temp_dir()
+    local model = model_file(third)
+    local xdg_config = write_config(xdg, config_text(model, '"port":9001'))
+    fs.mkdirAll(home .. "/.config/tllm")
+    local home_config = home .. "/.config/tllm/config.json"
+    fs.write(home_config, config_text(model, '"port":9002'))
+    local environment = {XDG_CONFIG_HOME = xdg, HOME = home}
+
+    local found = run({"serve", "m"}, environment)
+    test.equal(found.code, 0)
+    test.equal((found.endpoint as serve.Endpoint).port, 9001)
+
+    fs.delete(xdg_config)
+    local fallback = run({"serve", "m"}, environment)
+    test.equal((fallback.endpoint as serve.Endpoint).port, 9002)
+
+    fs.write(xdg_config, config_text(model, '"port":9001'))
+    local custom = third .. "/custom.json"
+    fs.write(custom, config_text(model, '"port":9003'))
+    local replaced = run({"serve", "m", "--config", custom}, environment)
+    test.equal((replaced.endpoint as serve.Endpoint).port, 9003)
+
+    cleanup({xdg, home, third})
+  end
+)
+
+test.it(
+  "an unreadable config path is refused",
+  function()
+    local xdg = temp_dir()
+    local home = temp_dir()
+    local environment = {XDG_CONFIG_HOME = xdg, HOME = home}
+
+    local missing = xdg .. "/nope.json"
+    local absent = run({"serve", "--config", missing}, environment)
+    test.equal(absent.code, 1)
+    test.equal(#absent.err, 1)
+    test.includes(absent.err[1], missing)
+    test.equal(absent.starts, 0)
+    test.falsy(fs.exists(xdg .. "/tllm/config.json"))
+    test.falsy(fs.exists(home .. "/.config/tllm/config.json"))
+
+    local directory = temp_dir()
+    local refused = run({"serve", "--config", directory}, environment)
+    test.equal(refused.code, 1)
+    test.equal(#refused.err, 1)
+    test.includes(refused.err[1], directory)
+    test.equal(refused.starts, 0)
+
+    cleanup({xdg, home, directory})
+  end
+)
+
+test.it(
+  "first run writes the starter config and exits one",
+  function()
+    local xdg = temp_dir()
+    local home = temp_dir()
+    local starter = run({"serve"}, {XDG_CONFIG_HOME = xdg, HOME = home})
+    local xdg_config = xdg .. "/tllm/config.json"
+    test.equal(starter.code, 1)
+    test.equal(starter.starts, 0)
+    test.equal(#starter.err, 1)
+    test.includes(starter.err[1], xdg_config)
+    test.equal(fs.read(xdg_config), STARTER)
+
+    local empty_xdg = temp_dir()
+    local home_only = temp_dir()
+    local fallback = run({"serve"}, {XDG_CONFIG_HOME = "", HOME = home_only})
+    local home_config = home_only .. "/.config/tllm/config.json"
+    test.equal(fallback.code, 1)
+    test.equal(fallback.starts, 0)
+    test.equal(#fallback.err, 1)
+    test.includes(fallback.err[1], home_config)
+    test.equal(fs.read(home_config), STARTER)
+
+    local blocker = empty_xdg .. "/blocker"
+    fs.write(blocker, "not a directory")
+    local blocked = run({"serve"}, {XDG_CONFIG_HOME = blocker, HOME = ""})
+    test.equal(blocked.code, 1)
+    test.equal(#blocked.err, 1)
+    test.equal(blocked.starts, 0)
+
+    local no_environment = run({"serve"}, {})
+    test.equal(no_environment.code, 1)
+    test.equal(#no_environment.err, 1)
+    test.equal(no_environment.starts, 0)
+
+    cleanup({xdg, home, empty_xdg, home_only})
+  end
+)
+
+test.it(
+  "text that is not json is refused",
+  function()
+    local xdg = temp_dir()
+    local config = write_config(xdg, "{")
+    local refused = run({"serve"}, {XDG_CONFIG_HOME = xdg})
+    test.equal(refused.code, 1)
+    test.equal(#refused.err, 1)
+    test.includes(refused.err[1], config)
+    test.equal(refused.starts, 0)
+    cleanup({xdg})
+  end
+)
+
+test.it(
+  "an unknown key is refused",
+  function()
+    local xdg = temp_dir()
+    local model = model_file(xdg)
+    write_config(
+      xdg, '{"port":8080,"prot":1,"models":{"m":{"path":"' .. model .. '"}}}'
+    )
+    local refused = run({"serve"}, {XDG_CONFIG_HOME = xdg})
+    test.equal(refused.code, 1)
+    test.equal(#refused.err, 1)
+    test.includes(refused.err[1], "prot")
+    test.equal(refused.starts, 0)
+    cleanup({xdg})
+  end
+)
+
+test.it(
+  "bad config values are refused",
+  function()
+    local xdg = temp_dir()
+    local model = model_file(xdg)
+    local environment = {XDG_CONFIG_HOME = xdg}
+
+    local function refused(text: string): Run
+      write_config(xdg, text)
+      return run({"serve"}, environment)
+    end
+
+    local function with_model(extras: string): string
+      return "{" .. extras .. ',"models":{"alpha":{"path":"' .. model .. '"}}}'
+    end
+
+    local values = {
+      {with_model('"host":"localhost"'), "host"},
+      {with_model('"port":0'), "port"},
+      {with_model('"port":"8080"'), "port"},
+      {'{"port":8080,"models":"nope"}', "models"},
+    }
+    for _, case in ipairs(values) do
+      local result = refused(case[1])
+      test.equal(result.code, 1, case[1])
+      test.equal(#result.err, 1, case[1])
+      test.includes(result.err[1], case[2], case[1])
+      test.equal(result.starts, 0, case[1])
+    end
+
+    local entries = {
+      '{"port":8080,"models":{"alpha":{}}}',
+      '{"port":8080,"models":{"alpha":{"path":"' .. model .. '","extra":1}}}',
+    }
+    for _, text in ipairs(entries) do
+      local result = refused(text)
+      test.equal(result.code, 1, text)
+      test.equal(#result.err, 1, text)
+      test.includes(result.err[1], "alpha", text)
+      test.equal(result.starts, 0, text)
+    end
+
+    local unknown_first = refused('{"prot":1,"port":0,"models":{}}')
+    test.includes(unknown_first.err[1], "prot")
+
+    local host_first = refused('{"host":"localhost","port":0,"models":{}}')
+    test.includes(host_first.err[1], "host")
+
+    cleanup({xdg})
+  end
+)
+
+test.it(
+  "a configured model with no file is refused",
+  function()
+    local xdg = temp_dir()
+    local environment = {XDG_CONFIG_HOME = xdg}
+
+    local missing = xdg .. "/missing.gguf"
+    write_config(xdg, '{"models":{"alpha":{"path":"' .. missing .. '"}}}')
+    local absent = run({"serve"}, environment)
+    test.equal(absent.code, 1)
+    test.equal(#absent.err, 1)
+    test.includes(absent.err[1], "alpha")
+    test.includes(absent.err[1], missing)
+    test.equal(absent.starts, 0)
+
+    local directory = temp_dir()
+    write_config(xdg, '{"models":{"alpha":{"path":"' .. directory .. '"}}}')
+    local refused = run({"serve"}, environment)
+    test.equal(refused.code, 1)
+    test.equal(#refused.err, 1)
+    test.includes(refused.err[1], "alpha")
+    test.includes(refused.err[1], directory)
+    test.equal(refused.starts, 0)
+
+    cleanup({xdg, directory})
+  end
+)
+
+test.it(
+  "a model path is served without a config",
+  function()
+    local xdg = temp_dir()
+    local home = temp_dir()
+    local environment = {XDG_CONFIG_HOME = xdg, HOME = home}
+    local model = model_file(xdg)
+
+    local served = run({"serve", model}, environment)
+    test.equal(served.code, 0)
+    test.equal(served.starts, 1)
+    local endpoint = served.endpoint as serve.Endpoint
+    test.equal(endpoint.host, "127.0.0.1")
+    test.equal(endpoint.port, 8080)
+    test.falsy(fs.exists(xdg .. "/tllm/config.json"))
+    test.falsy(fs.exists(home .. "/.config/tllm/config.json"))
+
+    local missing = xdg .. "/gone.gguf"
+    local absent = run({"serve", missing}, environment)
+    test.equal(absent.code, 1)
+    test.equal(#absent.err, 1)
+    test.equal(absent.starts, 0)
+
+    local upper = xdg .. "/up.GGUF"
+    fs.write(upper, "model")
+    write_config(xdg, config_text(model, ""))
+    local named = run({"serve", "up.GGUF"}, environment)
+    test.equal(named.code, 1)
+    test.equal(#named.err, 1)
+    test.equal(named.err[1], "serve: unknown model up.GGUF\n")
+    test.equal(named.starts, 0)
+
+    local custom = xdg .. "/custom.json"
+    fs.write(custom, config_text(model, ""))
+    local explicit = run({"serve", "m", "--config", custom}, {})
+    test.equal(explicit.code, 0)
+    test.equal(explicit.starts, 1)
+
+    cleanup({xdg, home})
+  end
+)
+
+test.it(
+  "a model name must be configured",
+  function()
+    local xdg = temp_dir()
+    local model = model_file(xdg)
+    local config = write_config(xdg, config_text(model, ""))
+    local environment = {XDG_CONFIG_HOME = xdg}
+
+    local typo = run({"serve", "typo"}, environment)
+    test.equal(typo.code, 1)
+    test.equal(#typo.err, 1)
+    test.includes(typo.err[1], "typo")
+    test.equal(typo.starts, 0)
+
+    local resolved = run({"serve", "m"}, environment)
+    test.equal(resolved.code, 0)
+    test.equal(resolved.starts, 1)
+
+    fs.write(config, '{"models":{}}')
+    local empty = run({"serve"}, environment)
+    test.equal(empty.code, 1)
+    test.equal(#empty.err, 1)
+    test.equal(empty.starts, 0)
+
+    cleanup({xdg})
+  end
+)
+
+test.it(
+  "flags beat the file and the file beats the defaults",
+  function()
+    local xdg = temp_dir()
+    local model = model_file(xdg)
+    local config = write_config(
+      xdg, config_text(model, '"host":"127.0.0.2","port":9100')
+    )
+    local environment = {XDG_CONFIG_HOME = xdg}
+
+    local from_file = run({"serve", "m"}, environment)
+    test.equal(from_file.code, 0)
+    local endpoint = from_file.endpoint as serve.Endpoint
+    test.equal(endpoint.host, "127.0.0.2")
+    test.equal(endpoint.port, 9100)
+
+    local flag_port = run({"serve", "m", "--port", "9090"}, environment)
+    local overridden = flag_port.endpoint as serve.Endpoint
+    test.equal(overridden.host, "127.0.0.2")
+    test.equal(overridden.port, 9090)
+
+    fs.write(config, config_text(model, ""))
+    local defaults = run({"serve", "m"}, environment)
+    local fallback = defaults.endpoint as serve.Endpoint
+    test.equal(fallback.host, "127.0.0.1")
+    test.equal(fallback.port, 8080)
+
+    fs.write(config, config_text(model, '"host":"localhost","port":9100'))
+    local bad_host = run({"serve", "m", "--host", "127.0.0.1"}, environment)
+    test.equal(bad_host.code, 1)
+    test.equal(#bad_host.err, 1)
+    test.equal(bad_host.starts, 0)
+
+    cleanup({xdg})
+  end
+)

@@ -1,3 +1,4 @@
+local fs = require("fs")
 local test = require("lde-test")
 local cli = require("tllm.cli")
 local serve = require("tllm.serve")
@@ -145,11 +146,22 @@ test.it(
       err[#err + 1] = text
     end
 
+    local base = os.tmpname()
+    os.remove(base)
+    fs.mkdirAll(base .. "/tllm")
+    local model = base .. "/m.gguf"
+    fs.write(model, "model")
+    fs.write(
+      base .. "/tllm/config.json", '{"models":{"m":{"path":"' .. model .. '"}}}'
+    )
+    local environment = {XDG_CONFIG_HOME = base}
+
     local code = cli.run(
       {"serve", "--host", "127.0.0.1", "--port", "9090"},
       write_out,
       write_err,
-      stub
+      stub,
+      environment
     )
 
     test.equal(code, 7)
@@ -160,11 +172,13 @@ test.it(
     test.equal(endpoint.port, 9090)
     test.equal(received_err, write_err)
 
-    cli.run({"serve"}, write_out, write_err, stub)
+    cli.run({"serve", "m"}, write_out, write_err, stub, environment)
 
     endpoint = received as serve.Endpoint
     test.equal(endpoint.host, "127.0.0.1")
     test.equal(endpoint.port, 8080)
+
+    fs.rmdir(base)
   end
 )
 
