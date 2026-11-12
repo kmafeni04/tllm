@@ -1,6 +1,6 @@
 # 13: The block's feed-forward and the scores
 
-**Status**: pending   **Depends on**: 12
+**Status**: done   **Depends on**: 12
 
 ## Problem & context
 
@@ -189,7 +189,7 @@ end
 
 - T-001 (FR-001, FR-002, FR-003, FR-004, FR-005, FR-006, FR-007): `one block's feed-forward
   adds its experts and shared expert to the hidden`, proves with a fixture holding, under
-  `blk.0.`, all f32 tensors: `post_attention_norm.weight` 2 numbers of 1;
+  `blk.0.`, the block's f32 tensors: `post_attention_norm.weight` 2 numbers of 1;
   `ffn_gate_inp.weight` 2 numbers per row over 4 rows, the rows counting from one, row 1
   `{0,0}`, row 2 `{ln 2, 0}`, row 3 `{ln 3, 0}` and row 4 `{ln 4, 0}`;
   `ffn_gate_inp_shexp.weight` `{ln 3, 0}`; `ffn_up_shexp.weight` 1/100 times the 2 by 2
@@ -197,10 +197,11 @@ end
   `{1,0}` and `{0,2}`; `ffn_up_exps.weight` 2 by 2 by 4, 1/100 times the identity for each
   expert; `ffn_gate_exps.weight` 2 by 2 by 4, 100 times the identity for each expert;
   `ffn_down_exps.weight` 2 by 2 by 4, expert `e` counting from zero holding rows
-  `{e+1, 0}` and `{2(e+1), 0}`; `output_norm.weight` 2 numbers of 1; and `output.weight` 2
-  numbers per row over 3 rows, `{1,0}`, `{0,1}` and `{1,1}`, and with a geometry of 1 head,
-  1 key/value head, heads of 2 numbers, rope over 2 numbers at base 10000, `eps` 0, 1
-  position and 2 experts used, that `compute.feed_forward(backend, handle, geometry)`
+  `{e+1, 0}` and `{2(e+1), 0}`; and, at the root, `output_norm.weight` 2 numbers of 1; and
+  `output.weight` 2 numbers per row over 3 rows, `{1,0}`, `{0,1}` and `{1,1}`, and with a
+  geometry of 1 head, 1 key/value head, heads of 2 numbers, rope over 2 numbers at base
+  10000, `eps` 0, 1 position and 2 experts used, that
+  `compute.feed_forward(backend, handle, geometry)`
   returns nil as its second value, that `block({1,1}, "blk.0.")` returns
   `{5.3214286, 9.6428571}` to within 1e-5 and `block({2,2}, "blk.0.")` returns
   `{6.3214286, 10.6428571}` to within 1e-5, the norm dividing by the root mean square so that
@@ -222,16 +223,16 @@ end
   `eps` 1 handle `scores({3,4})` returns `{0.8164966, 1.0886621, 1.9051587}` to within 1e-5.
 - T-004 (FR-009, FR-010, FR-014): `a stack of attention blocks gives the top token`, proves
   with a fixture holding, under `blk.0.` and `blk.1.`, 12's T-001 attention tensors and the
-  f32 feed-forward tensors: `post_attention_norm.weight` 4 numbers of 1;
+  block's f32 feed-forward tensors: `post_attention_norm.weight` 4 numbers of 1;
   `ffn_gate_inp.weight` 4 numbers per row over 2 rows, the rows counting from one, row 1
   `{1,0,0,0}` and row 2 four zeros;
   `ffn_gate_inp_shexp.weight` 4 zeros; `ffn_up_shexp.weight`, `ffn_gate_shexp.weight` and
   `ffn_down_shexp.weight` 4 by 4 zeros; `ffn_up_exps.weight` 4 by 4 by 2 with the 4 by 4
   identity at expert 0 and zeros at expert 1; `ffn_gate_exps.weight` 4 by 4 by 2 with 100
   times the identity at expert 0 and zeros at expert 1; `ffn_down_exps.weight` 4 by 4 by 2
-  with the identity at expert 0 and zeros at expert 1; `output_norm.weight` 4 numbers of 1;
-  and `output.weight` 4 numbers per row over 3 rows, `{1,0,0,0}`, `{0,1,0,0}` and
-  `{1,1,1,1}`, and with a geometry of 2 heads, 1 key/value head, heads of 2 numbers, rope
+  with the identity at expert 0 and zeros at expert 1; and, at the root, `output_norm.weight`
+  4 numbers of 1; and `output.weight` 4 numbers per row over 3 rows, `{1,0,0,0}`, `{0,1,0,0}`
+  and `{1,1,1,1}`, and with a geometry of 2 heads, 1 key/value head, heads of 2 numbers, rope
   over 2 numbers at base 10000, `eps` 0, 4 positions and 1 expert used, that
   `compute.top_token(attention, feed_forward, {1,1,1,1}, {"blk.0.","blk.1."}, 0)` returns 2
   and nil, that on a second fixture with the same tensors and `output.weight` 4 numbers per
@@ -276,6 +277,4 @@ end
 
 ## Amendments
 
-- `12/FR-001`: the geometry also carries `experts_used`, the number of experts one token
-  uses; `attend` admits the field and ignores it, and 12's test geometries gain
-  `experts_used = 2`.
+- None.

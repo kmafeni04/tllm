@@ -60,6 +60,7 @@ local record compute
     rope_base: number
     eps: number
     positions: integer
+    experts_used: integer
   end
 
   record Attention
@@ -85,8 +86,9 @@ end
 - FR-001 (US-001) WHEN `compute.attend(backend, handle, geometry)` is called with a backend
   `compute.load` returned and `geometry` holding a `heads` of one or more, a `kv_heads` of one or
   more that divides `heads`, a `head_length` of one or more, an even `rope_dimensions` of at least
-  two and at most `head_length`, a positive `rope_base`, an `eps` of zero or more and a `positions`
-  of one or more, THE SYSTEM SHALL return an attention handle and nil.
+  two and at most `head_length`, a positive `rope_base`, an `eps` of zero or more, a `positions`
+  of one or more and an `experts_used` counting the experts one token uses, which a block does not
+  read, THE SYSTEM SHALL return an attention handle and nil.
 - FR-002 (US-001) WHEN that handle's `block(hidden, prefix, position)` is called with `hidden`
   holding one number per position of `<prefix>attn_norm.weight`, THE SYSTEM SHALL return one number
   per position of `hidden`, being the gated attention numbers FR-003 to FR-007 describe, and nil
@@ -163,8 +165,9 @@ end
   `attn_q_norm.weight` and `attn_k_norm.weight` 2 numbers of 1; `attn_k.weight` rows `{1,0,0,0}`
   and `{0,1,0,0}`; `attn_v.weight` rows `{2,0,0,0}` and `{0,4,0,0}`; `attn_output.weight` the 4
   by 4 identity, and with a geometry of 2 heads, 1 key/value head, heads of 2 numbers, rope over 2
-  numbers at base 10000, `eps` 0 and 4 positions, that `compute.attend(backend, handle, geometry)`
-  returns nil as its second value, and that `block({1,1,1,1}, "blk.0.", 0)` returns `{1,2,0,0}`:
+  numbers at base 10000, `eps` 0, 4 positions and 2 experts used, that
+  `compute.attend(backend, handle, geometry)` returns nil as its second value, and that
+  `block({1,1,1,1}, "blk.0.", 0)` returns `{1,2,0,0}`:
   the one cached
   position's value `{2,4}` under the first head's gate of zero and the second head's gate of
   `-1e9`, and that `block({3,3,3,3}, "blk.0.", 0)` on a second handle returns `{1,2,0,0}` too,
@@ -215,7 +218,8 @@ end
   `attn_output.weight` 8 numbers per row over 4 rows, row 1 `{1,0,0,0,0,0,0,0}`, row 2
   `{0,1,0,0,0,0,0,0}`, row 3 `{0,0,0,0,1,0,0,0}` and row 4 `{0,0,0,0,0,1,0,0}`, and with a
   geometry of 4 heads, 2 key/value heads, heads of 2 numbers, rope over 2 numbers at base 10000,
-  `eps` 0 and 4 positions, that `block({1,1,1,1}, "blk.0.", 0)` returns `{1,2,3,4}`: heads 0 and 1
+  `eps` 0, 4 positions and 2 experts used, that `block({1,1,1,1}, "blk.0.", 0)` returns
+  `{1,2,3,4}`: heads 0 and 1
   reading key/value head 0's value `{2,4}`, heads 2 and 3 reading key/value head 1's value
   `{6,8}`, where heads alternating between the key/value heads instead give `{1,2,1,2}`.
 

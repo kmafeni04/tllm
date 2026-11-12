@@ -216,6 +216,7 @@ local function geometry(): compute.Geometry
     rope_base = 10000,
     eps = 0,
     positions = 4,
+    experts_used = 2,
   }
 end
 
@@ -228,6 +229,7 @@ local function copied(base: compute.Geometry): compute.Geometry
     rope_base = base.rope_base,
     eps = base.eps,
     positions = base.positions,
+    experts_used = base.experts_used,
   }
 end
 

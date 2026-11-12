@@ -147,6 +147,7 @@ local record compute
     rope_base: number
     eps: number
     positions: integer
+    experts_used: integer
   end
 
   record Attention
@@ -155,11 +156,22 @@ local record compute
     ): {number} | nil, string | nil
   end
 
+  record FeedForward
+    block: function(FeedForward, {number}, string): {number} | nil, string | nil
+    scores: function(FeedForward, {number}): {number} | nil, string | nil
+  end
+
   load: function(path?: string): Backend | nil, string | nil
   attach: function(Backend, weights.Handle): Maths | nil, string | nil
   attend: function(
     Backend, weights.Handle, Geometry
   ): Attention | nil, string | nil
+  feed_forward: function(
+    Backend, weights.Handle, Geometry
+  ): FeedForward | nil, string | nil
+  top_token: function(
+    Attention, FeedForward, {number}, {string}, integer
+  ): integer | nil, string | nil
 end
 
 local type Tensor = weights.Tensor
@@ -184,6 +196,11 @@ local record AttentionState
   mapped: Mapped
   geometry: compute.Geometry
   caches: {string: Cache}
+end
+
+local record FeedForwardState
+  mapped: Mapped
+  geometry: compute.Geometry
 end
 
 local record BlockTensors
@@ -217,6 +234,37 @@ local WEIGHTS: {string: boolean} = {
 }
 
 local F32_ONLY: {string: boolean} = {f32 = true}
+
+local BLOCK_NAMES: {string} = {
+  "post_attention_norm.weight",
+  "ffn_gate_inp.weight",
+  "ffn_up_exps.weight",
+  "ffn_gate_exps.weight",
+  "ffn_down_exps.weight",
+  "ffn_up_shexp.weight",
+  "ffn_gate_shexp.weight",
+  "ffn_down_shexp.weight",
+  "ffn_gate_inp_shexp.weight",
+}
+
+local BLOCK_TYPES: {string: {string: boolean}} = {
+  ["post_attention_norm.weight"] = F32_ONLY,
+  ["ffn_gate_inp.weight"] = F32_ONLY,
+  ["ffn_up_exps.weight"] = WEIGHTS,
+  ["ffn_gate_exps.weight"] = WEIGHTS,
+  ["ffn_down_exps.weight"] = WEIGHTS,
+  ["ffn_up_shexp.weight"] = WEIGHTS,
+  ["ffn_gate_shexp.weight"] = WEIGHTS,
+  ["ffn_down_shexp.weight"] = WEIGHTS,
+  ["ffn_gate_inp_shexp.weight"] = F32_ONLY,
+}
+
+local SCORE_NAMES: {string} = {"output_norm.weight", "output.weight"}
+
+local SCORE_TYPES: {string: {string: boolean}} = {
+  ["output_norm.weight"] = F32_ONLY,
+  ["output.weight"] = WEIGHTS,
+}
 
 -- the library each loaded backend reads, so attach needs no field the
 -- published Backend record does not hold
@@ -822,8 +870,12 @@ local function geometry_refusal(geometry: compute.Geometry): string | nil
   return nil
 end
 
+local function named_failure(operation: string, line: string): string
+  return operation .. ": " .. (line:gsub("^[%a_]+:%s*", ""))
+end
+
 local function block_failure(line: string): string
-  return "block: " .. (line:gsub("^[%a_]+:%s*", ""))
+  return named_failure("block", line)
 end
 
 local function slice(values: {number}, first: integer, count: integer): {number}
@@ -846,18 +898,25 @@ local function tensor_names(prefix: string): {string}
   }
 end
 
+local function count_line(
+  operation: string, name: string, got: integer, wanted: integer, unit: string
+): string
+  return operation
+    .. ": tensor "
+    .. name
+    .. " holds "
+    .. got
+    .. " "
+    .. unit
+    .. ", the geometry needs "
+    .. wanted
+end
+
 local function count_refusal(
   name: string, got: integer, wanted: integer, unit: string
 ): string | nil
   if got ~= wanted then
-    return "block: tensor "
-      .. name
-      .. " holds "
-      .. got
-      .. " "
-      .. unit
-      .. ", the geometry needs "
-      .. wanted
+    return count_line("block", name, got, wanted, unit)
   end
   return nil
 end
@@ -1194,6 +1253,384 @@ local function attention_block(
   return result
 end
 
+local function first_fault(
+  mapped: Mapped,
+  operation: string,
+  prefix: string,
+  names: {string},
+  types: {string: {string: boolean}}
+): string | nil
+  for _, suffix in ipairs(names) do
+    local tensor = mapped.tensors[prefix .. suffix]
+    if tensor is nil then
+      return operation .. ": no tensor " .. prefix .. suffix
+    end
+  end
+  for _, suffix in ipairs(names) do
+    local kind = (mapped.tensors[prefix .. suffix] as Tensor).kind.name
+    if not types[suffix][kind] then
+      return operation .. ": tensor " .. prefix .. suffix .. " is " .. kind
+    end
+  end
+  return nil
+end
+
+local function block_shape_refusal(
+  mapped: Mapped, prefix: string, count: integer, experts_used: integer
+): string | nil
+  local function dims_of(suffix: string): {integer}
+    return (mapped.tensors[prefix .. suffix] as Tensor).dims
+  end
+  local function name_of(suffix: string): string
+    return prefix .. suffix
+  end
+
+  local norm = name_of("post_attention_norm.weight")
+  local norm_dims = dims_of("post_attention_norm.weight")
+  local refusal = count_refusal(norm, #norm_dims, 1, "dimensions")
+    or count_refusal(norm, (norm_dims[1] or 0) as integer, count, "numbers")
+  if refusal then
+    return refusal
+  end
+
+  local router = name_of("ffn_gate_inp.weight")
+  local router_dims = dims_of("ffn_gate_inp.weight")
+  refusal = count_refusal(router, #router_dims, 2, "dimensions")
+    or count_refusal(router, (router_dims[1] or 0) as integer, count, "numbers")
+  if refusal then
+    return refusal
+  end
+  local rows = router_dims[2] as integer
+  if rows < 1 then
+    return "block: tensor " .. router .. " holds no rows"
+  end
+
+  local shared_router = name_of("ffn_gate_inp_shexp.weight")
+  local shared_router_dims = dims_of("ffn_gate_inp_shexp.weight")
+  refusal = count_refusal(shared_router, #shared_router_dims, 1, "dimensions")
+    or count_refusal(
+      shared_router, (shared_router_dims[1] or 0) as integer, count, "numbers"
+    )
+  if refusal then
+    return refusal
+  end
+
+  local up_experts = name_of("ffn_up_exps.weight")
+  local up_experts_dims = dims_of("ffn_up_exps.weight")
+  refusal = count_refusal(up_experts, #up_experts_dims, 3, "dimensions")
+    or count_refusal(
+      up_experts, (up_experts_dims[1] or 0) as integer, count, "numbers"
+    )
+  if refusal then
+    return refusal
+  end
+  local expert_length = up_experts_dims[2] as integer
+  if expert_length < 1 then
+    return "block: tensor " .. up_experts .. " holds no expert numbers"
+  end
+  refusal = count_refusal(
+    up_experts, (up_experts_dims[3] or 0) as integer, rows, "matrices"
+  )
+  if refusal then
+    return refusal
+  end
+
+  local gate_experts = name_of("ffn_gate_exps.weight")
+  local gate_experts_dims = dims_of("ffn_gate_exps.weight")
+  refusal = count_refusal(gate_experts, #gate_experts_dims, 3, "dimensions")
+    or count_refusal(
+      gate_experts, (gate_experts_dims[1] or 0) as integer, count, "numbers"
+    ) or count_refusal(
+    gate_experts,
+    (gate_experts_dims[2] or 0) as integer,
+    expert_length,
+    "numbers per expert"
+  ) or count_refusal(
+    gate_experts, (gate_experts_dims[3] or 0) as integer, rows, "matrices"
+  )
+  if refusal then
+    return refusal
+  end
+
+  local down_experts = name_of("ffn_down_exps.weight")
+  local down_experts_dims = dims_of("ffn_down_exps.weight")
+  refusal = count_refusal(down_experts, #down_experts_dims, 3, "dimensions")
+    or count_refusal(
+      down_experts,
+      (down_experts_dims[1] or 0) as integer,
+      expert_length,
+      "numbers per expert"
+    ) or count_refusal(
+    down_experts, (down_experts_dims[2] or 0) as integer, count, "numbers"
+  ) or count_refusal(
+    down_experts, (down_experts_dims[3] or 0) as integer, rows, "matrices"
+  )
+  if refusal then
+    return refusal
+  end
+
+  local up_shared = name_of("ffn_up_shexp.weight")
+  local up_shared_dims = dims_of("ffn_up_shexp.weight")
+  refusal = count_refusal(up_shared, #up_shared_dims, 2, "dimensions")
+    or count_refusal(
+      up_shared, (up_shared_dims[1] or 0) as integer, count, "numbers"
+    )
+  if refusal then
+    return refusal
+  end
+  local shared_length = up_shared_dims[2] as integer
+  if shared_length < 1 then
+    return "block: tensor " .. up_shared .. " holds no shared numbers"
+  end
+
+  local gate_shared = name_of("ffn_gate_shexp.weight")
+  local gate_shared_dims = dims_of("ffn_gate_shexp.weight")
+  refusal = count_refusal(gate_shared, #gate_shared_dims, 2, "dimensions")
+    or count_refusal(
+      gate_shared, (gate_shared_dims[1] or 0) as integer, count, "numbers"
+    ) or count_refusal(
+    gate_shared,
+    (gate_shared_dims[2] or 0) as integer,
+    shared_length,
+    "numbers per row"
+  )
+  if refusal then
+    return refusal
+  end
+
+  local down_shared = name_of("ffn_down_shexp.weight")
+  local down_shared_dims = dims_of("ffn_down_shexp.weight")
+  refusal = count_refusal(down_shared, #down_shared_dims, 2, "dimensions")
+    or count_refusal(
+      down_shared,
+      (down_shared_dims[1] or 0) as integer,
+      shared_length,
+      "numbers per row"
+    ) or count_refusal(
+    down_shared, (down_shared_dims[2] or 0) as integer, count, "numbers"
+  )
+  if refusal then
+    return refusal
+  end
+
+  if experts_used > rows then
+    return "block: tensor "
+      .. router
+      .. " holds "
+      .. rows
+      .. " rows, experts_used is "
+      .. experts_used
+  end
+  return nil
+end
+
+local function chosen_experts(
+  probabilities: {number}, count: integer
+): {integer}
+  local taken: {integer} = {}
+  local used: {integer: boolean} = {}
+  for _ = 1, count do
+    local best = 0
+    for index, probability in ipairs(probabilities) do
+      if
+        not used[index] and (best == 0 or probability > probabilities[best])
+      then
+        best = index
+      end
+    end
+    used[best] = true
+    taken[#taken + 1] = best - 1
+  end
+  return taken
+end
+
+local function expert_output(
+  mapped: Mapped, prefix: string, normalised: {number}, expert: integer
+): {number} | nil, string | nil
+  local up, up_line = matrix_vector(
+    mapped, prefix .. "ffn_up_exps.weight", normalised, expert
+  )
+  if up is nil then
+    return nil, up_line
+  end
+  local gate, gate_line = matrix_vector(
+    mapped, prefix .. "ffn_gate_exps.weight", normalised, expert
+  )
+  if gate is nil then
+    return nil, gate_line
+  end
+  local mixed, mixed_line = swiglu(mapped, gate, up)
+  if mixed is nil then
+    return nil, mixed_line
+  end
+  return matrix_vector(mapped, prefix .. "ffn_down_exps.weight", mixed, expert)
+end
+
+local function shared_output(
+  mapped: Mapped, prefix: string, normalised: {number}
+): {number} | nil, string | nil
+  local up, up_line = matrix_vector(
+    mapped, prefix .. "ffn_up_shexp.weight", normalised
+  )
+  if up is nil then
+    return nil, up_line
+  end
+  local gate, gate_line = matrix_vector(
+    mapped, prefix .. "ffn_gate_shexp.weight", normalised
+  )
+  if gate is nil then
+    return nil, gate_line
+  end
+  local mixed, mixed_line = swiglu(mapped, gate, up)
+  if mixed is nil then
+    return nil, mixed_line
+  end
+  local down, down_line = matrix_vector(
+    mapped, prefix .. "ffn_down_shexp.weight", mixed
+  )
+  if down is nil then
+    return nil, down_line
+  end
+  local router, router_line = matrix_vector(
+    mapped, prefix .. "ffn_gate_inp_shexp.weight", normalised
+  )
+  if router is nil then
+    return nil, router_line
+  end
+  local gates, gates_line = sigmoid_gate(mapped, router, {1})
+  if gates is nil then
+    return nil, gates_line
+  end
+  local gated = gates[1]
+  for position = 1, #down do
+    down[position] = down[position] * gated
+  end
+  return down
+end
+
+local function feed_forward_block(
+  state: FeedForwardState, hidden: {number}, prefix: string
+): {number} | nil, string | nil
+  local mapped = state.mapped
+  local fault = first_fault(mapped, "block", prefix, BLOCK_NAMES, BLOCK_TYPES)
+  if fault then
+    return nil, fault
+  end
+  local count = #hidden
+  fault = block_shape_refusal(
+    mapped, prefix, count, state.geometry.experts_used
+  )
+  if fault then
+    return nil, fault
+  end
+
+  local normalised, norm_line = normalise(
+    mapped, hidden, prefix .. "post_attention_norm.weight", state.geometry.eps
+  )
+  if normalised is nil then
+    return nil, named_failure("block", norm_line as string)
+  end
+
+  local votes, vote_line = matrix_vector(
+    mapped, prefix .. "ffn_gate_inp.weight", normalised
+  )
+  if votes is nil then
+    return nil, named_failure("block", vote_line as string)
+  end
+  local probabilities, probability_line = softmax(mapped, votes)
+  if probabilities is nil then
+    return nil, named_failure("block", probability_line as string)
+  end
+
+  local selected = chosen_experts(probabilities, state.geometry.experts_used)
+  local total: number = 0
+  for _, expert in ipairs(selected) do
+    total = total + probabilities[expert + 1]
+  end
+
+  local experts: {number} = {}
+  for position = 1, count do
+    experts[position] = 0
+  end
+  for _, expert in ipairs(selected) do
+    local weight = probabilities[expert + 1] / total
+    local output, output_line = expert_output(
+      mapped, prefix, normalised, expert
+    )
+    if output is nil then
+      return nil, named_failure("block", output_line as string)
+    end
+    for position = 1, count do
+      experts[position] = experts[position] + weight * output[position]
+    end
+  end
+
+  local shared, shared_line = shared_output(mapped, prefix, normalised)
+  if shared is nil then
+    return nil, named_failure("block", shared_line as string)
+  end
+
+  local mixed, mixed_line = add(mapped, hidden, experts)
+  if mixed is nil then
+    return nil, named_failure("block", mixed_line as string)
+  end
+  local result, result_line = add(mapped, mixed, shared)
+  if result is nil then
+    return nil, named_failure("block", result_line as string)
+  end
+  return result
+end
+
+local function feed_forward_scores(
+  state: FeedForwardState, hidden: {number}
+): {number} | nil, string | nil
+  local mapped = state.mapped
+  local fault = first_fault(mapped, "scores", "", SCORE_NAMES, SCORE_TYPES)
+  if fault then
+    return nil, fault
+  end
+
+  local norm_name = "output_norm.weight"
+  local output_name = "output.weight"
+  local norm = mapped.tensors[norm_name] as Tensor
+  local output = mapped.tensors[output_name] as Tensor
+  local count = #hidden
+  local function expected(
+    name: string, got: integer, wanted: integer, unit: string
+  ): string | nil
+    if got ~= wanted then
+      return count_line("scores", name, got, wanted, unit)
+    end
+    return nil
+  end
+
+  local refusal = expected(norm_name, #norm.dims, 1, "dimensions")
+    or expected(norm_name, (norm.dims[1] or 0) as integer, count, "numbers")
+  if refusal then
+    return nil, refusal
+  end
+  refusal = expected(output_name, #output.dims, 2, "dimensions")
+    or expected(output_name, (output.dims[1] or 0) as integer, count, "numbers")
+  if refusal then
+    return nil, refusal
+  end
+  if (output.dims[2] or 0) < 1 then
+    return nil, "scores: tensor " .. output_name .. " holds no rows"
+  end
+
+  local normalised, norm_line = normalise(
+    mapped, hidden, norm_name, state.geometry.eps
+  )
+  if normalised is nil then
+    return nil, named_failure("scores", norm_line as string)
+  end
+  local values, values_line = matrix_vector(mapped, output_name, normalised)
+  if values is nil then
+    return nil, named_failure("scores", values_line as string)
+  end
+  return values
+end
+
 function compute.load(path?: string): compute.Backend | nil, string | nil
   local location = path or DEFAULT_PATH
   local opened, lib = pcall(load_library, location)
@@ -1309,6 +1746,93 @@ function compute.attend(
     return attention_block(state, hidden, prefix, position)
   end
   return attention
+end
+
+function compute.feed_forward(
+  backend: compute.Backend, handle: weights.Handle, geometry: compute.Geometry
+): compute.FeedForward | nil, string | nil
+  local lib = LIBRARIES[backend]
+  if lib is nil then
+    return nil, "feed_forward: backend was not loaded by compute.load"
+  end
+  if geometry.experts_used < 1 then
+    return nil, "feed_forward: experts_used " .. geometry.experts_used
+  end
+  if geometry.eps < 0 then
+    return nil, "feed_forward: eps " .. geometry.eps
+  end
+
+  local mapped, map_failure = mapped_of(lib, handle, "feed_forward")
+  if mapped is nil then
+    return nil, map_failure
+  end
+
+  local state: FeedForwardState = {
+    mapped = mapped,
+    geometry = geometry,
+  }
+  local feed_forward = {} as compute.FeedForward
+  feed_forward.block = function(
+    _: compute.FeedForward, hidden: {number}, prefix: string
+  ): {number} | nil, string | nil
+    return feed_forward_block(state, hidden, prefix)
+  end
+  feed_forward.scores = function(
+    _: compute.FeedForward, hidden: {number}
+  ): {number} | nil, string | nil
+    return feed_forward_scores(state, hidden)
+  end
+  return feed_forward
+end
+
+local function summed(left: {number}, right: {number}): {number}
+  local result: {number} = {}
+  for index, value in ipairs(left) do
+    result[index] = value + (right[index] or 0)
+  end
+  return result
+end
+
+function compute.top_token(
+  attention: compute.Attention,
+  feed_forward: compute.FeedForward,
+  hidden: {number},
+  prefixes: {string},
+  position: integer
+): integer | nil, string | nil
+  if #prefixes == 0 then
+    return nil, "top_token: no prefixes"
+  end
+
+  local running = hidden
+  for _, prefix in ipairs(prefixes) do
+    local attended, attend_line = attention:block(running, prefix, position)
+    if attended is nil then
+      return nil, attend_line
+    end
+    local blocked, block_line = feed_forward:block(
+      summed(running, attended), prefix
+    )
+    if blocked is nil then
+      return nil, block_line
+    end
+    running = blocked
+  end
+
+  local values, score_line = feed_forward:scores(running)
+  if values is nil then
+    return nil, score_line
+  end
+
+  local best = 0
+  local largest = values[1]
+  for index = 2, #values do
+    if values[index] > largest then
+      largest = values[index]
+      best = index - 1
+    end
+  end
+  return best
 end
 
 return compute
