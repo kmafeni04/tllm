@@ -313,6 +313,8 @@ test.it(
     test.deepEqual(second.dims, {7})
     test.equal(second.type_code, 2)
     test.equal(second.offset, 65536)
+
+    test.equal(info.table_end, info.bytes)
   end
 )
 

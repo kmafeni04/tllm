@@ -49,6 +49,7 @@ local record gguf
     tensors: {Tensor}
     parameters: integer
     bytes: integer
+    table_end: integer
   end
 
   read: function(path: string): Info | nil, string | nil
@@ -120,7 +121,7 @@ repository and one of any real size would not belong in it.
 - FR-004 (US-002) WHEN a metadata value carries type code 8, THE SYSTEM SHALL give its entry `kind` `string`, `text` holding the bytes as a string including any zero byte, and nil for `scalar`, `flag`, `item_kind` and `items`.
 - FR-005 (US-002) WHEN a metadata value carries type code 7, THE SYSTEM SHALL give its entry `kind` `bool`, `flag` true when the byte is not zero and false when it is, and nil for `scalar`, `text`, `item_kind` and `items`.
 - FR-006 (US-002) WHEN a metadata value carries type code 9, THE SYSTEM SHALL give its entry `kind` `array`, `item_kind` naming the element type code as `FR-003`, `FR-004`, `FR-005` and this requirement name it, and `items` holding one entry per element in file order, each decoded by those requirements and this one, and WHEN the array holds no element, THE SYSTEM SHALL still set `item_kind` and give `items` an empty list.
-- FR-007 (US-001) THE SYSTEM SHALL give the record a `tensors` list holding one entry per tensor in file order, each holding `name`, `dims` as the dimensions in file order, `type_code` as the code the file states, and `offset` as the offset the file states.
+- FR-007 (US-001) THE SYSTEM SHALL give the record a `tensors` list holding one entry per tensor in file order, each holding `name`, `dims` as the dimensions in file order, `type_code` as the code the file states, and `offset` as the offset the file states, and a `table_end` holding the position in the file of the first byte after the last tensor info.
 - FR-008 (US-004) THE SYSTEM SHALL set `bytes` to the file's size in bytes and `parameters` to the sum over `tensors` of the product of its `dims`, a tensor whose `dims` holds no entry counting as one.
 - FR-009 (US-003) IF the path cannot be opened, or opens but no byte can be read from it, THEN THE SYSTEM SHALL return nil and one line naming the path.
 - FR-010 (US-003) IF at least one byte and fewer than four can be read from the path, or the first four bytes are not `GGUF`, THEN THE SYSTEM SHALL return nil and one line naming the path and saying the file is not GGUF.
@@ -142,7 +143,7 @@ repository and one of any real size would not belong in it.
 - T-002 (FR-003): `numeric metadata keeps its type and value`, proves one pair of each of the ten numeric type codes returns the matching `kind` and the value as `scalar`, where the fixture writes -1 as int8, -2 as int16, -3 as int32, -1 as int64, 4294967295 as uint32, 1.5 as float32 and -2.25 as float64, and that `text`, `flag`, `item_kind` and `items` are nil on each.
 - T-003 (FR-004, FR-005): `string and bool metadata keep their type and value`, proves a string holding an embedded zero byte comes back whole as `text` with `kind` `string`, a bool byte of 1 gives `flag` true, a bool byte of 0 gives `flag` false, and the other members are nil on each.
 - T-004 (FR-006): `arrays keep their element type and order`, proves an array of two strings, an array of three int32, an empty float32 array and an array holding an array each decode with the `item_kind` the file states and `items` in file order.
-- T-005 (FR-007, FR-014): `the tensor table is read without the tensor data`, proves on a fixture whose last byte is the last byte of its last tensor info that two tensor infos come back in file order with their names, dimensions, type codes and offsets as stated.
+- T-005 (FR-007, FR-014): `the tensor table is read without the tensor data`, proves on a fixture whose last byte is the last byte of its last tensor info that two tensor infos come back in file order with their names, dimensions, type codes and offsets as stated, and that `table_end` equals `bytes`.
 - T-006 (FR-008): `size and parameter count are computed`, proves `bytes` equals the fixture's length and `parameters` is 6 for a 2 by 3 tensor, 7 for a 7 tensor, and 1 for a tensor with no dimensions, with the three in one file summing to 14, and that the same three tensor infos followed by 16 bytes of tensor data still give `parameters` 14 and a `bytes` equal to the whole file's length rather than the length of the table.
 - T-007 (FR-009): `a path that is not a readable file is refused`, proves a path that does not exist, a directory and an empty file each return nil and one line holding the path.
 - T-008 (FR-010): `a file that is not GGUF is refused`, proves a three-byte file and a file whose first four bytes are `GGML` each return nil and one line holding the path and saying the file is not GGUF.

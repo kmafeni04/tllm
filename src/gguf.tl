@@ -25,6 +25,7 @@ local record gguf
     tensors: {Tensor}
     parameters: integer
     bytes: integer
+    table_end: integer
   end
 
   read: function(path: string): Info | nil, string | nil
@@ -297,6 +298,7 @@ local function parse(reading: Reading): Info | nil, string | nil
     tensors = tensors,
     parameters = parameters as integer,
     bytes = reading.size,
+    table_end = reading.position,
   }
 end
 
