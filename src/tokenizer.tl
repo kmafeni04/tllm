@@ -495,7 +495,7 @@ local function merged(symbols: {string}, ranks: {string: integer}): {string}
     local chosen: integer | nil = nil
     for index = 1, #current - 1 do
       local rank = ranks[current[index] .. " " .. current[index + 1]]
-      if rank ~= nil and rank < best then
+      if not (rank is nil) and rank < best then
         best = rank
         chosen = index
       end
@@ -528,7 +528,7 @@ local function append_word(
   end
   for _, symbol in ipairs(merged(symbols, ranks)) do
     local id = vocabulary.ids[symbol]
-    if id ~= nil then
+    if not (id is nil) then
       ids[#ids + 1] = id
     else
       for _, codepoint in utf8lib.codes(symbol) do
@@ -569,7 +569,7 @@ local function encode_text(
     local failure = append_word(
       vocabulary, path, text:sub(points.starts[word[1]], stop), ranks, ids
     )
-    if failure ~= nil then
+    if not (failure is nil) then
       return nil, failure
     end
   end

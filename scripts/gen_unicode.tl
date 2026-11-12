@@ -39,7 +39,7 @@ end
 
 local function input(path: string): string
   local data = fs.read(path)
-  if data == nil then
+  if data is nil then
     error(
       "cannot read "
         .. path
@@ -62,7 +62,7 @@ for line in unicode_data:gmatch("[^\r\n]+") do
   if not (codepoint is nil) and not (name is nil) and not (category is nil) then
     local value = tonumber(codepoint, 16) as integer
     local ranges = class_ranges(category)
-    if ranges == nil then
+    if ranges is nil then
       span_first = nil
     elseif name:find(", First>", 1, true) then
       span_first = value
