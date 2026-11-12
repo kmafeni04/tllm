@@ -1,0 +1,8 @@
+{
+	"name": "tllm",
+	"version": "0.1.0",
+	"scripts": {
+		"check": "ldx rocks:tl check -I target src/init.tl"
+	},
+	"dependencies": {}
+}
