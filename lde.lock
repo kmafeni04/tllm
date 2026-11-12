@@ -12,9 +12,18 @@
 			"git": "https://codeberg.org/kmafeni04/fstrings-lua.git",
 			"sha256": "ff9dba6460bf39d843109a12cda222730b17bebdd316f04d7febe9ec271102f2"
 		},
+		"json": {
+			"branch": "master",
+			"commit": "2fea69eede30788e33a436c60784c4790eb74105",
+			"git": "https://github.com/lde-org/json.git",
+			"sha256": "66589e6d7df49af6d32da93422b9cbf8db52b2faa0e2c970b77c36fb3a193d21"
+		},
 		"lde-test": {
 			"commit": "04a08edb7c6113508688ac65ccd34b085333bac2",
 			"git": "https://github.com/lde-org/lde"
+		},
+		"luajit-tl-type": {
+			"archive": "https://luarocks.org/luajit-tl-type-0.0.2-1.src.rock"
 		},
 		"sstream": {
 			"branch": "main",
@@ -27,8 +36,14 @@
 			"commit": "47bc65aa4dabbcc2c993813a74fcbd9701927881",
 			"git": "https://codeberg.org/kmafeni04/targs.git",
 			"sha256": "02cf23d7001cb317559cbe25d21a15195b72834c808f9cf99236898c4b7b0852"
+		},
+		"tltp": {
+			"branch": "main",
+			"commit": "ecd39e4171937b488a92a173589d9fe407449366",
+			"git": "https://codeberg.org/kmafeni04/tltp.git",
+			"sha256": "f6f2ff5db6f274863bef0c91f17ef89abf19f63f44edc6f60aeed8c6f6e9549a"
 		}
 	},
-	"manifestHash": "59cb2a875ea15d94",
+	"manifestHash": "4eb2a49e6cf4f737",
 	"version": "1"
 }

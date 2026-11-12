@@ -1,13 +1,17 @@
 local test = require("lde-test")
 local cli = require("tllm.cli")
+local serve = require("tllm.serve")
 
-local function run_with(args: {string}): integer, {string}, {string}
+local function run_with(
+  args: {string}, start?: function(serve.Endpoint, function(string)): integer
+): integer, {string}, {string}
   local out: {string} = {}
   local err: {string} = {}
   local code = cli.run(
     args,
     function(text: string) out[#out + 1] = text end,
-    function(text: string) err[#err + 1] = text end
+    function(text: string) err[#err + 1] = text end,
+    start
   )
   return code, out, err
 end
@@ -26,7 +30,9 @@ test.it(
     io.output(out_scratch)
 
     local failure_code, failure_out, failure_err = run_with({"bogus"})
-    local refusal_code, refusal_out, refusal_err = run_with({"serve"})
+    local refusal_code, refusal_out, refusal_err = run_with(
+      {"bench", "qwen3.8-27b"}
+    )
 
     io.stdout = real_stdout
     io.stderr = real_stderr
@@ -47,32 +53,6 @@ test.it(
     test.equal(#refusal_err, 0)
     test.equal(stream_out, "")
     test.equal(stream_err, "")
-  end
-)
-
-test.it(
-  "serve echoes the values it was given",
-  function()
-    local code, out, err = run_with(
-      {
-        "serve",
-        "qwen3.8-27b",
-        "--config",
-        "cfg.json",
-        "--host",
-        "127.0.0.1",
-        "--port",
-        "8080",
-      }
-    )
-
-    test.equal(code, 2)
-    test.equal(#err, 0)
-    test.equal(#out, 1)
-    test.equal(
-      out[1],
-      "serve: not implemented (model qwen3.8-27b, config cfg.json, host 127.0.0.1, port 8080)\n"
-    )
   end
 )
 
@@ -103,18 +83,6 @@ test.it(
 )
 
 test.it(
-  "refusal line without values",
-  function()
-    local code, out, err = run_with({"serve"})
-
-    test.equal(code, 2)
-    test.equal(#err, 0)
-    test.equal(#out, 1)
-    test.equal(out[1], "serve: not implemented\n")
-  end
-)
-
-test.it(
   "missing and unknown commands are usage errors",
   function()
     local missing_code, missing_out, missing_err = run_with({})
@@ -134,7 +102,6 @@ test.it(
   function()
     local cases: {{string}} = {
       {"bench"},
-      {"serve", "--port", "0"},
       {"bench", "qwen3.8-27b", "--prefill-tokens", "0"},
     }
 
@@ -143,6 +110,78 @@ test.it(
       test.equal(code, 1, table.concat(args, " "))
       test.equal(#out, 0, table.concat(args, " "))
       test.equal(#err, 1, table.concat(args, " "))
+    end
+
+    local code, out, err = run_with(
+      {"serve", "--port", "0"}, function(): integer return 99 end
+    )
+    test.equal(code, 1, "serve --port 0")
+    test.equal(#out, 0, "serve --port 0")
+    test.equal(#err, 1, "serve --port 0")
+  end
+)
+
+test.it(
+  "serve starts with the given host and port",
+  function()
+    local out: {string} = {}
+    local err: {string} = {}
+    local received: serve.Endpoint | nil
+    local received_err: function(string) | nil
+
+    local function stub(
+      endpoint: serve.Endpoint, write_err: function(string)
+    ): integer
+      received = endpoint
+      received_err = write_err
+      return 7
+    end
+
+    local function write_out(text: string)
+      out[#out + 1] = text
+    end
+
+    local function write_err(text: string)
+      err[#err + 1] = text
+    end
+
+    local code = cli.run(
+      {"serve", "--host", "127.0.0.1", "--port", "9090"},
+      write_out,
+      write_err,
+      stub
+    )
+
+    test.equal(code, 7)
+    test.equal(#out, 0)
+    test.equal(#err, 0)
+    local endpoint = received as serve.Endpoint
+    test.equal(endpoint.host, "127.0.0.1")
+    test.equal(endpoint.port, 9090)
+    test.equal(received_err, write_err)
+
+    cli.run({"serve"}, write_out, write_err, stub)
+
+    endpoint = received as serve.Endpoint
+    test.equal(endpoint.host, "127.0.0.1")
+    test.equal(endpoint.port, 8080)
+  end
+)
+
+test.it(
+  "bad host is a usage error",
+  function()
+    for _, host in ipairs({"localhost", "127.0.0.999", "127.0.0.01"}) do
+      local called = false
+      local code, out, err = run_with(
+        {"serve", "--host", host},
+        function(): integer called = true; return 0 end
+      )
+
+      test.equal(code, 1, host)
+      test.equal(#out, 0, host)
+      test.equal(#err, 1, host)
+      test.falsy(called, host)
     end
   end
 )

@@ -1,4 +1,5 @@
 local targs = require("targs")
+local serve = require("tllm.serve")
 
 local cli = {}
 
@@ -21,16 +22,16 @@ local function build(): targs.Parser
     }
   )
 
-  local serve = parser:command(
+  local serve_parser = parser:command(
     {
       name = "serve",
       description = "Serve a model",
     }
   )
-  serve:argument({name = "model", max_length = 1})
-  serve:option({name = "config", placeholder = "FILE"})
-  serve:option({name = "host", placeholder = "HOST"})
-  serve:option(
+  serve_parser:argument({name = "model", max_length = 1})
+  serve_parser:option({name = "config", placeholder = "FILE"})
+  serve_parser:option({name = "host", placeholder = "HOST"})
+  serve_parser:option(
     {
       name = "port",
       placeholder = "PORT",
@@ -94,24 +95,54 @@ local function model_of(command: targs.Parser): string | number | nil
   end
 end
 
-local function serve_outcome(command: targs.Parser): Outcome
-  local entries: {Entry} = {}
-  add(entries, "model", model_of(command))
-  add(entries, "config", command:get_option("config"))
-  add(entries, "host", command:get_option("host"))
-
-  local port = command:get_option("port")
-  if port is number and not (port % 1 == 0 and port >= 1 and port <= 65535) then
-    return {
-      code = 1,
-      text = "'--port' expects an integer from 1 to 65535, got "
-        .. tostring(port),
-      to_err = true,
-    }
+local function valid_host(host: string): boolean
+  if not host:match("^%d+%.%d+%.%d+%.%d+$") then
+    return false
   end
-  add(entries, "port", port)
+  for part in host:gmatch("%d+") do
+    if #part > 1 and part:sub(1, 1) == "0" then
+      return false
+    end
+    local value = tonumber(part) as number
+    if value > 255 then
+      return false
+    end
+  end
+  return true
+end
 
-  return {code = 2, text = refusal("serve", entries), to_err = false}
+local function serve_code(
+  command: targs.Parser,
+  write_err: function(string),
+  start: function(serve.Endpoint, function(string)): integer
+): integer
+  local bind_port = 8080
+  local port = command:get_option("port")
+  if port is number then
+    if not (port % 1 == 0 and port >= 1 and port <= 65535) then
+      write_err(
+        one_line(
+          "'--port' expects an integer from 1 to 65535, got " .. tostring(port)
+        )
+      )
+      return 1
+    end
+    bind_port = port as integer
+  end
+
+  local bind_host = "127.0.0.1"
+  local host = command:get_option("host")
+  if host is string then
+    if not valid_host(host) then
+      write_err(
+        one_line("'--host' expects a dotted IPv4 address, got " .. host)
+      )
+      return 1
+    end
+    bind_host = host
+  end
+
+  return start({host = bind_host, port = bind_port}, write_err)
 end
 
 local function bench_outcome(command: targs.Parser): Outcome
@@ -138,7 +169,10 @@ local function bench_outcome(command: targs.Parser): Outcome
 end
 
 function cli.run(
-  args: {string}, write_out: function(string), write_err: function(string)
+  args: {string},
+  write_out: function(string),
+  write_err: function(string),
+  start?: function(serve.Endpoint, function(string)): integer
 ): integer
   local parser = build()
   local ok, failure = parser:pparse(args)
@@ -152,13 +186,15 @@ function cli.run(
     return parsed.code
   end
 
-  local serve = parser:get_command("serve")
+  local serve_command = parser:get_command("serve")
   local bench = parser:get_command("bench")
 
+  if serve_command then
+    return serve_code(serve_command, write_err, start or serve.start)
+  end
+
   local outcome: Outcome
-  if serve then
-    outcome = serve_outcome(serve)
-  elseif bench then
+  if bench then
     outcome = bench_outcome(bench)
   else
     write_err(one_line("no command given; expected 'serve' or 'bench'"))
