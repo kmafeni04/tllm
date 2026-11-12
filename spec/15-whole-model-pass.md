@@ -1,6 +1,6 @@
 # 15: The whole-model pass
 
-**Status**: pending   **Depends on**: 13, 14
+**Status**: done   **Depends on**: 13, 14
 
 ## Problem & context
 
@@ -150,17 +150,17 @@ end
   numbers being the geometry `14/T-001` uses, whose tensor shapes `14/FR-013` checks, so the
   model's numbers reach that block and `14`'s own tests prove what the block does with them;
   that with `blk.0.ssm_out.weight` removed the call returns nil and one line holding
-  `blk.0.ssm_out.weight`; that with `blk.1.attn_q.weight` removed the call returns nil and one
-  line holding `blk.1.attn_q.weight`, a second `forward(1, 0)` on that model returns nil and one
+  `blk.0.ssm_out.weight`; that with `blk.1.attn_v.weight` removed the call returns nil and one
+  line holding `blk.1.attn_v.weight`, a second `forward(1, 0)` on that model returns nil and one
   line holding `blk.0.` and 0 because block 0 took the position before block 1 refused, so the
   blocks ran in index order; that on T-001's fixture with `block_count` 2 and
   `nextn_predict_layers` 1 the call returns `{0.8485281, 1.1313708, 1.9798990}` to within 1e-5
   while the same fixture without that key returns nil and one line holding
-  `blk.1.attn_norm.weight`; and that a fixture holding `14/T-001`'s ten tensors under both
-  `blk.0.` and `blk.1.`, with `ssm_out.weight` zeroed under both, `block_count` 2, the `ssm`
-  keys above and no `full_attention_interval`, `attention.head_count`, `rope.dimension_count` or
-  `rope.freq_base` returns `{0.8485281, 1.1313708, 1.9798990}` for `forward(1, 0)` to within
-  1e-5 under
+  `blk.1.attn_norm.weight`; and that a fixture holding `14/T-001`'s ten tensors and `13`'s zero
+  feed-forward tensors under both `blk.0.` and `blk.1.`, with `ssm_out.weight` zeroed under
+  both, `block_count` 2, the `ssm` keys above and no `full_attention_interval`,
+  `attention.head_count`, `rope.dimension_count` or `rope.freq_base` returns
+  `{0.8485281, 1.1313708, 1.9798990}` for `forward(1, 0)` to within 1e-5 under
   `compute.model(backend, handle, 2)`, both blocks being linear at the default of 4 and no
   attention key or tensor being read.
 - T-003 (FR-004, FR-007, FR-008, FR-010): `a token and a position that do not fit are refused`,
@@ -216,8 +216,8 @@ end
   `attn_output.weight` 4 rows of 8 zeros; `post_attention_norm.weight` `{1,1,1,1}`;
   `ffn_gate_inp.weight` 4 numbers per row over 2 rows of zeros; `ffn_gate_inp_shexp.weight` 4
   zeros; `ffn_up_shexp.weight` and `ffn_gate_shexp.weight` 4 numbers per row over 2 rows of
-  zeros; `ffn_down_shexp.weight` 2 rows of 4 zeros; `ffn_up_exps.weight` and
-  `ffn_gate_exps.weight` 4 numbers per row, 2 per expert and 2 experts of zeros;
+  zeros; `ffn_down_shexp.weight` 2 numbers per row over 4 rows of zeros; `ffn_up_exps.weight`
+  and `ffn_gate_exps.weight` 4 numbers per row, 2 per expert and 2 experts of zeros;
   `ffn_down_exps.weight` 2 numbers per row, 4 per expert and 2 experts of zeros; and at the root
   `output_norm.weight` `{1,1,1,1}` and `output.weight` 4 numbers per row over 2 rows,
   `{1,0,0,0}` and `{0,1,1,0}`, that `compute.model(backend, handle, 2)` returns a model and nil
@@ -238,9 +238,10 @@ end
   1 to 4 `{1,0,0,0}`, `{0,1,0,0}`, `{0,0,1,0}` and `{0,0,0,1}` and rows 5 to 8 zeros;
   `post_attention_norm.weight` 8 numbers of 1; `ffn_gate_inp.weight` 8 numbers per row over 2
   rows of zeros; `ffn_gate_inp_shexp.weight` 8 zeros; `ffn_up_shexp.weight` and
-  `ffn_gate_shexp.weight` 8 numbers per row over 2 rows of zeros; `ffn_down_shexp.weight` 2 rows
-  of 8 zeros; `ffn_up_exps.weight` and `ffn_gate_exps.weight` 8 numbers per row, 2 per expert
-  and 2 experts of zeros; `ffn_down_exps.weight` 2 numbers per row, 8 per expert and 2 experts
+  `ffn_gate_shexp.weight` 8 numbers per row over 2 rows of zeros;
+  `ffn_down_shexp.weight` 2 numbers per row over 8 rows of zeros; `ffn_up_exps.weight` and
+  `ffn_gate_exps.weight` 8 numbers per row, 2 per expert and 2 experts of zeros;
+  `ffn_down_exps.weight` 2 numbers per row, 8 per expert and 2 experts
   of zeros; and at the root `output_norm.weight` 8 numbers of 1 and `output.weight` 8 numbers
   per row over 3 rows, `{1,0,0,0,0,0,0,0}`, `{0,1,0,0,0,0,0,0}` and `{1,1,0,0,0,0,0,0}`, that
   `compute.model(backend, handle, 2)` returns a model and nil, that its `forward(0, 0)` returns

@@ -1,4 +1,5 @@
 local ffi = require("ffi")
+local gguf = require("tllm.gguf")
 local weights = require("tllm.weights")
 
 -- struct ggml_tensor here is the fields up to data, byte-exact for the pinned
@@ -202,6 +203,10 @@ local record compute
     ): {number} | nil, string | nil
   end
 
+  record Model
+    forward: function(Model, integer, integer): {number} | nil, string | nil
+  end
+
   load: function(path?: string): Backend | nil, string | nil
   attach: function(Backend, weights.Handle): Maths | nil, string | nil
   attend: function(
@@ -213,6 +218,9 @@ local record compute
   linear_attention: function(
     Backend, weights.Handle, Geometry
   ): LinearAttention | nil, string | nil
+  model: function(
+    Backend, weights.Handle, integer | nil
+  ): Model | nil, string | nil
   top_token: function(
     Attention, FeedForward, {number}, {string}, integer
   ): integer | nil, string | nil
@@ -266,6 +274,27 @@ local record LinearState
   shape: LinearShape
   eps: number
   prefixes: {string: LinearKept}
+end
+
+local record ModelPlan
+  mapped: Mapped
+  kinds: {boolean}
+  count: integer
+  width: integer
+  attention: compute.Attention | nil
+  linear: compute.LinearAttention | nil
+  feed_forward: compute.FeedForward
+end
+
+local record ModelState
+  mapped: Mapped
+  kinds: {boolean}
+  count: integer
+  width: integer
+  attention: compute.Attention | nil
+  linear: compute.LinearAttention | nil
+  feed_forward: compute.FeedForward
+  taken: integer
 end
 
 local record BlockTensors
@@ -2379,6 +2408,518 @@ local function summed(left: {number}, right: {number}): {number}
     result[index] = value + (right[index] or 0)
   end
   return result
+end
+
+local function required_number(
+  info: gguf.Info, name: string
+): number | nil, string | nil
+  local entry = info.metadata[name]
+  if entry is nil then
+    return nil, "model: no key " .. name
+  end
+  local scalar = entry.scalar
+  if scalar is nil then
+    return nil, "model: key " .. name .. " is not a number"
+  end
+  return scalar, nil
+end
+
+-- a held key comes back as a number, an absent one as nil and nil, and a key
+-- holding text as nil and the line
+local function held_number(
+  info: gguf.Info, name: string
+): number | nil, string | nil
+  local entry = info.metadata[name]
+  if entry is nil then
+    return nil, nil
+  end
+  local scalar = entry.scalar
+  if scalar is nil then
+    return nil, "model: key " .. name .. " is not a number"
+  end
+  return scalar, nil
+end
+
+local function below_one(value: number, name: string): string | nil
+  if value < 1 then
+    return "model: " .. name .. " is " .. value
+  end
+  return nil
+end
+
+local function architecture_of(info: gguf.Info): string | nil, string | nil
+  local entry = info.metadata["general.architecture"]
+  if entry is nil then
+    return nil, "model: no key general.architecture"
+  end
+  local name = entry.text
+  if name is nil then
+    return nil, "model: key general.architecture is not text"
+  end
+  return name, nil
+end
+
+local function model_plan(
+  lib: Library,
+  backend: compute.Backend,
+  handle: weights.Handle,
+  positions: integer | nil
+): ModelPlan | nil, string | nil
+  local info, read_line = gguf.read(handle.path)
+  if info is nil then
+    return nil, "model: " .. (read_line as string)
+  end
+  local architecture, arch_line = architecture_of(info)
+  if architecture is nil then
+    return nil, arch_line
+  end
+  local arch = architecture as string
+  local function key(name: string): string
+    return arch .. "." .. name
+  end
+
+  local block_count, block_line = required_number(info, key("block_count"))
+  if block_count is nil then
+    return nil, block_line
+  end
+  local refusal = below_one(block_count, key("block_count"))
+  if refusal then
+    return nil, refusal
+  end
+
+  local width, width_line = required_number(info, key("embedding_length"))
+  if width is nil then
+    return nil, width_line
+  end
+  refusal = below_one(width, key("embedding_length"))
+  if refusal then
+    return nil, refusal
+  end
+
+  local experts, experts_line = required_number(info, key("expert_used_count"))
+  if experts is nil then
+    return nil, experts_line
+  end
+  refusal = below_one(experts, key("expert_used_count"))
+  if refusal then
+    return nil, refusal
+  end
+
+  local eps, eps_line = required_number(
+    info, key("attention.layer_norm_rms_epsilon")
+  )
+  if eps is nil then
+    return nil, eps_line
+  end
+  if eps < 0 then
+    return nil,
+      "model: " .. key("attention.layer_norm_rms_epsilon") .. " is " .. eps
+  end
+
+  local context, context_line = required_number(info, key("context_length"))
+  if context is nil then
+    return nil, context_line
+  end
+  refusal = below_one(context, key("context_length"))
+  if refusal then
+    return nil, refusal
+  end
+
+  local nextn, nextn_line = held_number(info, key("nextn_predict_layers"))
+  if nextn_line then
+    return nil, nextn_line
+  end
+  local skipped = 0
+  if not (nextn is nil) then
+    if nextn < 0 then
+      return nil, "model: " .. key("nextn_predict_layers") .. " is " .. nextn
+    end
+    skipped = math.floor(nextn)
+  end
+
+  local interval, interval_line = held_number(
+    info, key("full_attention_interval")
+  )
+  if interval_line then
+    return nil, interval_line
+  end
+  local step = 4
+  if not (interval is nil) then
+    refusal = below_one(interval, key("full_attention_interval"))
+    if refusal then
+      return nil, refusal
+    end
+    step = math.floor(interval)
+  end
+
+  local count = math.floor(block_count) - skipped
+  local kinds: {boolean} = {}
+  local has_full = false
+  local has_linear = false
+  local first_full = 0
+  local found_full = false
+  for index = 0, count - 1 do
+    local full = (index + 1) % step == 0
+    kinds[index + 1] = full
+    if full then
+      has_full = true
+      if not found_full then
+        first_full = index
+        found_full = true
+      end
+    else
+      has_linear = true
+    end
+  end
+
+  local heads: number = 1
+  local rope_dimensions: number = 2
+  local rope_base: number = 1
+  if has_full then
+    local value, line = required_number(info, key("attention.head_count"))
+    if value is nil then
+      return nil, line
+    end
+    heads = value
+    value, line = required_number(info, key("rope.dimension_count"))
+    if value is nil then
+      return nil, line
+    end
+    rope_dimensions = value
+    value, line = required_number(info, key("rope.freq_base"))
+    if value is nil then
+      return nil, line
+    end
+    rope_base = value
+  end
+
+  local group_count: number = 1
+  local state_size: number = 1
+  local time_step_rank: number = 1
+  local inner_size: number = 1
+  local conv_kernel: number = 1
+  if has_linear then
+    local value, line = required_number(info, key("ssm.group_count"))
+    if value is nil then
+      return nil, line
+    end
+    group_count = value
+    value, line = required_number(info, key("ssm.state_size"))
+    if value is nil then
+      return nil, line
+    end
+    state_size = value
+    value, line = required_number(info, key("ssm.time_step_rank"))
+    if value is nil then
+      return nil, line
+    end
+    time_step_rank = value
+    value, line = required_number(info, key("ssm.inner_size"))
+    if value is nil then
+      return nil, line
+    end
+    inner_size = value
+    value, line = required_number(info, key("ssm.conv_kernel"))
+    if value is nil then
+      return nil, line
+    end
+    conv_kernel = value
+  end
+
+  refusal = below_one(heads, key("attention.head_count"))
+    or below_one(rope_dimensions, key("rope.dimension_count"))
+    or below_one(rope_base, key("rope.freq_base"))
+  if refusal then
+    return nil, refusal
+  end
+
+  if has_linear then
+    refusal = below_one(group_count, key("ssm.group_count"))
+      or below_one(state_size, key("ssm.state_size"))
+      or below_one(time_step_rank, key("ssm.time_step_rank"))
+      or below_one(inner_size, key("ssm.inner_size"))
+      or below_one(conv_kernel, key("ssm.conv_kernel"))
+    if refusal then
+      return nil, refusal
+    end
+  end
+
+  local taken = math.floor(context)
+  if not (positions is nil) then
+    if positions < 1 or positions > context then
+      return nil, "model: positions is " .. positions
+    end
+    taken = positions
+  end
+
+  local mapped, map_line = mapped_of(lib, handle, "model")
+  if mapped is nil then
+    return nil, map_line
+  end
+
+  local head_length: integer = 1
+  local kv_heads: integer = 1
+  if has_full then
+    local prefix = "blk." .. first_full .. "."
+    local query = mapped.tensors[prefix .. "attn_q.weight"]
+    if query is nil then
+      return nil, "model: no tensor " .. prefix .. "attn_q.weight"
+    end
+    local key_tensor = mapped.tensors[prefix .. "attn_k.weight"]
+    if key_tensor is nil then
+      return nil, "model: no tensor " .. prefix .. "attn_k.weight"
+    end
+    local query_rows = (query.dims[2] or 0) as integer
+    local key_rows = (key_tensor.dims[2] or 0) as integer
+    if query_rows < 1 then
+      return nil, "model: tensor " .. prefix .. "attn_q.weight holds no rows"
+    end
+    if key_rows < 1 then
+      return nil, "model: tensor " .. prefix .. "attn_k.weight holds no rows"
+    end
+    local head_count = math.floor(heads)
+    local twice_heads = 2 * head_count
+    if query_rows % twice_heads ~= 0 then
+      return nil,
+        "model: tensor "
+          .. prefix
+          .. "attn_q.weight holds "
+          .. query_rows
+          .. " rows, not "
+          .. twice_heads
+    end
+    head_length = math.floor(query_rows / twice_heads)
+    if key_rows % head_length ~= 0 then
+      return nil,
+        "model: tensor "
+          .. prefix
+          .. "attn_k.weight holds "
+          .. key_rows
+          .. " rows, not "
+          .. head_length
+    end
+    kv_heads = math.floor(key_rows / head_length)
+    if head_count % kv_heads ~= 0 then
+      return nil,
+        "model: tensor "
+          .. prefix
+          .. "attn_k.weight gives "
+          .. kv_heads
+          .. " key/value heads of "
+          .. head_count
+    end
+    local dimensions = math.floor(rope_dimensions)
+    if dimensions < 2 or dimensions % 2 ~= 0 or dimensions > head_length then
+      return nil,
+        "model: "
+          .. key("rope.dimension_count")
+          .. " is "
+          .. dimensions
+          .. " of "
+          .. head_length
+    end
+  end
+
+  local linear_key_heads: integer = 1
+  local linear_key_length: integer = 1
+  local linear_value_heads: integer = 1
+  local linear_value_length: integer = 1
+  local linear_conv_kernel: integer = 1
+  if has_linear then
+    local heads_count = math.floor(time_step_rank)
+    local inner = math.floor(inner_size)
+    local groups = math.floor(group_count)
+    if inner % heads_count ~= 0 then
+      return nil,
+        "model: "
+          .. key("ssm.inner_size")
+          .. " is "
+          .. inner
+          .. " of "
+          .. heads_count
+    end
+    if heads_count % groups ~= 0 then
+      return nil,
+        "model: "
+          .. key("ssm.time_step_rank")
+          .. " is "
+          .. heads_count
+          .. " of "
+          .. groups
+    end
+    linear_key_heads = groups
+    linear_key_length = math.floor(state_size)
+    linear_value_heads = heads_count
+    linear_value_length = math.floor(inner / heads_count)
+    linear_conv_kernel = math.floor(conv_kernel)
+  end
+
+  if count < 1 then
+    return nil, "model: " .. key("block_count") .. " leaves no blocks"
+  end
+
+  local geometry: compute.Geometry = {
+    heads = math.floor(heads),
+    kv_heads = kv_heads,
+    head_length = head_length,
+    rope_dimensions = math.floor(rope_dimensions),
+    rope_base = rope_base,
+    eps = eps,
+    positions = taken,
+    experts_used = math.floor(experts),
+    linear_key_heads = linear_key_heads,
+    linear_key_length = linear_key_length,
+    linear_value_heads = linear_value_heads,
+    linear_value_length = linear_value_length,
+    linear_conv_kernel = linear_conv_kernel,
+  }
+
+  local feed_forward, feed_line = compute.feed_forward(
+    backend, handle, geometry
+  )
+  if feed_forward is nil then
+    return nil, "model: " .. (feed_line as string)
+  end
+
+  local attention: compute.Attention | nil = nil
+  if has_full then
+    local made, line = compute.attend(backend, handle, geometry)
+    if made is nil then
+      return nil, "model: " .. (line as string)
+    end
+    attention = made
+  end
+
+  local linear: compute.LinearAttention | nil = nil
+  if has_linear then
+    local made, line = compute.linear_attention(backend, handle, geometry)
+    if made is nil then
+      return nil, "model: " .. (line as string)
+    end
+    linear = made
+  end
+
+  return {
+    mapped = mapped,
+    kinds = kinds,
+    count = count,
+    width = math.floor(width),
+    attention = attention,
+    linear = linear,
+    feed_forward = feed_forward as compute.FeedForward,
+  }
+end
+
+local function embedding_row(
+  mapped: Mapped, width: integer, token_id: integer
+): {number} | nil, string | nil
+  local tensor = mapped.tensors["token_embd.weight"]
+  if tensor is nil then
+    return nil, "forward: no tensor token_embd.weight for token " .. token_id
+  end
+  local dims = tensor.dims
+  if #dims ~= 2 then
+    return nil,
+      "forward: token_embd.weight id "
+        .. token_id
+        .. " holds "
+        .. #dims
+        .. " dimensions"
+  end
+  local rows = (dims[2] or 0) as integer
+  if rows < 1 then
+    return nil, "forward: token_embd.weight id " .. token_id .. " holds no rows"
+  end
+  if token_id < 0 or token_id >= rows then
+    return nil,
+      "forward: tensor token_embd.weight id " .. token_id .. " of " .. rows
+  end
+  if (dims[1] or 0) ~= width then
+    return nil,
+      "forward: token_embd.weight id "
+        .. token_id
+        .. " holds "
+        .. (dims[1] or 0)
+        .. " numbers per row, the width is "
+        .. width
+  end
+  local values, line = row(mapped, "token_embd.weight", token_id)
+  if values is nil then
+    return nil, named_failure("forward", line as string)
+  end
+  return values
+end
+
+function compute.model(
+  backend: compute.Backend, handle: weights.Handle, positions: integer | nil
+): compute.Model | nil, string | nil
+  local lib = LIBRARIES[backend]
+  if lib is nil then
+    return nil, "model: backend was not loaded by compute.load"
+  end
+  local plan, plan_line = model_plan(lib, backend, handle, positions)
+  if plan is nil then
+    return nil, plan_line
+  end
+
+  local state: ModelState = {
+    mapped = plan.mapped,
+    kinds = plan.kinds,
+    count = plan.count,
+    width = plan.width,
+    attention = plan.attention,
+    linear = plan.linear,
+    feed_forward = plan.feed_forward,
+    taken = 0,
+  }
+
+  local model = {} as compute.Model
+  model.forward = function(
+    _: compute.Model, token_id: integer, position: integer
+  ): {number} | nil, string | nil
+    if position < 0 or position ~= state.taken then
+      return nil,
+        "forward: position " .. position .. ", the next is " .. state.taken
+    end
+
+    local hidden, embed_line = embedding_row(
+      state.mapped, state.width, token_id
+    )
+    if hidden is nil then
+      return nil, embed_line
+    end
+
+    for index = 0, state.count - 1 do
+      local prefix = "blk." .. index .. "."
+      local contribution: {number} | nil
+      local line: string | nil
+      if state.kinds[index + 1] then
+        local attention = state.attention as compute.Attention
+        contribution, line = attention:block(hidden, prefix, position)
+      else
+        local linear = state.linear as compute.LinearAttention
+        contribution, line = linear:block(hidden, prefix, position)
+      end
+      if contribution is nil then
+        return nil, line
+      end
+      local blocked, block_line = state.feed_forward:block(
+        summed(hidden, contribution), prefix
+      )
+      if blocked is nil then
+        return nil, block_line
+      end
+      hidden = blocked
+    end
+
+    local scores, score_line = state.feed_forward:scores(hidden)
+    if scores is nil then
+      return nil, score_line
+    end
+    state.taken = state.taken + 1
+    return scores, nil
+  end
+  return model
 end
 
 function compute.top_token(
