@@ -1,6 +1,6 @@
 # 09: Turn token ids back into text from the model's vocabulary
 
-**Status**: pending   **Depends on**: 05
+**Status**: done   **Depends on**: 05
 
 ## Problem & context
 
