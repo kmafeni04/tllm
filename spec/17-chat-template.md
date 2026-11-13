@@ -1,6 +1,6 @@
 # 17: Turn a messages list into the model's prompt text
 
-**Status**: pending   **Depends on**: 09
+**Status**: done   **Depends on**: 09
 
 ## Problem & context
 
@@ -157,7 +157,8 @@ tests use hand-made fixtures, because a 23 GB file cannot be a test input.
   reaching nothing; that on T-001's fixture `render` of the empty list returns nil and a line
   naming `messages`; and that `render` of one valid message and
   `({role = "user", content = 5}) as chat.Message` returns nil and a line naming `messages` and
-  `2`.
+  `2`; and that `render` of one valid message, a `nil` hole and one valid message returns nil and
+  a line naming `messages` and `2`.
 
 ## Open questions
 

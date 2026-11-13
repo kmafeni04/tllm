@@ -6,6 +6,7 @@ local record tokenizer
   record Tokenizer
     size: integer
     end_id: integer | nil
+    template: string | nil
     decode: function(Tokenizer, {integer}): string | nil, string | nil
     encode: function(Tokenizer, string): {integer} | nil, string | nil
   end
@@ -29,6 +30,7 @@ local TYPES_KEY = "tokenizer.ggml.token_type"
 local PRE_KEY = "tokenizer.ggml.pre"
 local MERGES_KEY = "tokenizer.ggml.merges"
 local END_KEY = "tokenizer.ggml.eos_token_id"
+local TEMPLATE_KEY = "tokenizer.chat_template"
 local SCHEME = "gpt2"
 local QWEN_SCHEME = "qwen35"
 local DEFAULT_TYPE = 1
@@ -621,9 +623,16 @@ function tokenizer.load(path: string): Tokenizer | nil, string | nil
     pre = info.metadata[PRE_KEY],
     merges = info.metadata[MERGES_KEY],
   }
+  local template_entry = info.metadata[TEMPLATE_KEY]
+  local template: string | nil = nil
+  if not (template_entry is nil) then
+    template = template_entry.text
+  end
+
   return {
     size = #pieces,
     end_id = end_id_of(info.metadata[END_KEY]),
+    template = template,
     decode = function(_: Tokenizer, ids: {integer}): string | nil, string | nil
       return decode_ids(vocabulary, ids)
     end,
