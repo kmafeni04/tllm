@@ -40,6 +40,7 @@ an error, so the caller decides how loudly to say it.
 local record tokenizer
   record Tokenizer
     size: integer
+    end_id: integer | nil
     decode: function(Tokenizer, {integer}): string | nil, string | nil
   end
 
@@ -57,7 +58,9 @@ end
 
 - FR-001 (US-001) WHEN `require("tllm.tokenizer").load(P)` is called with `P` naming a GGUF file
   whose `tokenizer.ggml.model` is `gpt2`, THE SYSTEM SHALL return a tokenizer whose `size` is
-  the number of entries in `tokenizer.ggml.tokens`, and nil as the second value.
+  the number of entries in `tokenizer.ggml.tokens`, whose `end_id` is the file's
+  `tokenizer.ggml.eos_token_id` as an integer, nil when the file does not hold that key or does
+  not hold an integer there, and nil as the second value.
 - FR-002 (US-003) IF `gguf.read(P)` returns a failure, THEN THE SYSTEM SHALL return nil and that
   failure as the second value.
 - FR-003 (US-003) IF the file states no `tokenizer.ggml.model`, or its text is not `gpt2`, THEN
@@ -104,7 +107,8 @@ end
   `{5}` returns `Ġpad` and nil, that `decode` of `{}` returns the empty string and nil, that
   `load` returns nil as its second value for both fixtures, and on a second fixture carrying
   `tokenizer.ggml.tokens` holding `Ġend` and no `tokenizer.ggml.token_type` that `decode` of
-  `{0}` returns ` end` and nil.
+  `{0}` returns ` end` and nil, and a third fixture holding a string under
+  `tokenizer.ggml.eos_token_id` loads with `end_id` nil.
 - T-002 (FR-002, FR-003, FR-004): `a vocabulary that cannot be used is refused`, proves that a
   file holding `GGML` bytes returns nil and a line equal to the one `gguf.read` returns for
   that same path, that a GGUF without `tokenizer.ggml.model` returns nil and a line naming that

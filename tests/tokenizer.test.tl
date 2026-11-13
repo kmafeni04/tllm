@@ -133,6 +133,15 @@ test.it(
     local plain_decoded, plain_failure = plain:decode({0})
     test.equal(plain_decoded, " end")
     test.equal(plain_failure, nil)
+
+    local with_end = loaded(
+      header(0, 4)
+        .. pair("tokenizer.ggml.model", 8, text("gpt2"))
+        .. pair("tokenizer.ggml.tokens", 9, strings({"a"}))
+        .. pair("tokenizer.ggml.token_type", 9, ints({1}))
+        .. pair("tokenizer.ggml.eos_token_id", 8, text("1"))
+    )
+    test.equal(with_end.end_id, nil)
   end
 )
 

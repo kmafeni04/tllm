@@ -5,6 +5,7 @@ local utf8lib = require("utf8lib")
 local record tokenizer
   record Tokenizer
     size: integer
+    end_id: integer | nil
     decode: function(Tokenizer, {integer}): string | nil, string | nil
     encode: function(Tokenizer, string): {integer} | nil, string | nil
   end
@@ -27,6 +28,7 @@ local TOKENS_KEY = "tokenizer.ggml.tokens"
 local TYPES_KEY = "tokenizer.ggml.token_type"
 local PRE_KEY = "tokenizer.ggml.pre"
 local MERGES_KEY = "tokenizer.ggml.merges"
+local END_KEY = "tokenizer.ggml.eos_token_id"
 local SCHEME = "gpt2"
 local QWEN_SCHEME = "qwen35"
 local DEFAULT_TYPE = 1
@@ -184,6 +186,17 @@ local function decode_ids(
     end
   end
   return table.concat(parts), nil
+end
+
+local function end_id_of(entry: gguf.Value | nil): integer | nil
+  if entry is nil then
+    return nil
+  end
+  local scalar = entry.scalar
+  if scalar is nil or not INTEGER_KINDS[entry.kind] then
+    return nil
+  end
+  return scalar as integer
 end
 
 local function identifiers_of(pieces: {string}): {string: integer}
@@ -610,6 +623,7 @@ function tokenizer.load(path: string): Tokenizer | nil, string | nil
   }
   return {
     size = #pieces,
+    end_id = end_id_of(info.metadata[END_KEY]),
     decode = function(_: Tokenizer, ids: {integer}): string | nil, string | nil
       return decode_ids(vocabulary, ids)
     end,

@@ -1,6 +1,6 @@
 # 16: Text in, text out, in process
 
-**Status**: pending   **Depends on**: 09, 10, 15
+**Status**: done   **Depends on**: 09, 10, 15
 
 ## Problem & context
 
@@ -108,7 +108,8 @@ a sample takes are worked out by hand from `15/T-001`'s scores.
   holding `blk.0.` and 2, a third prompt id finding no third position, that being `forward`'s
   second value unchanged.
 - T-002 (FR-003, FR-005, FR-006): `a seeded draw takes the token temperature and top-k leave`,
-  proves on T-001's fixture that with `{max_tokens = 3, seed = 1000, temperature = 1, top_k = 2}`
+  proves on T-001's fixture with `tokenizer.ggml.eos_token_id` removed that with `{max_tokens = 3,
+  seed = 1000, temperature = 1, top_k = 2}`
   `generate.text(model, tokenizer, "a", options)` returns `ccc` and nil, ids 0 and 2 tying at
   1.4142136 as the two candidates at half each, the seed's first draw 0.6236204 above the first
   half, and id 2's row `{1,0}` repeating the scores; that with seed 0 the same options return
@@ -150,7 +151,4 @@ a sample takes are worked out by hand from `15/T-001`'s scores.
 
 ## Amendments
 
-- `09/FR-001`: the tokenizer also carries `end_id`, the file's `tokenizer.ggml.eos_token_id` as
-  an integer, nil when the file does not hold that key or does not hold an integer there; `09`'s
-  `Tokenizer` record gains the field and `09/FR-001` names it beside `size`, and `09/T-001`
-  asserts a fixture holding a string under that key loads with `end_id` nil.
+- None.
