@@ -16,8 +16,8 @@ not here.
 
 Two seams are new. `serve.Model` grows the tokenizer and the compute backend `build` loads from the
 file, and `serve.answer(server, body)` is the whole of one request: it takes the raw request body as
-text and returns a status name and a JSON text, which the route hands to `self:json`. That seam is
-where the cases do their work, because `tltp`'s `mock_request` writes its `params` argument as a
+text and returns a status name and a JSON text, `serve.stream` handing the body to it when no stream
+is asked for. That seam is where the cases do their work, because `tltp`'s `mock_request` writes its `params` argument as a
 form body (`k=v&…`) with no way to send raw JSON, so it can prove a request reaches the route but
 not carry a chat body. `mock_request` therefore carries the wiring cases and `answer` carries the
 rest.
@@ -89,9 +89,9 @@ end
 
 - FR-001 (US-001) THE SYSTEM SHALL register the path `/v1/chat/completions` for POST on every
   server `build` returns, and leave that path unmatched for every other method.
-- FR-002 (US-001) WHEN a POST for that path arrives, THE SYSTEM SHALL answer the status and the body
-  `answer(server, request body)` gives, with content type `application/json`, the request body being
-  the raw text the request carried.
+- FR-002 (US-001) WHEN a POST for that path arrives, THE SYSTEM SHALL answer the response
+  `serve.stream(server, the raw request body)` gives, the request body being the raw text the
+  request carried.
 - FR-003 (US-001) WHEN `answer` is given a body FR-008's checks accept, THE SYSTEM SHALL take the
   model `build` kept for that server, its tokenizer and its backend, render the prompt from
   `messages` with `chat.render`, build a model whose `positions` is the prompt's ids plus the budget
@@ -103,7 +103,8 @@ end
   `completion_tokens` is the number of ids the generation sampled, and whose `total_tokens` is their
   sum.
 - FR-005 (US-001) WHEN the body holds a member other than `messages`, `temperature`, `top_k`,
-  `max_tokens` and `seed`, THE SYSTEM SHALL ignore it.
+  `max_tokens`, `seed` and `stream`, THE SYSTEM SHALL ignore it, and `stream` is honoured rather
+  than ignored.
 - FR-006 (US-003) WHEN the body holds `temperature`, `top_k` or `seed`, THE SYSTEM SHALL pass it to
   the generation as given, an absent `temperature` leaving the sampler greedy and an absent `seed`
   being 0.
@@ -114,7 +115,8 @@ end
   whose `role` and `content` are strings, or `temperature` is present and is not a number or is
   below zero, or `top_k` is present and is not a whole number or is below one, or `max_tokens` is
   present and is not a whole number or is below one, or `seed` is present and is not a whole number,
-  THEN THE SYSTEM SHALL answer `BadRequest` with a body decoding to an object whose single member is
+  or `stream` is present and is not a boolean (that check coming after `seed`), THEN THE SYSTEM
+  SHALL answer `BadRequest` with a body decoding to an object whose single member is
   `error`, an object whose `type` is `invalid_request_error` and whose `message` names the first
   fault in the order this requirement names them: `body`; `messages` and, for an entry, its position
   counting from one; the member at fault.
@@ -138,8 +140,8 @@ end
 
 ## Non-goals
 
-- No streaming: every reply is one finished body, and `stream` in a request is ignored as FR-005
-  states; server-sent events are spec 19.
+- No streamed reply of its own: the route answers whatever `serve.stream` gives, and the events of
+  a streamed reply, their names and their order, are spec 19's.
 - No reply member beyond `choices` and `usage`: no `id`, `object`, `created`, `model` or
   `finish_reason`, and one choice only.
 - No reuse, trimming or reloading: each request builds its own generation model over the positions

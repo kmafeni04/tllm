@@ -1,6 +1,6 @@
 # 19: Stream a chat reply as it is generated
 
-**Status**: pending   **Depends on**: 16, 18
+**Status**: done   **Depends on**: 16, 18
 
 ## Problem & context
 
@@ -17,14 +17,14 @@ stream keeps answering what it answers today.
 Three seams carry the work.
 
 `generate.text` gains an optional `on_token` callback in its options, so that `serve` learns each
-token as it is appended instead of only the finished string. The `Options` record `16` shows gains
-that field as a correction; what the call returns does not change, and the two requirements of `16`
-that read differently are the amendments below.
+token as it is appended instead of only the finished string. The `Options` record `16` shows carries
+that field as a correction; what the call returns does not change, and `16`'s statements that a call
+streams nothing and decodes only the whole list at the end no longer hold.
 
 `serve.stream(server, body)` is the whole of one streamed request: it prepares the request as
 `18/FR-003` does (parse, render, encode, the window model, the budget check, the generation model),
 and answers the response the route hands back plus the producer inside it, that producer being nil
-when the request was refused. The route becomes the one line that returns the first of those two
+when the request was refused. The route becomes the one that answers the first of those two
 values. The producer is the only thing a test can drive here, `mock_request` not running a
 producer, so the producer is returned rather than reached for through the response; the response
 itself comes from `Server:sse`, which is what sets the event framing and the stream headers, and
@@ -52,9 +52,9 @@ on_token: function(string) | nil
 ```
 
 `stream` becomes a member the body may carry and one that is checked, so `18`'s wording about the
-members it ignores and the shape it refuses no longer holds, and `16` and `18` both say in their
-non-goals that nothing is streamed; that is the amendments below. The `Request` record in `18`'s
-snippet gains the member as a correction.
+members it ignores and the shape it refuses now names it, and neither `16` nor `18` says in its
+non-goals that nothing is streamed. The record `serve` builds from the body is unexported, so
+`stream` joins it in the code and no snippet in `18` gains a field.
 
 ## User stories
 
@@ -66,8 +66,7 @@ snippet gains the member as a correction.
 ## Functional requirements
 
 - FR-001 (US-001) WHEN a POST for `/v1/chat/completions` arrives, THE SYSTEM SHALL answer the
-  response `serve.stream(server, the raw request body)` gives, which restates `18/FR-002` as
-  amended below.
+  response `serve.stream(server, the raw request body)` gives, which is `18/FR-002` as it now reads.
 - FR-002 (US-001) WHEN `serve.stream` is given a body whose `stream` member is `true`, THE SYSTEM
   SHALL answer the response `server:sse` gives for its producer, whose status is `OK`, whose
   content type is `text/event-stream`, and whose producer is not nil.
@@ -157,13 +156,4 @@ snippet gains the member as a correction.
 
 ## Amendments
 
-- `16/FR-001`: options gain `on_token`, so a call also reports each token as it is appended; `16`'s
-  non-goal that says a call does no streaming no longer holds.
-- `16/FR-010`: the decode whose refusal ends the call is also the one-id decode taken as each
-  token is appended, not only the single decode of the whole list.
-- `18/FR-002`: the route answers the response `serve.stream(server, request body)` gives, not one
-  built from `serve.answer`.
-- `18/FR-005`: `stream` joins the members the body may hold, and it is honoured rather than
-  ignored; `18`'s non-goal that says `stream` is ignored no longer holds.
-- `18/FR-008`: a `stream` member that is present and not a boolean is a `BadRequest` whose message
-  names `stream`, checked after `seed`.
+- None.

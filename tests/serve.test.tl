@@ -41,6 +41,21 @@ local record ChatReply
   usage: Usage
 end
 
+local record StreamDelta
+  role: string | nil
+  content: string | nil
+end
+
+local record StreamChoice
+  index: integer
+  delta: StreamDelta | nil
+  finish_reason: string | nil
+end
+
+local record StreamEvent
+  choices: {StreamChoice}
+end
+
 local ROOT = os.tmpname()
 os.remove(ROOT)
 fs.mkdirAll(ROOT)
@@ -746,5 +761,224 @@ test.it(
     )
     test.equal(refused_build, nil)
     test.includes(line as string, "tokenizer.ggml.model")
+  end
+)
+
+local STREAM_BODY = '{"messages":[{"role":"user","content":"a"}],"max_tokens":2,"stream":true}'
+
+local function collected(stream_fn: tltp.StreamFn): {string}
+  local payloads: {string} = {}
+  stream_fn(
+    function(event: string | tltp.SSEMessage): string | nil, string | nil
+      payloads[#payloads + 1] = event as string
+      return nil, nil
+    end
+  )
+  return payloads
+end
+
+local function events_of(payloads: {string}): {StreamEvent}
+  local events: {StreamEvent} = {}
+  for _, payload in ipairs(payloads) do
+    if payload ~= "[DONE]" then
+      events[#events + 1] = tltp.json_decode(payload) as StreamEvent
+    end
+  end
+  return events
+end
+
+local ROLE_EVENT: StreamEvent = {
+  choices = {{index = 0, delta = {role = "assistant"}}},
+}
+
+local function token_event(piece: string): StreamEvent
+  return {choices = {{index = 0, delta = {content = piece}}}}
+end
+
+local function finish_event(reason: string): StreamEvent
+  return {choices = {{index = 0, finish_reason = reason}}}
+end
+
+local function stream_refused(
+  server: tltp.Server, body: string
+): tltp.Response, ErrorBody
+  local response, stream_fn = serve.stream(server, body)
+  test.equal(stream_fn, nil, body)
+  test.equal(response.content_type, "application/json", body)
+  return response, tltp.json_decode(response.body) as ErrorBody
+end
+
+test.it(
+  "a streamed reply arrives token by token and ends with done",
+  function()
+    local server = build(meta_file(t001_meta(), t001_entries()), "m")
+
+    local response, stream_fn = serve.stream(server, STREAM_BODY)
+    test.equal(response.status, "OK")
+    test.equal(response.content_type, "text/event-stream")
+    test.truthy(stream_fn)
+
+    local payloads = collected(stream_fn as tltp.StreamFn)
+    test.equal(#payloads, 5)
+    local events = events_of(payloads)
+    test.deepEqual(events[1], ROLE_EVENT)
+    test.deepEqual(events[2], token_event("a"))
+    test.deepEqual(events[3], token_event("a"))
+    test.deepEqual(events[4], finish_event("length"))
+    test.equal(payloads[5], "[DONE]")
+
+    local stopped = build(
+      meta_file(
+        replaced(t001_meta(), mint("tokenizer.ggml.eos_token_id", 0)),
+        t001_entries()
+      ),
+      "m"
+    )
+    local _, stopped_run = serve.stream(stopped, STREAM_BODY)
+    local stopped_payloads = collected(stopped_run as tltp.StreamFn)
+    test.equal(#stopped_payloads, 3)
+    local stopped_events = events_of(stopped_payloads)
+    test.deepEqual(stopped_events[1], ROLE_EVENT)
+    test.deepEqual(stopped_events[2], finish_event("stop"))
+    test.equal(stopped_payloads[3], "[DONE]")
+
+    server:mock_request("/v1/chat/completions", {method = "post"})
+    local action = server._routes["/v1/chat/completions"].methods["POST"]
+    server.req.body = STREAM_BODY
+    local routed = action(server) as tltp.Response
+    test.equal(routed.content_type, "text/event-stream")
+    test.truthy(routed._stream_fn)
+  end
+)
+
+test.it(
+  "a body that does not ask for a stream answers json",
+  function()
+    local server = build(meta_file(t001_meta(), t001_entries()), "m")
+
+    local plain = '{"messages":[{"role":"user","content":"a"}],"max_tokens":2}'
+    local response, stream_fn = serve.stream(server, plain)
+    test.equal(stream_fn, nil)
+    test.equal(response.status, "OK")
+    test.equal(response.content_type, "application/json")
+    test.equal(response.body, serve.answer(server, plain).body)
+
+    local off = '{"messages":[{"role":"user","content":"a"}],"max_tokens":2,"stream":false}'
+    local off_response, off_run = serve.stream(server, off)
+    test.equal(off_run, nil)
+    test.equal(off_response.content_type, "application/json")
+    test.equal(off_response.body, response.body)
+  end
+)
+
+test.it(
+  "a stream request the route cannot use answers json and writes no event",
+  function()
+    local server = build(meta_file(t001_meta(), t001_entries()), "m")
+
+    local cases: {{string, tltp.Status, string, {string}}} = {
+      {
+        '{"messages":[],"stream":true}',
+        "BadRequest",
+        "invalid_request_error",
+        {"messages"},
+      },
+      {
+        '{"messages":[{"role":"user","content":"a"}],"max_tokens":2,"stream":"yes"}',
+        "BadRequest",
+        "invalid_request_error",
+        {"stream"},
+      },
+      {
+        '{"messages":[{"role":"user","content":"aaaaaa"}],"stream":true}',
+        "BadRequest",
+        "invalid_request_error",
+        {"messages", "max_tokens", "6", "256", "260"},
+      },
+    }
+
+    for _, held in ipairs(cases) do
+      local response, decoded = stream_refused(server, held[1])
+      test.equal(response.status, held[2], held[1])
+      test.equal(decoded.error.type, held[3], held[1])
+      for _, word in ipairs(held[4]) do
+        test.includes(decoded.error.message, word, held[1])
+      end
+    end
+
+    local untemplated = build(
+      meta_file(
+        without_meta(t001_meta(), "tokenizer.chat_template"), t001_entries()
+      ),
+      "m"
+    )
+    local untemplated_response, untemplated_error = stream_refused(
+      untemplated, STREAM_BODY
+    )
+    test.equal(untemplated_response.status, "InternalServerError")
+    test.equal(untemplated_error.error.type, "internal_error")
+    test.includes(untemplated_error.error.message, "tokenizer.chat_template")
+
+    local raw_path = meta_file(
+      replaced(t001_meta(), mtext("tokenizer.chat_template", "\255")),
+      t001_entries()
+    )
+    local tokens = tokenizer.load(raw_path) as tokenizer.Tokenizer
+    local _, encode_line = tokens:encode("\255")
+    local raw_response, raw_error = stream_refused(
+      build(raw_path, "m"), STREAM_BODY
+    )
+    test.equal(raw_response.status, "InternalServerError")
+    test.equal(raw_error.error.message, encode_line)
+
+    local unmeasured = build(
+      meta_file(
+        without_meta(t001_meta(), "qwen35moe.embedding_length"), t001_entries()
+      ),
+      "m"
+    )
+    local unmeasured_response, unmeasured_error = stream_refused(
+      unmeasured, STREAM_BODY
+    )
+    test.equal(unmeasured_response.status, "InternalServerError")
+    test.includes(unmeasured_error.error.message, "model")
+    test.includes(unmeasured_error.error.message, "embedding_length")
+  end
+)
+
+test.it(
+  "a stream that cannot be generated or encoded ends without done",
+  function()
+    local body = '{"messages":[{"role":"user","content":"a"}],"max_tokens":2,"stream":true,"temperature":1,"top_k":2,"seed":1000}'
+
+    local unreadable_path = meta_file(
+      replaced(
+        t001_meta(), mstrings("tokenizer.ggml.tokens", {"a", "b", "\255"})
+      ),
+      t001_entries()
+    )
+    local unreadable = build(unreadable_path, "m")
+    local _, unreadable_run = serve.stream(unreadable, body)
+    local unreadable_payloads = collected(unreadable_run as tltp.StreamFn)
+    test.equal(#unreadable_payloads, 1)
+    test.deepEqual(events_of(unreadable_payloads)[1], ROLE_EVENT)
+
+    local pieces = tokenizer.load(unreadable_path) as tokenizer.Tokenizer
+    local _, decode_line = pieces:decode({2})
+    test.equal(refused(unreadable, body).error.message, decode_line)
+
+    local broken = build(
+      meta_file(
+        replaced(
+          t001_meta(), mstrings("tokenizer.ggml.tokens", {"a", "b", "\195\164"})
+        ),
+        t001_entries()
+      ),
+      "m"
+    )
+    local _, broken_run = serve.stream(broken, body)
+    local broken_payloads = collected(broken_run as tltp.StreamFn)
+    test.equal(#broken_payloads, 1)
+    test.deepEqual(events_of(broken_payloads)[1], ROLE_EVENT)
   end
 )

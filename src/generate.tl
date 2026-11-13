@@ -8,6 +8,7 @@ local record generate
     temperature: number | nil
     top_k: integer | nil
     end_id: integer | nil
+    on_token: function(string) | nil
   end
 
   text: function(
@@ -159,6 +160,14 @@ function generate.text(
       break
     end
     produced[#produced + 1] = token_id
+    local piece, piece_line = tokens:decode({token_id})
+    if piece is nil then
+      return nil, piece_line
+    end
+    local on_token = options.on_token
+    if not (on_token is nil) then
+      on_token(piece)
+    end
     if #produced >= options.max_tokens then
       break
     end

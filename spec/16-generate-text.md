@@ -40,6 +40,7 @@ local record generate
     temperature: number | nil
     top_k: integer | nil
     end_id: integer | nil
+    on_token: function(string) | nil
   end
 
   text: function(
@@ -68,7 +69,7 @@ a sample takes are worked out by hand from `15/T-001`'s scores.
 
 ## Functional requirements
 
-- FR-001 (US-001) WHEN `generate.text(model, tokenizer, prompt, options)` is called with options FR-009 accepts, THE SYSTEM SHALL return the ids it sampled decoded by `tokenizer:decode` as the first value, nil as the second, and the number of ids it sampled as the third, nil when it returns nil, holding no part of the prompt.
+- FR-001 (US-001) WHEN `generate.text(model, tokenizer, prompt, options)` is called with options FR-009 accepts, THE SYSTEM SHALL return the ids it sampled decoded by `tokenizer:decode` as the first value, nil as the second, and the number of ids it sampled as the third, nil when it returns nil, holding no part of the prompt, and report each token to `on_token` as it is appended when the options carry one.
 - FR-002 (US-002) WHEN a call begins, THE SYSTEM SHALL take the prompt's ids from `tokenizer:encode(prompt)`, call `model:forward` with each id and its index as the position, in list order, and take the first sampled token from the scores the last of those calls returns.
 - FR-003 (US-002) WHEN a token is sampled that is neither the end id nor the last `max_tokens` allows, THE SYSTEM SHALL call `model:forward` with it at the next position and sample the next token from the scores that call returns.
 - FR-004 (US-003) WHEN `temperature` is absent or zero, THE SYSTEM SHALL take the sampled token as the id of the highest score, the lowest id among equal highest scores.
@@ -77,12 +78,12 @@ a sample takes are worked out by hand from `15/T-001`'s scores.
 - FR-007 (US-004) WHEN the sampled token is the end id, THE SYSTEM SHALL stop without appending it, the end id being `end_id` when given and the tokenizer's `end_id` otherwise, and no end id when both are absent.
 - FR-008 (US-004) WHEN `max_tokens` ids have been appended, THE SYSTEM SHALL stop.
 - FR-009 (US-005) IF `max_tokens` is below one, or `temperature` is given and is below zero, or `top_k` is given and is below one, THEN THE SYSTEM SHALL return nil and one line naming `generate` and the first option at fault in that order, these checks running before the prompt is encoded.
-- FR-010 (US-005) IF `tokenizer:encode`, `model:forward` or `tokenizer:decode` returns nil, THEN THE SYSTEM SHALL return nil and that line unchanged.
+- FR-010 (US-005) IF `tokenizer:encode`, `model:forward` or `tokenizer:decode` returns nil, THEN THE SYSTEM SHALL return nil and that line unchanged, the decode being either the one taken of an id as it is appended or the one taken of the whole list at the end.
 - FR-011 (US-005) IF `tokenizer:encode` returns no ids, THEN THE SYSTEM SHALL return nil and one line naming `prompt`.
 
 ## Non-goals
 
-- No route, command, config key or streaming: `serve` and the chat completions route are spec 17, and this call returns one finished string.
+- No route, command or config key: `serve` and the chat completions route are specs 17 and 18, and this call returns one finished string; streaming that string out as it is generated is spec 19.
 - No sampler beyond the three shapes above: no top-p, no repetition or presence penalty, no stop strings, and no bias or logit list.
 - No reuse of a model across calls: each call prefills from position zero, so the caller builds a model per call.
 

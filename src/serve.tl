@@ -30,6 +30,7 @@ local record serve
   build: function(Endpoint): tltp.Server | nil, string | nil
   start: function(Endpoint, function(string)): integer
   answer: function(tltp.Server, string): Reply
+  stream: function(tltp.Server, string): tltp.Response, tltp.StreamFn | nil
 end
 
 local record LooseObject
@@ -44,6 +45,25 @@ local record Request
   top_k: integer | nil
   max_tokens: integer
   seed: integer
+  stream: boolean
+end
+
+local record Prepared
+  model: serve.Model
+  request: Request
+  prompt: string
+  ids: {integer}
+  generation: compute.Model
+end
+
+local record EventChoice
+  index: integer
+  delta: {string: string} | nil
+  finish_reason: string | nil
+end
+
+local record Event
+  choices: {EventChoice}
 end
 
 local DEFAULT_BUDGET: integer = 256
@@ -176,12 +196,22 @@ local function request_of(body: string): Request | nil, string | nil
     seed = held
   end
 
+  local stream = false
+  local stream_value = fields.stream
+  if not (stream_value is nil) then
+    if not (stream_value is boolean) then
+      return nil, "stream: not a boolean"
+    end
+    stream = stream_value as boolean
+  end
+
   return {
     messages = messages,
     temperature = temperature,
     top_k = top_k,
     max_tokens = budget,
     seed = seed,
+    stream = stream,
   }, nil
 end
 
@@ -199,53 +229,75 @@ local function budget_fault(
   )
 end
 
-function serve.answer(server: tltp.Server, body: string): serve.Reply
+local function prepared(
+  server: tltp.Server, body: string
+): Prepared | nil, serve.Reply | nil
   local model = models[server]
   if model is nil then
-    return failed("model: this server holds none")
+    return nil, failed("model: this server holds none")
   end
 
   local request, request_line = request_of(body)
   if request is nil then
-    return rejected(request_line as string)
+    return nil, rejected(request_line as string)
   end
 
   local prompt, render_line = chat.render(model.tokenizer, request.messages)
   if prompt is nil then
-    return failed(render_line as string)
+    return nil, failed(render_line as string)
   end
 
   local ids, encode_line = model.tokenizer:encode(prompt)
   if ids is nil then
-    return failed(encode_line as string)
+    return nil, failed(encode_line as string)
   end
 
   local window, window_line = compute.model(model.backend, model.handle, nil)
   if window is nil then
-    return failed(window_line as string)
+    return nil, failed(window_line as string)
   end
 
   local budget = request.max_tokens
   local needed = #ids + budget - 1
   if needed > window.positions then
-    return budget_fault(#ids, budget, window.positions)
+    return nil, budget_fault(#ids, budget, window.positions)
   end
 
   local generation, generation_line = compute.model(
     model.backend, model.handle, needed
   )
   if generation is nil then
-    return failed(generation_line as string)
+    return nil, failed(generation_line as string)
   end
 
-  local options: generate.Options = {
-    max_tokens = budget,
+  return {
+    model = model,
+    request = request,
+    prompt = prompt,
+    ids = ids,
+    generation = generation,
+  }, nil
+end
+
+local function options_of(
+  ready: Prepared, on_token: function(string) | nil
+): generate.Options
+  local request = ready.request
+  return {
+    max_tokens = request.max_tokens,
     seed = request.seed,
     temperature = request.temperature,
     top_k = request.top_k,
+    on_token = on_token,
   }
+end
+
+local function finished(ready: Prepared): serve.Reply
   local text, text_line, sampled = generate.text(
-    generation, model.tokenizer, prompt, options
+    ready.generation,
+    ready.model.tokenizer,
+    ready.prompt,
+    options_of(ready, nil)
   )
   if text is nil then
     return failed(text_line as string)
@@ -260,13 +312,90 @@ function serve.answer(server: tltp.Server, body: string): serve.Reply
           {index = 0, message = {role = "assistant", content = text}},
         },
         usage = {
-          prompt_tokens = #ids,
+          prompt_tokens = #ready.ids,
           completion_tokens = completion,
-          total_tokens = #ids + completion,
+          total_tokens = #ready.ids + completion,
         },
       }
     ) as string,
   }
+end
+
+local function event_data(choice: EventChoice): string | nil
+  local data = tltp.json_encode({choices = {choice}} as Event)
+  return data
+end
+
+local function producer(ready: Prepared): tltp.StreamFn
+  return function(emit: tltp.EmitFn): boolean | nil
+    local opening = event_data({index = 0, delta = {role = "assistant"}})
+    if opening is nil then
+      return
+    end
+    emit(opening)
+
+    local broken = false
+    local text, _, sampled = generate.text(
+      ready.generation,
+      ready.model.tokenizer,
+      ready.prompt,
+      options_of(
+        ready,
+        function(piece: string)
+          if broken then
+            return
+          end
+          local data = event_data({index = 0, delta = {content = piece}})
+          if data is nil then
+            broken = true
+            return
+          end
+          emit(data)
+        end
+      )
+    )
+    if broken or text is nil then
+      return
+    end
+
+    local reason = "stop"
+    if (sampled as integer) >= ready.request.max_tokens then
+      reason = "length"
+    end
+    local ending = event_data({index = 0, finish_reason = reason})
+    if ending is nil then
+      return
+    end
+    emit(ending)
+    emit("[DONE]")
+    return true
+  end
+end
+
+function serve.answer(server: tltp.Server, body: string): serve.Reply
+  local ready, failure = prepared(server, body)
+  if ready is nil then
+    return failure as serve.Reply
+  end
+  return finished(ready)
+end
+
+function serve.stream(
+  server: tltp.Server, body: string
+): tltp.Response, tltp.StreamFn | nil
+  local ready, failure = prepared(server, body)
+  if ready is nil then
+    local fault = failure as serve.Reply
+    return server:json(fault.status, fault.body), nil
+  end
+
+  if not ready.request.stream then
+    local reply = finished(ready)
+    return server:json(reply.status, reply.body), nil
+  end
+
+  local run = producer(ready)
+  return server:sse(run), run
 end
 
 local function one_line(text: string): string
@@ -286,8 +415,8 @@ local function install(server: tltp.Server, name: string)
   server:post(
     CHAT_PATH,
     function(self: tltp.Server): tltp.Response
-      local reply = serve.answer(self, self.req.body)
-      return self:json(reply.status, reply.body)
+      local response = serve.stream(self, self.req.body)
+      return response
     end
   )
 
