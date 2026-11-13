@@ -44,7 +44,7 @@ local record generate
 
   text: function(
     compute.Model, tokenizer.Tokenizer, string, Options
-  ): string | nil, string | nil
+  ): string | nil, string | nil, integer | nil
 end
 ```
 
@@ -68,7 +68,7 @@ a sample takes are worked out by hand from `15/T-001`'s scores.
 
 ## Functional requirements
 
-- FR-001 (US-001) WHEN `generate.text(model, tokenizer, prompt, options)` is called with options FR-009 accepts, THE SYSTEM SHALL return the ids it sampled decoded by `tokenizer:decode` as the first value and nil as the second, holding no part of the prompt.
+- FR-001 (US-001) WHEN `generate.text(model, tokenizer, prompt, options)` is called with options FR-009 accepts, THE SYSTEM SHALL return the ids it sampled decoded by `tokenizer:decode` as the first value, nil as the second, and the number of ids it sampled as the third, nil when it returns nil, holding no part of the prompt.
 - FR-002 (US-002) WHEN a call begins, THE SYSTEM SHALL take the prompt's ids from `tokenizer:encode(prompt)`, call `model:forward` with each id and its index as the position, in list order, and take the first sampled token from the scores the last of those calls returns.
 - FR-003 (US-002) WHEN a token is sampled that is neither the end id nor the last `max_tokens` allows, THE SYSTEM SHALL call `model:forward` with it at the next position and sample the next token from the scores that call returns.
 - FR-004 (US-003) WHEN `temperature` is absent or zero, THE SYSTEM SHALL take the sampled token as the id of the highest score, the lowest id among equal highest scores.

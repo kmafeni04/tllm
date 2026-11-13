@@ -36,11 +36,17 @@ opened, which is the path `03/FR-009` already takes for a bind failure, so a bad
 and an exit code instead of a bound port.
 
 ```teal
+local compute = require("tllm.compute")
+local tokenizer = require("tllm.tokenizer")
+local weights = require("tllm.weights")
+
 local record serve
   record Model
     name: string
     path: string
     handle: weights.Handle
+    tokenizer: tokenizer.Tokenizer
+    backend: compute.Backend
   end
 
   record Endpoint
@@ -81,7 +87,7 @@ mapped until the process ends.
 - FR-007 (US-004) WHEN no model word is given and the config holds exactly one entry, THE SYSTEM SHALL call the start function with an endpoint whose `name` is that entry's key and whose `path` is that entry's `path`.
 - FR-008 (US-002) IF no model word is given and the config holds more than one entry, THEN THE SYSTEM SHALL refuse, as `04/FR-010` states.
 - FR-009 (US-001) WHEN `build` returns a server, THE SYSTEM SHALL hold that server's model in a table declared in `tllm.serve` whose keys are the servers `build` returned, and call no release on its mapping.
-- FR-010 (US-001) WHEN `model_of(server)` is called with a server `build` returned, THE SYSTEM SHALL return the model it holds, whose `name` is that endpoint's `name`, whose `path` is that endpoint's `path`, and whose `handle` is the handle `weights.load` returned for that path.
+- FR-010 (US-001) WHEN `model_of(server)` is called with a server `build` returned, THE SYSTEM SHALL return the model it holds, whose `name` is that endpoint's `name`, whose `path` is that endpoint's `path`, whose `handle` is the handle `weights.load` returned for that path, and whose `tokenizer` and `backend` are the tokenizer and the compute backend `build` loaded from that file.
 - FR-011 (US-001) IF `model_of` is called with a server `build` did not return, THEN THE SYSTEM SHALL return nil.
 
 ## Non-goals

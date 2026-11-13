@@ -204,6 +204,7 @@ local record compute
   end
 
   record Model
+    positions: integer
     forward: function(Model, integer, integer): {number} | nil, string | nil
   end
 
@@ -281,6 +282,7 @@ local record ModelPlan
   kinds: {boolean}
   count: integer
   width: integer
+  positions: integer
   attention: compute.Attention | nil
   linear: compute.LinearAttention | nil
   feed_forward: compute.FeedForward
@@ -2804,6 +2806,7 @@ local function model_plan(
     kinds = kinds,
     count = count,
     width = math.floor(width),
+    positions = taken,
     attention = attention,
     linear = linear,
     feed_forward = feed_forward as compute.FeedForward,
@@ -2874,6 +2877,7 @@ function compute.model(
   }
 
   local model = {} as compute.Model
+  model.positions = plan.positions
   model.forward = function(
     _: compute.Model, token_id: integer, position: integer
   ): {number} | nil, string | nil

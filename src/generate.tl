@@ -12,7 +12,7 @@ local record generate
 
   text: function(
     compute.Model, tokenizer.Tokenizer, string, Options
-  ): string | nil, string | nil
+  ): string | nil, string | nil, integer | nil
 end
 
 local type Options = generate.Options
@@ -122,7 +122,7 @@ function generate.text(
   tokens: tokenizer.Tokenizer,
   prompt: string,
   options: Options
-): string | nil, string | nil
+): string | nil, string | nil, integer | nil
   local fault = faulted(options)
   if not (fault is nil) then
     return nil, fault
@@ -169,7 +169,11 @@ function generate.text(
     position = position + 1
   end
 
-  return tokens:decode(produced)
+  local answer, decode_line = tokens:decode(produced)
+  if answer is nil then
+    return nil, decode_line
+  end
+  return answer, nil, #produced
 end
 
 return generate

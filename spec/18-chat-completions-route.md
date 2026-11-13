@@ -1,6 +1,6 @@
 # 18: Answer a chat conversation over HTTP
 
-**Status**: pending   **Depends on**: 03, 16, 17
+**Status**: done   **Depends on**: 03, 16, 17
 
 ## Problem & context
 
@@ -201,9 +201,4 @@ end
 
 ## Amendments
 
-- `08/FR-010`: the model `model_of` returns also holds the tokenizer and the compute backend `build`
-  loaded from that file.
-- `15/FR-001`: the model it returns also holds `positions`, the number of positions it was built
-  with, which is the file's `context_length` when the argument is nil.
-- `16/FR-001`: `generate.text` also returns, as a third value, the number of ids it sampled, nil
-  when it returns nil; its first two values are unchanged.
+- None.

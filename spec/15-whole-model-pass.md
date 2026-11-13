@@ -69,6 +69,7 @@ local weights = require("tllm.weights")
 
 local record compute
   record Model
+    positions: integer
     forward: function(
       Model, integer, integer
     ): {number} | nil, string | nil
@@ -90,7 +91,7 @@ end
 
 ## Functional requirements
 
-- FR-001 (US-001) WHEN `compute.model(backend, handle, positions)` is called with a backend that `compute.load` returned and a handle a GGUF file mapped, THE SYSTEM SHALL return a model and nil as its second value.
+- FR-001 (US-001) WHEN `compute.model(backend, handle, positions)` is called with a backend that `compute.load` returned and a handle a GGUF file mapped, THE SYSTEM SHALL return a model whose `positions` is the number of positions it was built with, the `positions` argument when it is given and the file's `context_length` otherwise, and nil as its second value.
 - FR-002 (US-001) THE SYSTEM SHALL take the run as the blocks whose indices count from zero below the file's `block_count` minus its `nextn_predict_layers`, zero when the file does not hold that key, and read no tensor of a block at or above that count.
 - FR-003 (US-001) THE SYSTEM SHALL take a block of the run as a linear-attention block when `(index + 1)` modulo the file's `full_attention_interval`, four when the file does not hold it, is not zero, and as a full-attention block otherwise.
 - FR-004 (US-001) THE SYSTEM SHALL take the geometry from the metadata FR-014 reads as: `embedding_length` as the width; `expert_used_count` as `experts_used`; `attention.layer_norm_rms_epsilon` as `eps`; `positions` as the argument when it is given and `context_length` otherwise; when the run holds a full-attention block, `attention.head_count` as `heads`, the row count of that block's `attn_q.weight` divided by twice `heads` as `head_length`, the row count of its `attn_k.weight` divided by `head_length` as `kv_heads`, `rope.dimension_count` as `rope_dimensions` and `rope.freq_base` as `rope_base`; and, when the run holds a linear block, `ssm.group_count` as `linear_key_heads`, `ssm.state_size` as `linear_key_length`, `ssm.time_step_rank` as `linear_value_heads`, `ssm.inner_size` divided by `linear_value_heads` as `linear_value_length` and `ssm.conv_kernel` as `linear_conv_kernel`.
