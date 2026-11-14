@@ -84,17 +84,22 @@ test.it(
 )
 
 test.it(
-  "missing and unknown commands are usage errors",
+  "a bare invocation prints help and exits one",
   function()
-    local missing_code, missing_out, missing_err = run_with({})
-    test.equal(missing_code, 1)
-    test.equal(#missing_out, 0)
-    test.equal(#missing_err, 1)
+    local code, out, err = run_with({})
+    test.equal(code, 1)
+    test.equal(#err, 0)
+    test.includes(table.concat(out), "Usage: tllm")
+  end
+)
 
-    local unknown_code, unknown_out, unknown_err = run_with({"wat"})
-    test.equal(unknown_code, 1)
-    test.equal(#unknown_out, 0)
-    test.equal(#unknown_err, 1)
+test.it(
+  "an unknown command is a usage error",
+  function()
+    local code, out, err = run_with({"wat"})
+    test.equal(code, 1)
+    test.equal(#out, 0)
+    test.equal(#err, 1)
   end
 )
 

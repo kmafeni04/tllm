@@ -41,8 +41,9 @@ what a script returns, so `os.exit` is what sets the process status.
 Since the package is an application rather than a library, `src/init.tl` returns no table and
 `require("tllm")` runs the CLI; `01/FR-008` was amended to say so.
 
-Exit codes: `1` for a usage error with one line on stderr; `0` for `--help`, with the usage text on
-stdout; `2` for the refusal, with one line on stdout.
+Exit codes: `1` for a usage error with one line on stderr, and for a bare `tllm` with no command, which
+puts the same usage text `--help` prints on stdout and still exits `1` rather than `0`; `0` for
+`--help`, with the usage text on stdout; `2` for the refusal, with one line on stdout.
 
 Tests live in `tests/*.test.tl` and run under `lde run test`. They need a Teal declaration for
 `lde-test`, which ships LuaCATS types and no `.d.tl`: add the dev dependency with
@@ -63,7 +64,7 @@ one in `../targs/types/lde-test.d.tl` or generate it with tlcat, and put `types`
 - FR-002 (US-003) WHEN `require("tllm.cli").run(args, write_out, write_err)` is called, where `args` is the command line without the program name (`{"serve", "qwen3.8-27b"}`) and the writers take one string ending in a newline, THE SYSTEM SHALL return an integer exit code, send every message through `write_out` or `write_err`, and never terminate the process.
 - FR-003 (US-001) THE SYSTEM SHALL accept an optional `MODEL` and the options `--config`, `--host` and `--port` for `serve`, and a required `MODEL` and the options `--config`, `--prefill-tokens` and `--decode-tokens` for `bench`.
 - FR-004 (US-001) WHEN `bench` is invoked with valid arguments, THE SYSTEM SHALL write one line to stdout holding the command name, then `: not implemented`, then, when at least one value was given, a parenthesised list of the given values in the order and shape described above, and return exit code 2.
-- FR-005 (US-002) IF no command is given or the command is neither `serve` nor `bench`, THEN THE SYSTEM SHALL write one line saying what is wrong to stderr and return exit code 1.
+- FR-005 (US-002) IF no command is given, THEN THE SYSTEM SHALL write the usage text `--help` prints to stdout and return exit code 1. IF the command is neither `serve` nor `bench`, THEN THE SYSTEM SHALL write one line saying what is wrong to stderr and return exit code 1.
 - FR-006 (US-002) IF targs rejects the argument list, THEN THE SYSTEM SHALL write the returned error's `message` to stderr as one line and return exit code 1. IF an argument is otherwise invalid for the chosen command, THEN THE SYSTEM SHALL write one line naming the offending flag or value to stderr and return exit code 1.
 - FR-007 (US-001) WHEN `--help` is passed to `tllm` or to either command, THE SYSTEM SHALL write the usage text through the stdout writer and return exit code 0.
 
@@ -77,7 +78,7 @@ one in `../targs/types/lde-test.d.tl` or generate it with tlcat, and put `types`
 
 - T-001 (FR-002): `dispatcher returns a code through supplied writers`, proves requiring `tllm.cli` and calling `run` returns an integer for both a failing and a refusing argument list, puts each message in the supplied writer, and leaves the process streams untouched.
 - T-002 (FR-003, FR-004): `bench echoes the values it was given`, proves a model with `--config`, `--prefill-tokens` and `--decode-tokens` is accepted and each given value appears in the stdout line, exiting 2.
-- T-003 (FR-005): `missing and unknown commands are usage errors`, proves no command and an unknown command each give exit 1, one stderr line and nothing on stdout.
+- T-003 (FR-005): `a bare invocation prints help and exits one`, proves no command gives exit 1, the usage text on stdout and nothing on stderr; `an unknown command is a usage error`, proves an unknown command gives exit 1, one stderr line and nothing on stdout.
 - T-004 (FR-006): `bad arguments exit one`, proves `bench` without a model, `--port 0` and `--prefill-tokens 0` each give exit 1, one stderr line and nothing on stdout.
 - T-005 (FR-007): `help returns zero`, proves `--help` and `serve --help` each return 0, put the usage text in the stdout writer, and write nothing to stderr.
 

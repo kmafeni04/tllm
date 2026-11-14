@@ -303,7 +303,7 @@ function cli.run(
   if bench then
     outcome = bench_outcome(bench)
   else
-    write_err(one_line("no command given; expected 'serve' or 'bench'"))
+    write_out(one_line(parser:get_help()))
     return 1
   end
 
