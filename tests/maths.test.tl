@@ -220,7 +220,8 @@ local location = fixture(
 local handle, load_failure = weights.load(location)
 test.equal(load_failure, nil)
 
-local backend = compute.load() as compute.Backend
+-- the numbers below are the CPU backend's, so these stay on the CPU
+local backend = compute.load(nil, false) as compute.Backend
 local maths = compute.attach(backend, handle as weights.Handle) as compute.Maths
 
 local function refused(value: {number} | nil, line: string | nil): string

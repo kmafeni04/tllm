@@ -35,7 +35,8 @@ The pin is the tag `v0.29.0`, commit `57e2c2ca2a7cae756b1c4dfafa0cdfef9051d234`
 `ggml_version()` returns that string, so the version the engine reports is the library's own, not a
 second copy of the constant in this project. The flags are in FR-001 rather than prose because each
 one is load bearing: shared libraries or there is nothing to load, tests and examples off for time,
-and Metal, Accelerate and BLAS off so the CPU backend is the only one built.
+Metal, Accelerate and BLAS off so CUDA is the only other backend built, and backends as modules the
+library loads at run time, so a machine without a driver still opens it.
 
 ggml is not vendored. `build.lua` fetches the pinned commit's source archive, unpacks it and compiles
 it with ggml's own cmake, and keeps the unpacked source, the build tree and the install tree in
@@ -45,9 +46,11 @@ already compiled instead of fetching and compiling ggml again. lde reruns a buil
 script and pays only what that cache does not already hold. `target/` is ignored by git, so the tree
 gains one build script and no third party source.
 
-Building needs cmake, a C and a C++ compiler and network on the first build. A machine without them
-fails at build time, not at the first multiplication, and nothing here falls back to a downloaded
-binary.
+Building needs cmake, a C and a C++ compiler, the CUDA toolkit the build compiles `libggml-cuda` with,
+and network on the first build. A machine without them fails at build time, not at the first
+multiplication, and nothing here falls back to a downloaded binary. The CUDA toolkit is a build
+dependency only: the library that is placed does not name the driver or the CUDA runtime, so it opens
+on a machine that has neither.
 
 `build.lua` is the one file in the tree that is not Teal: lde runs a build script only when it is
 named `build.lua` and only through lde's runtime, and that file sits outside the `check` and
@@ -58,14 +61,18 @@ otherwise runs, so `build.lua` writes the `.lua` for every `src/*.tl` itself, th
 compiler `lde.json` adds as a devDependency. Type checking is unchanged and still runs through
 `ldx`.
 
-The build produces `libggml`, `libggml-base` and `libggml-cpu` as separate shared libraries, each with
-a versioned file name and symlinks, and the first names the other two in its own dependency list.
-Moving a library out of the build tree breaks that link twice: glibc does not search a dlopened
-library's own directory, and a library left in the build tree carries an absolute runpath into that
-tree, so it keeps looking for its sibling where it was compiled. FR-001 therefore forces the install
-runpath into the build tree too, and `$ORIGIN` is the only runpath that still resolves once the
-files have moved. T-001 is what proves it: `libggml-base` is mapped from `target/tllm` and not from
-the cache. The file `compute.load` opens is `libggml.so`.
+The build produces `libggml` and `libggml-base` as shared libraries, each with a versioned file name
+and symlinks, and the first names the second in its own dependency list. The CPU and CUDA backends
+are modules, `libggml-cpu-*` and `libggml-cuda`, that the registry inside `libggml` loads when it
+starts instead of libraries `libggml` links against, so a missing driver makes one module fail to
+load and finds no device rather than stopping the library from opening at all.
+Moving a library out of the build tree breaks its link to its sibling twice: glibc does not search a
+dlopened library's own directory, and a library left in the build tree carries an absolute runpath
+into that tree, so it keeps looking for its sibling where it was compiled. FR-001 therefore forces
+the install runpath into the build tree too, and `$ORIGIN` is the only runpath that still resolves
+once the files have moved, for `libggml-base` and for every module. T-001 is what proves it:
+`libggml-base` is mapped from `target/tllm` and not from the cache. The file `compute.load` opens is
+`libggml.so`, and the modules it loads come from the same directory.
 
 With no path, `compute.load` opens `target/tllm/libggml.so` relative to the current directory, which
 is the package root whenever lde runs the engine or its tests. Started from anywhere else it fails the
@@ -101,10 +108,10 @@ what ggml returns from this operation.
 
 ## Functional requirements
 
-- FR-001 (US-001) WHEN lde refreshes the package's target directory, THE SYSTEM SHALL fetch ggml at commit `57e2c2ca2a7cae756b1c4dfafa0cdfef9051d234`, configure it with `BUILD_SHARED_LIBS` on, `GGML_BUILD_TESTS` off, `GGML_BUILD_EXAMPLES` off, `GGML_METAL`, `GGML_ACCELERATE` and `GGML_BLAS` off, `CMAKE_BUILD_WITH_INSTALL_RPATH` on and `CMAKE_INSTALL_RPATH` set to `$ORIGIN` passed through the shell unexpanded, and build it.
+- FR-001 (US-001) WHEN lde refreshes the package's target directory, THE SYSTEM SHALL fetch ggml at commit `57e2c2ca2a7cae756b1c4dfafa0cdfef9051d234`, configure it with `BUILD_SHARED_LIBS` on, `GGML_BUILD_TESTS` off, `GGML_BUILD_EXAMPLES` off, `GGML_METAL`, `GGML_ACCELERATE` and `GGML_BLAS` off, `GGML_BACKEND_DL` on, `GGML_CPU_ALL_VARIANTS` on, `GGML_CUDA` on, `CMAKE_CUDA_ARCHITECTURES` set to `86`, `CMAKE_BUILD_WITH_INSTALL_RPATH` on and `CMAKE_INSTALL_RPATH` set to `$ORIGIN` passed through the shell unexpanded, and build it.
   Not testable: the fetched commit and the flags are read from `build.lua`, and whether the build ran
   is visible in `target/tllm`, which holds the libraries afterwards or nothing.
-- FR-002 (US-001) WHEN the build finishes, THE SYSTEM SHALL place `libggml`, `libggml-base` and `libggml-cpu`, with the versioned names and symlinks the build produces, in the package's target directory, so that loading the placed `libggml` maps `libggml-base` from that directory and not from the build cache.
+- FR-002 (US-001) WHEN the build finishes, THE SYSTEM SHALL place `libggml` and `libggml-base`, with the versioned names and symlinks the build produces, and the backend modules the build produces, `libggml-cpu-*` and `libggml-cuda`, in the package's target directory, so that loading the placed `libggml` maps `libggml-base` from that directory and not from the build cache and loads its backends from there too.
 - FR-003 (US-002) THE SYSTEM SHALL set a handle's `path` to the library file it opened: the string `target/tllm/libggml.so`, relative to the current directory, when `compute.load` is given no path, and the argument unchanged when one is given.
 - FR-004 (US-002) WHEN `compute.load` returns a handle, THE SYSTEM SHALL set `version` to the version string the library reports for itself, which is `0.29.0` for the pinned source.
 - FR-005 (US-003) IF the file to open cannot be loaded, THEN THE SYSTEM SHALL return nil and one line holding that path.
@@ -126,7 +133,7 @@ what ggml returns from this operation.
 ## Non-goals
 
 - Linux x86_64 only: no macOS, no Windows, no other architecture, no prebuilt download; the source is compiled.
-- No other operation, type or backend: no add, normalise, rope, softmax or row gather, no quantised tensor, no attention, no CUDA, Metal, Vulkan or BLAS, no thread count, no buffer reuse between calls.
+- No other operation, type or backend: no add, normalise, rope, softmax or row gather, no quantised tensor, no attention, no Metal, Vulkan or BLAS, no thread count, no buffer reuse between calls. The CUDA backend is built and placed by the flags `21` adds, and this spec computes nothing on it.
 - No model: `serve` loads a GGUF through `weights.load` under `08`, and nothing reads a weight through this library.
 
 ## Tests

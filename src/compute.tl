@@ -10,6 +10,8 @@ typedef struct ggml_context ggml_context;
 typedef struct ggml_tensor ggml_tensor;
 typedef struct ggml_cgraph ggml_cgraph;
 typedef struct ggml_backend ggml_backend;
+typedef struct ggml_backend_buffer * ggml_backend_buffer_t;
+typedef struct ggml_backend_device * ggml_backend_dev_t;
 
 struct ggml_init_params {
   size_t mem_size;
@@ -65,9 +67,17 @@ ggml_tensor *ggml_sigmoid(ggml_context *ctx, ggml_tensor *a);
 ggml_cgraph *ggml_new_graph(ggml_context *ctx);
 void ggml_build_forward_expand(ggml_cgraph *cgraph, ggml_tensor *tensor);
 void *ggml_get_data(const ggml_tensor *tensor);
-ggml_backend *ggml_backend_cpu_init(void);
 void ggml_backend_free(ggml_backend *backend);
 int ggml_backend_graph_compute(ggml_backend *backend, ggml_cgraph *cgraph);
+ggml_backend_dev_t ggml_backend_dev_by_type(int type);
+void ggml_backend_load_all_from_path(const char *dir_path);
+ggml_backend *ggml_backend_dev_init(ggml_backend_dev_t device, const char *params);
+const char *ggml_backend_dev_name(ggml_backend_dev_t device);
+void ggml_backend_dev_memory(ggml_backend_dev_t device, size_t *free, size_t *total);
+ggml_backend_buffer_t ggml_backend_alloc_ctx_tensors(ggml_context *ctx, ggml_backend *backend);
+void ggml_backend_buffer_free(ggml_backend_buffer_t buffer);
+void ggml_backend_tensor_set(ggml_tensor *tensor, const void *data, size_t offset, size_t size);
+void ggml_backend_tensor_get(const ggml_tensor *tensor, void *data, size_t offset, size_t size);
 
 void *aligned_alloc(size_t alignment, size_t size);
 void free(void *ptr);
@@ -132,9 +142,17 @@ local record Library
   ggml_new_graph: function(ffi.CData): ffi.CData
   ggml_build_forward_expand: function(ffi.CData, ffi.CData)
   ggml_get_data: function(ffi.CData): ffi.CData
-  ggml_backend_cpu_init: function(): ffi.CData
   ggml_backend_free: function(ffi.CData)
   ggml_backend_graph_compute: function(ffi.CData, ffi.CData): integer
+  ggml_backend_dev_by_type: function(integer): ffi.CData
+  ggml_backend_load_all_from_path: function(string)
+  ggml_backend_dev_init: function(ffi.CData, ffi.CData | nil): ffi.CData
+  ggml_backend_dev_name: function(ffi.CData): ffi.CData
+  ggml_backend_dev_memory: function(ffi.CData, ffi.CData, ffi.CData)
+  ggml_backend_alloc_ctx_tensors: function(ffi.CData, ffi.CData): ffi.CData
+  ggml_backend_buffer_free: function(ffi.CData)
+  ggml_backend_tensor_set: function(ffi.CData, ffi.CData, integer, integer)
+  ggml_backend_tensor_get: function(ffi.CData, ffi.CData, integer, integer)
 end
 
 local record Libc
@@ -146,6 +164,8 @@ local record compute
   record Backend
     path: string
     version: string
+    device: string | nil
+    memory: function(Backend): integer | nil, integer | nil
     matvec: function(
       Backend, {{number}}, {number}
     ): {number} | nil, string | nil
@@ -208,7 +228,7 @@ local record compute
     forward: function(Model, integer, integer): {number} | nil, string | nil
   end
 
-  load: function(path?: string): Backend | nil, string | nil
+  load: function(path?: string, offload?: boolean): Backend | nil, string | nil
   attach: function(Backend, weights.Handle): Maths | nil, string | nil
   attend: function(
     Backend, weights.Handle, Geometry
@@ -233,10 +253,37 @@ local record TensorView
   data: ffi.CData
 end
 
+-- the device copy of one model's weights: one buffer, its descriptors and the
+-- backend the graphs over them are computed on
+local record Copy
+  lib: Library
+  backend: ffi.CData
+  ctx: ffi.CData
+  arena: ffi.CData
+  buffer: ffi.CData
+  tensors: {string: ffi.CData}
+end
+
+local record Loaded
+  lib: Library
+  device: ffi.CData | nil
+  offload: boolean
+end
+
+-- tensors written into host memory at once, or into the device buffer of the
+-- backend the graph runs on once the buffer exists
+local record Graph
+  lib: Library
+  ctx: ffi.CData
+  device: ffi.CData | nil
+  pending: {function()}
+end
+
 local record Mapped
   lib: Library
   tensors: {string: Tensor}
   descriptors: {string: ffi.CData}
+  device: Copy | nil
 end
 
 local record Cache
@@ -321,6 +368,9 @@ local GGML_TYPE_F32: integer = 0
 local GGML_TYPE_I32: integer = 26
 local GGML_STATUS_SUCCESS: integer = 0
 local GGML_ROPE_TYPE_NEOX: integer = 2
+-- GGML_BACKEND_DEVICE_TYPE_CPU and _GPU in the pinned ggml source
+local GGML_DEVICE_CPU: integer = 0
+local GGML_DEVICE_GPU: integer = 1
 
 local WEIGHTS: {string: boolean} = {
   f32 = true,
@@ -390,7 +440,11 @@ local LINEAR_TYPES: {string: {string: boolean}} = {
 
 -- the library each loaded backend reads, so attach needs no field the
 -- published Backend record does not hold
-local LIBRARIES: {compute.Backend: Library} = {}
+local LOADED: {compute.Backend: Loaded} = {}
+local COPIES: {weights.Handle: {compute.Backend: Copy}} = {}
+local GUARDED: {weights.Handle: boolean} = {}
+-- the directories whose backend modules have been found already
+local SEARCHED: {string: boolean} = {}
 
 local function load_library(location: string): Library
   return ffi.load(location) as Library
@@ -427,6 +481,25 @@ local function arena_params(size: integer): Params
   local params = ffi.new("struct ggml_init_params") as Params
   params.mem_size = size
   return params
+end
+
+-- the backends are modules loaded from the directory the library sits in, so a
+-- machine without a driver still opens libggml and simply finds no device
+local function find_backends(lib: Library, location: string)
+  local directory = location:match("^(.*)/") or "."
+  if SEARCHED[directory] then
+    return
+  end
+  SEARCHED[directory] = true
+  lib.ggml_backend_load_all_from_path(directory)
+end
+
+local function cpu_backend(lib: Library): ffi.CData | nil
+  local device = lib.ggml_backend_dev_by_type(GGML_DEVICE_CPU)
+  if device is nil then
+    return nil
+  end
+  return lib.ggml_backend_dev_init(device, nil)
 end
 
 local function shape_refusal(matrix: {{number}}, vector: {number}): string | nil
@@ -502,7 +575,7 @@ local function matvec(
     vector_cells[position - 1] = value
   end
 
-  local backend = lib.ggml_backend_cpu_init()
+  local backend = cpu_backend(lib)
   local status: integer = GGML_STATUS_SUCCESS
   if not (backend is nil) then
     status = lib.ggml_backend_graph_compute(backend, graph)
@@ -533,10 +606,17 @@ local function write_floats(cells: Floats, values: {number})
   end
 end
 
-local function floats_of(
-  lib: Library, tensor: ffi.CData, count: integer
+local function read_floats(
+  lib: Library, tensor: ffi.CData, count: integer, device: ffi.CData | nil
 ): {number}
-  local cells = ffi.cast("float*", lib.ggml_get_data(tensor)) as Floats
+  local cells: Floats
+  if device is nil then
+    cells = ffi.cast("float*", lib.ggml_get_data(tensor)) as Floats
+  else
+    local buffer = ffi.new("float[?]", count) as ffi.CData
+    lib.ggml_backend_tensor_get(tensor, buffer, 0, count * F32_BYTES)
+    cells = buffer as Floats
+  end
   local result: {number} = {}
   for position = 0, count - 1 do
     result[position + 1] = cells[position]
@@ -544,26 +624,347 @@ local function floats_of(
   return result
 end
 
-local function tensor_of(
+local function read_bytes(
   lib: Library,
-  ctx: ffi.CData,
-  dims: {integer},
-  code: integer,
-  location: ffi.CData
+  tensor: ffi.CData,
+  destination: ffi.CData,
+  bytes: integer,
+  device: ffi.CData | nil
+)
+  if device is nil then
+    ffi.copy(destination, lib.ggml_get_data(tensor), bytes)
+  else
+    lib.ggml_backend_tensor_get(tensor, destination, 0, bytes)
+  end
+end
+
+local function tensor_in(
+  lib: Library, ctx: ffi.CData, dims: {integer}, code: integer
 ): ffi.CData
   local ne: {integer} = {1, 1, 1, 1}
   for index, size in ipairs(dims) do
     ne[index] = size
   end
-  local tensor = lib.ggml_new_tensor_4d(ctx, code, ne[1], ne[2], ne[3], ne[4])
-  local view = tensor as TensorView
-  view.data = location
+  return lib.ggml_new_tensor_4d(ctx, code, ne[1], ne[2], ne[3], ne[4])
+end
+
+-- a tensor of f32 numbers, written into host memory now or into the device
+-- buffer once the graph's buffer exists
+local function vector_of(graph: Graph, values: {number}): ffi.CData
+  local tensor = tensor_in(graph.lib, graph.ctx, {#values}, GGML_TYPE_F32)
+  local device = graph.device
+  if device is nil then
+    write_floats(
+      ffi.cast("float*", graph.lib.ggml_get_data(tensor)) as Floats, values
+    )
+  else
+    graph.pending[#graph.pending + 1] = function()
+      local cells = ffi.new("float[?]", #values) as Floats
+      write_floats(cells, values)
+      graph.lib.ggml_backend_tensor_set(
+        tensor, cells as ffi.CData, 0, #values * F32_BYTES
+      )
+    end
+  end
   return tensor
 end
 
+local function scalar_of(graph: Graph, value: integer): ffi.CData
+  local tensor = tensor_in(graph.lib, graph.ctx, {1}, GGML_TYPE_I32)
+  local device = graph.device
+  if device is nil then
+    local cells = ffi.cast("int32_t*", graph.lib.ggml_get_data(tensor)) as Ints
+    cells[0] = value
+  else
+    graph.pending[#graph.pending + 1] = function()
+      local cells = ffi.new("int32_t[1]") as Ints
+      cells[0] = value
+      graph.lib.ggml_backend_tensor_set(
+        tensor, cells as ffi.CData, 0, I32_BYTES
+      )
+    end
+  end
+  return tensor
+end
+
+-- a tensor ggml reads out of memory the caller already holds: a slice of the
+-- mapped file, or a history buffer compute keeps
+local function host_tensor(
+  graph: Graph,
+  dims: {integer},
+  code: integer,
+  location: ffi.CData,
+  bytes: integer
+): ffi.CData
+  local tensor = tensor_in(graph.lib, graph.ctx, dims, code)
+  local device = graph.device
+  if device is nil then
+    (tensor as TensorView).data = location
+  else
+    graph.pending[#graph.pending + 1] = function()
+      graph.lib.ggml_backend_tensor_set(tensor, location, 0, bytes)
+    end
+  end
+  return tensor
+end
+
+local function device_of_copy(copy: Copy | nil): ffi.CData | nil
+  if copy is nil then
+    return nil
+  end
+  return copy.backend
+end
+
+local record Session
+  lib: Library
+  copy: Copy | nil
+  arena: ffi.CData
+  ctx: ffi.CData
+  graph: Graph
+  backend: ffi.CData | nil
+  buffer: ffi.CData | nil
+end
+
+local function opened(
+  mapped: Mapped, tensors: integer, data_bytes: integer
+): Session | nil, string | nil
+  local lib = mapped.lib
+  local copy = mapped.device
+  -- with a device copy the only host memory a graph needs is its arena
+  local host_bytes = data_bytes
+  if not (copy is nil) then
+    host_bytes = 0
+  end
+
+  local arena_size = arena_for(lib, tensors, host_bytes)
+  local arena = libc.aligned_alloc(ARENA_ALIGN, arena_size)
+  if arena is nil then
+    return nil, "no context of " .. arena_size .. " bytes"
+  end
+
+  local params = arena_params(arena_size)
+  params.mem_buffer = arena
+  if not (copy is nil) then
+    params.no_alloc = true
+  end
+  local ctx = lib.ggml_init(params)
+
+  return {
+    lib = lib,
+    copy = copy,
+    arena = arena,
+    ctx = ctx,
+    graph = {
+      lib = lib, ctx = ctx, device = device_of_copy(copy), pending = {}
+    },
+  } as Session
+end
+
+-- the graph's own tensors are allocated here, in device memory when the
+-- weights are there, so that no tensor of the graph holds a host pointer
+local function computed(
+  session: Session, operation: string, cgraph: ffi.CData
+): string | nil
+  local lib = session.lib
+  local copy = session.copy
+  if copy is nil then
+    session.backend = cpu_backend(lib)
+  else
+    local buffer = lib.ggml_backend_alloc_ctx_tensors(session.ctx, copy.backend)
+    if buffer is nil then
+      return operation .. ": no device buffer"
+    end
+    session.buffer = buffer
+    session.backend = copy.backend
+  end
+
+  local backend = session.backend
+  if backend is nil then
+    return operation .. ": no backend"
+  end
+
+  for _, write in ipairs(session.graph.pending) do
+    write()
+  end
+
+  local status = lib.ggml_backend_graph_compute(backend, cgraph)
+  if status ~= GGML_STATUS_SUCCESS then
+    return operation .. ": compute returned " .. status
+  end
+  return nil
+end
+
+local function closed(session: Session)
+  local lib = session.lib
+  local buffer = session.buffer
+  if not (buffer is nil) then
+    lib.ggml_backend_buffer_free(buffer)
+  end
+  local backend = session.backend
+  local copy = session.copy
+  if copy is nil and not (backend is nil) then
+    lib.ggml_backend_free(backend)
+  end
+  lib.ggml_free(session.ctx)
+  libc.free(session.arena)
+end
+
+local function run(
+  mapped: Mapped,
+  operation: string,
+  tensors: integer,
+  data_bytes: integer,
+  count: integer,
+  build: function(Graph): ffi.CData
+): {number} | nil, string | nil
+  local session, open_line = opened(mapped, tensors, data_bytes)
+  if session is nil then
+    return nil, operation .. ": " .. (open_line as string)
+  end
+
+  local result = build(session.graph)
+  local cgraph = session.lib.ggml_new_graph(session.ctx)
+  session.lib.ggml_build_forward_expand(cgraph, result)
+
+  local failure = computed(session, operation, cgraph)
+  local numbers: {number} = {}
+  if failure is nil then
+    numbers = read_floats(
+      session.lib, result, count, device_of_copy(session.copy)
+    )
+  end
+  closed(session)
+
+  if failure then
+    return nil, failure
+  end
+  return numbers
+end
+
+local function free_copy(copy: Copy)
+  copy.lib.ggml_backend_buffer_free(copy.buffer)
+  copy.lib.ggml_free(copy.ctx)
+  libc.free(copy.arena)
+  copy.lib.ggml_backend_free(copy.backend)
+end
+
+-- every tensor of the handle goes into the device once, and the copy stays
+-- with the handle so each later entry point over it reuses it
+local function device_copy(loaded: Loaded, handle: weights.Handle): Copy | nil
+  local lib = loaded.lib
+  local found = loaded.device as ffi.CData
+  local backend = lib.ggml_backend_dev_init(found, nil)
+  if backend is nil then
+    return nil
+  end
+
+  local count = 0
+  for _ in pairs(handle.tensors) do
+    count = count + 1
+  end
+
+  local arena_size = arena_for(lib, count, 0)
+  local arena = libc.aligned_alloc(ARENA_ALIGN, arena_size)
+  if arena is nil then
+    lib.ggml_backend_free(backend)
+    return nil
+  end
+
+  local params = arena_params(arena_size)
+  params.mem_buffer = arena
+  params.no_alloc = true
+  local ctx = lib.ggml_init(params)
+
+  local tensors: {string: ffi.CData} = {}
+  for name, tensor in pairs(handle.tensors) do
+    tensors[name] = tensor_in(lib, ctx, tensor.dims, tensor.kind.code)
+  end
+
+  local buffer = lib.ggml_backend_alloc_ctx_tensors(ctx, backend)
+  if buffer is nil then
+    lib.ggml_free(ctx)
+    libc.free(arena)
+    lib.ggml_backend_free(backend)
+    return nil
+  end
+
+  for name, tensor in pairs(handle.tensors) do
+    lib.ggml_backend_tensor_set(tensors[name], tensor.data, 0, tensor.bytes)
+  end
+
+  return {
+    lib = lib,
+    backend = backend,
+    ctx = ctx,
+    arena = arena,
+    buffer = buffer,
+    tensors = tensors,
+  } as Copy
+end
+
+local function release_copies(handle: weights.Handle)
+  local held = COPIES[handle]
+  if held is nil then
+    return
+  end
+  COPIES[handle] = nil
+  for _, copy in pairs(held) do
+    free_copy(copy)
+  end
+end
+
+-- the release a handle already carries gives the device copy back first, once
+local function freeing(handle: weights.Handle, plain: function(weights.Handle))
+  release_copies(handle)
+  plain(handle)
+end
+
+local function guard_release(handle: weights.Handle)
+  if GUARDED[handle] then
+    return
+  end
+  GUARDED[handle] = true
+  local plain = handle.release
+  handle.release = function(h: weights.Handle) freeing(h, plain) end
+end
+
 local function mapped_of(
-  lib: Library, handle: weights.Handle, operation: string
+  backend: compute.Backend,
+  loaded: Loaded,
+  handle: weights.Handle,
+  operation: string
 ): Mapped | nil, string | nil
+  local lib = loaded.lib
+  backend.device = nil
+  local found = loaded.device
+  if loaded.offload and not (found is nil) then
+    local held = COPIES[handle]
+    local copy: Copy | nil = nil
+    if not (held is nil) then
+      copy = held[backend]
+    end
+    if copy is nil then
+      copy = device_copy(loaded, handle)
+      if not (copy is nil) then
+        if held is nil then
+          held = {}
+          COPIES[handle] = held
+        end
+        held[backend] = copy
+        guard_release(handle)
+      end
+    end
+    if not (copy is nil) then
+      backend.device = ffi.string(lib.ggml_backend_dev_name(found as ffi.CData))
+      return {
+        lib = lib,
+        tensors = handle.tensors,
+        descriptors = copy.tensors,
+        device = copy,
+      }
+    end
+  end
+
   local count = 0
   for _ in pairs(handle.tensors) do
     count = count + 1
@@ -582,9 +983,9 @@ local function mapped_of(
 
   local descriptors: {string: ffi.CData} = {}
   for name, tensor in pairs(handle.tensors) do
-    descriptors[name] = tensor_of(
-      lib, ctx, tensor.dims, tensor.kind.code, tensor.data
-    )
+    local descriptor = tensor_in(lib, ctx, tensor.dims, tensor.kind.code)
+    (descriptor as TensorView).data = tensor.data
+    descriptors[name] = descriptor
   end
 
   return {
@@ -592,57 +993,6 @@ local function mapped_of(
     tensors = handle.tensors,
     descriptors = descriptors,
   }
-end
-
-local function vector_of(
-  lib: Library, ctx: ffi.CData, values: {number}
-): ffi.CData
-  local tensor = lib.ggml_new_tensor_4d(ctx, GGML_TYPE_F32, #values, 1, 1, 1)
-  write_floats(ffi.cast("float*", lib.ggml_get_data(tensor)) as Floats, values)
-  return tensor
-end
-
-local function run(
-  lib: Library,
-  operation: string,
-  arena_size: integer,
-  count: integer,
-  build: function(ffi.CData): ffi.CData
-): {number} | nil, string | nil
-  local arena = libc.aligned_alloc(ARENA_ALIGN, arena_size)
-  if arena is nil then
-    return nil, operation .. ": no context of " .. arena_size .. " bytes"
-  end
-
-  local params = arena_params(arena_size)
-  params.mem_buffer = arena
-  local ctx = lib.ggml_init(params)
-  local graph = lib.ggml_new_graph(ctx)
-  local result = build(ctx)
-  lib.ggml_build_forward_expand(graph, result)
-
-  local backend = lib.ggml_backend_cpu_init()
-  local status: integer = GGML_STATUS_SUCCESS
-  if not (backend is nil) then
-    status = lib.ggml_backend_graph_compute(backend, graph)
-    lib.ggml_backend_free(backend)
-  end
-
-  local numbers: {number} = {}
-  if not (backend is nil) and status == GGML_STATUS_SUCCESS then
-    numbers = floats_of(lib, result, count)
-  end
-
-  lib.ggml_free(ctx)
-  libc.free(arena)
-
-  if backend is nil then
-    return nil, operation .. ": no backend"
-  end
-  if status ~= GGML_STATUS_SUCCESS then
-    return nil, operation .. ": compute returned " .. status
-  end
-  return numbers
 end
 
 local function looked_up(
@@ -682,6 +1032,7 @@ local function matrix_vector(
   end
 
   local location = tensor.data
+  local stride: integer = 0
   if depth == 3 then
     if index is nil then
       return nil,
@@ -697,7 +1048,7 @@ local function matrix_vector(
     if index >= dims[3] then
       return nil, "matvec: index " .. index .. " of " .. dims[3]
     end
-    local stride = math.floor(tensor.bytes / dims[3])
+    stride = math.floor(tensor.bytes / dims[3])
     local base = ffi.cast("intptr_t", tensor.data) as integer
     location = ffi.cast("void *", base + index * stride) as ffi.CData
   elseif not (index is nil) then
@@ -723,18 +1074,19 @@ local function matrix_vector(
   local lib = mapped.lib
   local data_bytes = (rows + columns) * F32_BYTES
   return run(
-    lib,
+    mapped,
     "matvec",
-    arena_for(lib, 4, data_bytes),
+    4,
+    data_bytes,
     rows,
-    function(ctx: ffi.CData): ffi.CData
+    function(graph: Graph): ffi.CData
       local weight = mapped.descriptors[name]
       if depth == 3 then
-        weight = tensor_of(
-          lib, ctx, {columns, rows}, tensor.kind.code, location
+        weight = host_tensor(
+          graph, {columns, rows}, tensor.kind.code, location, stride
         )
       end
-      return lib.ggml_mul_mat(ctx, weight, vector_of(lib, ctx, vector))
+      return lib.ggml_mul_mat(graph.ctx, weight, vector_of(graph, vector))
     end
   )
 end
@@ -761,15 +1113,15 @@ local function row(
   local lib = mapped.lib
   local columns = dims[1]
   return run(
-    lib,
+    mapped,
     "row",
-    arena_for(lib, 4, columns * F32_BYTES + I32_BYTES),
+    4,
+    columns * F32_BYTES + I32_BYTES,
     columns,
-    function(ctx: ffi.CData): ffi.CData
-      local index = lib.ggml_new_tensor_4d(ctx, GGML_TYPE_I32, 1, 1, 1, 1)
-      local cells = ffi.cast("int32_t*", lib.ggml_get_data(index)) as Ints
-      cells[0] = id
-      return lib.ggml_get_rows(ctx, mapped.descriptors[name], index)
+    function(graph: Graph): ffi.CData
+      return lib.ggml_get_rows(
+        graph.ctx, mapped.descriptors[name], scalar_of(graph, id)
+      )
     end
   )
 end
@@ -805,13 +1157,14 @@ local function normalise(
 
   local lib = mapped.lib
   return run(
-    lib,
+    mapped,
     "norm",
-    arena_for(lib, 6, count * 3 * F32_BYTES),
+    6,
+    count * 3 * F32_BYTES,
     count,
-    function(ctx: ffi.CData): ffi.CData
-      local scaled = lib.ggml_rms_norm(ctx, vector_of(lib, ctx, vector), eps)
-      return lib.ggml_mul(ctx, scaled, mapped.descriptors[gain_name])
+    function(graph: Graph): ffi.CData
+      local scaled = lib.ggml_rms_norm(graph.ctx, vector_of(graph, vector), eps)
+      return lib.ggml_mul(graph.ctx, scaled, mapped.descriptors[gain_name])
     end
   )
 end
@@ -843,19 +1196,17 @@ local function rotary(
 
   local lib = mapped.lib
   return run(
-    lib,
+    mapped,
     "rope",
-    arena_for(lib, 6, count * 2 * F32_BYTES + I32_BYTES),
+    6,
+    count * 2 * F32_BYTES + I32_BYTES,
     count,
-    function(ctx: ffi.CData): ffi.CData
-      local input = vector_of(lib, ctx, vector)
-      local places = lib.ggml_new_tensor_4d(ctx, GGML_TYPE_I32, 1, 1, 1, 1)
-      local cells = ffi.cast("int32_t*", lib.ggml_get_data(places)) as Ints
-      cells[0] = position
+    function(graph: Graph): ffi.CData
+      local input = vector_of(graph, vector)
       return lib.ggml_rope_ext(
-        ctx,
+        graph.ctx,
         input,
-        places,
+        scalar_of(graph, position),
         nil,
         dimensions,
         GGML_ROPE_TYPE_NEOX,
@@ -881,12 +1232,13 @@ local function softmax(
 
   local lib = mapped.lib
   return run(
-    lib,
+    mapped,
     "softmax",
-    arena_for(lib, 4, count * 2 * F32_BYTES),
+    4,
+    count * 2 * F32_BYTES,
     count,
-    function(ctx: ffi.CData): ffi.CData
-      return lib.ggml_soft_max(ctx, vector_of(lib, ctx, vector))
+    function(graph: Graph): ffi.CData
+      return lib.ggml_soft_max(graph.ctx, vector_of(graph, vector))
     end
   )
 end
@@ -901,13 +1253,14 @@ local function add(
   local lib = mapped.lib
   local count = #left
   return run(
-    lib,
+    mapped,
     "add",
-    arena_for(lib, 4, count * 3 * F32_BYTES),
+    4,
+    count * 3 * F32_BYTES,
     count,
-    function(ctx: ffi.CData): ffi.CData
-      local first = vector_of(lib, ctx, left)
-      return lib.ggml_add(ctx, first, vector_of(lib, ctx, right))
+    function(graph: Graph): ffi.CData
+      local first = vector_of(graph, left)
+      return lib.ggml_add(graph.ctx, first, vector_of(graph, right))
     end
   )
 end
@@ -922,13 +1275,14 @@ local function swiglu(
   local lib = mapped.lib
   local count = #gate
   return run(
-    lib,
+    mapped,
     "swiglu",
-    arena_for(lib, 4, count * 3 * F32_BYTES),
+    4,
+    count * 3 * F32_BYTES,
     count,
-    function(ctx: ffi.CData): ffi.CData
-      local first = vector_of(lib, ctx, gate)
-      return lib.ggml_swiglu_split(ctx, first, vector_of(lib, ctx, up))
+    function(graph: Graph): ffi.CData
+      local first = vector_of(graph, gate)
+      return lib.ggml_swiglu_split(graph.ctx, first, vector_of(graph, up))
     end
   )
 end
@@ -943,13 +1297,14 @@ local function sigmoid_gate(
   local lib = mapped.lib
   local count = #gate
   return run(
-    lib,
+    mapped,
     "sigmoid_gate",
-    arena_for(lib, 6, count * 4 * F32_BYTES),
+    6,
+    count * 4 * F32_BYTES,
     count,
-    function(ctx: ffi.CData): ffi.CData
-      local gates = lib.ggml_sigmoid(ctx, vector_of(lib, ctx, gate))
-      return lib.ggml_mul(ctx, gates, vector_of(lib, ctx, values))
+    function(graph: Graph): ffi.CData
+      local gates = lib.ggml_sigmoid(graph.ctx, vector_of(graph, gate))
+      return lib.ggml_mul(graph.ctx, gates, vector_of(graph, values))
     end
   )
 end
@@ -2020,20 +2375,16 @@ local function linear_press(
   local vector_floats = count + kernel * rows + 2 * channels
   local head_floats = key_length * value_heads
   local data_floats = 4 * state_floats + 8 * vector_floats + 8 * head_floats
-  local arena_size = arena_for(lib, 96, data_floats * F32_BYTES)
-  local arena = libc.aligned_alloc(ARENA_ALIGN, arena_size)
-  if arena is nil then
-    return nil, "block: no context of " .. arena_size .. " bytes"
+  local session, open_line = opened(mapped, 96, data_floats * F32_BYTES)
+  if session is nil then
+    return nil, "block: " .. (open_line as string)
   end
-
-  local params = arena_params(arena_size)
-  params.mem_buffer = arena
-  local ctx = lib.ggml_init(params)
-  local graph = lib.ggml_new_graph(ctx)
+  local ctx = session.ctx
+  local device = device_of_copy(session.copy)
 
   local normalised = lib.ggml_mul(
     ctx,
-    lib.ggml_rms_norm(ctx, vector_of(lib, ctx, hidden), eps),
+    lib.ggml_rms_norm(ctx, vector_of(session.graph, hidden), eps),
     descriptors[prefix .. "attn_norm.weight"]
   )
   local projected = lib.ggml_mul_mat(
@@ -2067,9 +2418,13 @@ local function linear_press(
   local current = lib.ggml_reshape_3d(ctx, projected, 1, rows, 1)
   local window = current
   if kernel > 1 then
-    local past = lib.ggml_new_tensor_3d(ctx, GGML_TYPE_F32, kernel - 1, rows, 1)
-    local past_view = past as TensorView
-    past_view.data = kept.history
+    local past = host_tensor(
+      session.graph,
+      {kernel - 1, rows, 1},
+      GGML_TYPE_F32,
+      kept.history,
+      (kernel - 1) * rows * F32_BYTES
+    )
     window = lib.ggml_concat(ctx, past, current, 0)
   end
   local convolved = lib.ggml_silu(
@@ -2127,11 +2482,13 @@ local function linear_press(
     ctx, lib.ggml_repeat(ctx, reads, shapes), key_length, 1, value_heads
   )
 
-  local stored_state = lib.ggml_new_tensor_3d(
-    ctx, GGML_TYPE_F32, key_length, value_length, value_heads
+  local stored_state = host_tensor(
+    session.graph,
+    {key_length, value_length, value_heads},
+    GGML_TYPE_F32,
+    kept.state,
+    state_floats * F32_BYTES
   )
-  local state_view = stored_state as TensorView
-  state_view.data = kept.state
   local decayed = lib.ggml_mul(
     ctx, stored_state, lib.ggml_reshape_3d(ctx, decay, 1, 1, value_heads)
   )
@@ -2169,30 +2526,23 @@ local function linear_press(
     lib.ggml_reshape_2d(ctx, gated, channels, 1)
   )
 
-  lib.ggml_build_forward_expand(graph, output)
-  lib.ggml_build_forward_expand(graph, updated)
+  local cgraph = lib.ggml_new_graph(ctx)
+  lib.ggml_build_forward_expand(cgraph, output)
+  lib.ggml_build_forward_expand(cgraph, updated)
 
-  local backend = lib.ggml_backend_cpu_init()
-  local status: integer = GGML_STATUS_SUCCESS
-  if not (backend is nil) then
-    status = lib.ggml_backend_graph_compute(backend, graph)
-    lib.ggml_backend_free(backend)
-  end
-
+  local failure = computed(session, "block", cgraph)
   local numbers: {number} = {}
-  if not (backend is nil) and status == GGML_STATUS_SUCCESS then
-    numbers = floats_of(lib, output, count)
+  if failure is nil then
+    numbers = read_floats(lib, output, count, device)
 
-    local next_state = ffi.cast("float*", lib.ggml_get_data(updated)) as Floats
-    local kept_state = ffi.cast("float*", kept.state) as Floats
-    for cell = 0, state_floats - 1 do
-      kept_state[cell] = next_state[cell]
-    end
+    read_bytes(lib, updated, kept.state, state_floats * F32_BYTES, device)
     if kernel > 1 then
       -- the past tensor reads a channel's taps consecutively, oldest first
       local slots = kernel - 1
       local history = ffi.cast("float*", kept.history) as Floats
-      local fresh = ffi.cast("float*", lib.ggml_get_data(projected)) as Floats
+      local fresh_bytes = ffi.new("float[?]", rows) as ffi.CData
+      read_bytes(lib, projected, fresh_bytes, rows * F32_BYTES, device)
+      local fresh = fresh_bytes as Floats
       for channel = 0, rows - 1 do
         for slot = 0, slots - 2 do
           history[channel * slots + slot] = history[channel * slots + slot + 1]
@@ -2202,23 +2552,20 @@ local function linear_press(
     end
     kept.count = position + 1
   end
+  closed(session)
 
-  lib.ggml_free(ctx)
-  libc.free(arena)
-
-  if backend is nil then
-    return nil, "block: no backend"
-  end
-  if status ~= GGML_STATUS_SUCCESS then
-    return nil, "block: compute returned " .. status
+  if failure then
+    return nil, failure
   end
   return numbers
 end
 
-function compute.load(path?: string): compute.Backend | nil, string | nil
+function compute.load(
+  path?: string, offload?: boolean
+): compute.Backend | nil, string | nil
   local location = path or DEFAULT_PATH
-  local opened, lib = pcall(load_library, location)
-  if not opened then
+  local made, lib = pcall(load_library, location)
+  if not made then
     return nil, refusal_line(location, lib as string)
   end
   local handle = lib as Library
@@ -2227,6 +2574,12 @@ function compute.load(path?: string): compute.Backend | nil, string | nil
   if not known then
     return nil, refusal_line(location, version as string)
   end
+
+  find_backends(handle, location)
+
+  -- the card is reported even when the caller asked to stay on the CPU, and
+  -- used only when they did not
+  local found = handle.ggml_backend_dev_by_type(GGML_DEVICE_GPU)
 
   local backend = {
     path = location,
@@ -2237,18 +2590,33 @@ function compute.load(path?: string): compute.Backend | nil, string | nil
   ): {number} | nil, string | nil
     return matvec(handle, matrix, vector)
   end
-  LIBRARIES[backend] = handle
+  backend.memory = function(_: compute.Backend): integer | nil, integer | nil
+    if found is nil then
+      return nil, nil
+    end
+    local free_bytes = ffi.new("size_t[1]")
+    local total_bytes = ffi.new("size_t[1]")
+    handle.ggml_backend_dev_memory(found, free_bytes, total_bytes)
+    local sizes = free_bytes as Ints
+    local totals = total_bytes as Ints
+    return tonumber(sizes[0]) as integer, tonumber(totals[0]) as integer
+  end
+  LOADED[backend] = {
+    lib = handle,
+    device = found,
+    offload = offload ~= false,
+  }
   return backend
 end
 
 function compute.attach(
   backend: compute.Backend, handle: weights.Handle
 ): compute.Maths | nil, string | nil
-  local lib = LIBRARIES[backend]
-  if lib is nil then
+  local loaded = LOADED[backend]
+  if loaded is nil then
     return nil, "attach: backend was not loaded by compute.load"
   end
-  local mapped, map_failure = mapped_of(lib, handle, "attach")
+  local mapped, map_failure = mapped_of(backend, loaded, handle, "attach")
   if mapped is nil then
     return nil, map_failure
   end
@@ -2304,8 +2672,8 @@ end
 function compute.attend(
   backend: compute.Backend, handle: weights.Handle, geometry: compute.Geometry
 ): compute.Attention | nil, string | nil
-  local lib = LIBRARIES[backend]
-  if lib is nil then
+  local loaded = LOADED[backend]
+  if loaded is nil then
     return nil, "attend: backend was not loaded by compute.load"
   end
   local refusal = geometry_refusal(geometry)
@@ -2313,7 +2681,7 @@ function compute.attend(
     return nil, refusal
   end
 
-  local mapped, map_failure = mapped_of(lib, handle, "attend")
+  local mapped, map_failure = mapped_of(backend, loaded, handle, "attend")
   if mapped is nil then
     return nil, map_failure
   end
@@ -2335,8 +2703,8 @@ end
 function compute.feed_forward(
   backend: compute.Backend, handle: weights.Handle, geometry: compute.Geometry
 ): compute.FeedForward | nil, string | nil
-  local lib = LIBRARIES[backend]
-  if lib is nil then
+  local loaded = LOADED[backend]
+  if loaded is nil then
     return nil, "feed_forward: backend was not loaded by compute.load"
   end
   if geometry.experts_used < 1 then
@@ -2346,7 +2714,7 @@ function compute.feed_forward(
     return nil, "feed_forward: eps " .. geometry.eps
   end
 
-  local mapped, map_failure = mapped_of(lib, handle, "feed_forward")
+  local mapped, map_failure = mapped_of(backend, loaded, handle, "feed_forward")
   if mapped is nil then
     return nil, map_failure
   end
@@ -2372,8 +2740,8 @@ end
 function compute.linear_attention(
   backend: compute.Backend, handle: weights.Handle, geometry: compute.Geometry
 ): compute.LinearAttention | nil, string | nil
-  local lib = LIBRARIES[backend]
-  if lib is nil then
+  local loaded = LOADED[backend]
+  if loaded is nil then
     return nil, "linear_attention: backend was not loaded by compute.load"
   end
   local shape, geometry_line = linear_shape_of(geometry)
@@ -2381,7 +2749,9 @@ function compute.linear_attention(
     return nil, geometry_line
   end
 
-  local mapped, map_failure = mapped_of(lib, handle, "linear_attention")
+  local mapped, map_failure = mapped_of(
+    backend, loaded, handle, "linear_attention"
+  )
   if mapped is nil then
     return nil, map_failure
   end
@@ -2462,11 +2832,12 @@ local function architecture_of(info: gguf.Info): string | nil, string | nil
 end
 
 local function model_plan(
-  lib: Library,
-  backend: compute.Backend,
-  handle: weights.Handle,
-  positions: integer | nil
+  backend: compute.Backend, handle: weights.Handle, positions: integer | nil
 ): ModelPlan | nil, string | nil
+  local loaded = LOADED[backend]
+  if loaded is nil then
+    return nil, "model: backend was not loaded by compute.load"
+  end
   local info, read_line = gguf.read(handle.path)
   if info is nil then
     return nil, "model: " .. (read_line as string)
@@ -2654,7 +3025,7 @@ local function model_plan(
     taken = positions
   end
 
-  local mapped, map_line = mapped_of(lib, handle, "model")
+  local mapped, map_line = mapped_of(backend, loaded, handle, "model")
   if mapped is nil then
     return nil, map_line
   end
@@ -2856,11 +3227,11 @@ end
 function compute.model(
   backend: compute.Backend, handle: weights.Handle, positions: integer | nil
 ): compute.Model | nil, string | nil
-  local lib = LIBRARIES[backend]
-  if lib is nil then
+  local loaded = LOADED[backend]
+  if loaded is nil then
     return nil, "model: backend was not loaded by compute.load"
   end
-  local plan, plan_line = model_plan(lib, backend, handle, positions)
+  local plan, plan_line = model_plan(backend, handle, positions)
   if plan is nil then
     return nil, plan_line
   end

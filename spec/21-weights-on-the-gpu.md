@@ -1,6 +1,6 @@
 # 21: Keep a model's weights in GPU memory and compute there
 
-**Status**: pending   **Depends on**: 07, 11, 15
+**Status**: done   **Depends on**: 07, 11, 15
 
 ## Problem & context
 
@@ -22,14 +22,14 @@ Three things in the tree decide the shape of the work.
 operation helpers read weights through those descriptors. So the weights are placed in one function,
 and it is there that they must end up in a device buffer.
 
-Graph tensors are where the second and third changes are. `compute.run` makes a CPU backend and
-computes, `tensor_of` writes a host pointer into a tensor made in a `no_alloc` context, and
-`vector_of` writes floats into host memory the same way. A tensor with no buffer from the device's
-backend cannot be computed there at all, and a device tensor's `data` is a device pointer, so for a
-graph computed on the card every tensor in it is allocated in device memory, inputs go in with
-`ggml_backend_tensor_set` and results come back with `ggml_backend_tensor_get`. `floats_of` and the
-linear-attention readback at the end of `linear_press` both read `ggml_get_data` directly and become
-that readback.
+Graph tensors are where the second and third changes are. `compute.run` makes the graph's tensors
+through `tensor_in` and writes their numbers through `vector_of`, `scalar_of` and `host_tensor`,
+which write host memory directly on the CPU path. A tensor with no buffer from the device's backend
+cannot be computed there at all, and a device tensor's `data` is a device pointer, so for a graph
+computed on the card the arena holds no numbers, `ggml_backend_alloc_ctx_tensors` puts every tensor
+of the graph in device memory, the writes those helpers collected go in with
+`ggml_backend_tensor_set`, and results come back with `ggml_backend_tensor_get`, which is also how
+`read_floats` and the linear-attention readback at the end of `linear_press` read them.
 
 The linear-attention history and state are plain `ffi` float arrays that `compute` hands to the
 graph as leaf tensors, so for a graph computed on the card they are copied into device memory with
@@ -46,7 +46,9 @@ as per handle because one process can hold a device backend and a CPU-only one o
 and because `compute.load` may be called twice.
 
 Nothing new is added to `weights.Handle`, which keeps the five fields `06` publishes, and the
-`release` that record already carries is the call that gives the device copy back, once.
+`release` that record already carries is the call that gives the device copy back, once: `compute`
+wraps it the first time it copies a handle, frees every copy of that handle and then calls what the
+handle carried.
 
 The build has one trap. ggml configures `CMAKE_CUDA_ARCHITECTURES` to `native` when nothing is
 passed, which reads the architecture from a visible device at configure time. Configured where no
@@ -58,10 +60,13 @@ the build pins the architecture instead of asking the machine, as the amendment 
 states.
 
 The pinned commit is the one `07` already builds, `57e2c2ca2a7cae756b1c4dfafa0cdfef9051d234`. With
-`GGML_CUDA` on, ggml adds `libggml-cuda` to the same install tree as `libggml`, `libggml-base` and
-`libggml-cpu`, and that library is a link dependency of `libggml`, so opening `libggml.so` makes its
-symbols reachable and no search path changes. `build.lua`'s existing `cp -P libggml*.so*` already
-carries the new library, so the build change is the flags alone.
+`GGML_CUDA` on, ggml builds `libggml-cuda` beside the CPU backends, and because `07` builds the
+backends as modules, `libggml.so` does not name it: the registry inside `libggml` loads the modules
+from the directory they were placed in. That is what keeps a machine without an NVIDIA driver
+working, since the module fails to open and finds no device instead of stopping `libggml.so` from
+opening at all, and it is why `compute.load` finds the modules before it looks for a device. The
+build carries the modules from the install tree beside the library it already copied, so the build
+change is the flags and one more copy.
 
 The maths surface is unchanged. Every function still takes and returns Lua numbers, `nil` and one
 line stay the refusal, and no caller in `serve`, `chat` or `generate` changes: the device is picked
@@ -99,7 +104,7 @@ next to a CPU result.
 
 ## Functional requirements
 
-- FR-001 (US-001) WHEN lde builds the package, THE SYSTEM SHALL place `libggml-cuda`, with its versioned names and symlinks, in the package's target directory beside `libggml`, `libggml-base` and `libggml-cpu`.
+- FR-001 (US-001) WHEN lde builds the package, THE SYSTEM SHALL place `libggml-cuda`, the backend module the build produces, in the package's target directory beside `libggml`, `libggml-base` and the CPU backend modules.
 - FR-002 (US-001) WHEN an entry point is built from a model handle, and the backend it is built on found a CUDA device, and that backend was not asked to stay on the CPU, THE SYSTEM SHALL copy every tensor of that handle into device memory and SHALL reuse that copy for every later entry point built from the same handle on the same backend.
 - FR-003 (US-001) WHEN an operation of FR-004's set is computed on a backend whose weights are in device memory, THE SYSTEM SHALL compute that operation's graph on the CUDA backend, and no tensor of that graph SHALL carry a host data pointer while it is computed.
   Not testable: the library reports the devices it found, not which backend ran a graph, and the
@@ -133,11 +138,14 @@ next to a CPU result.
 On a machine where `compute.load()`'s `memory` returns nil and nil, the library found no device:
 T-001, T-002 and T-004 skip with the line `no CUDA device`, and T-003 asserts its no-device half.
 
+A linear block on the card has one shape limit the CPU does not: ggml's CUDA convolution needs the
+channels it convolves to be a multiple of 128 and a convolution of 3, 4, 5, 7, 9 or 15 taps, so the
+small block T-002 compares has 128 channels and a four tap convolution.
+
 ## Open questions
 
 - None.
 
 ## Amendments
 
-- `07/FR-001`: the configure step also passes `GGML_CUDA` on and `CMAKE_CUDA_ARCHITECTURES=86`.
-- `07/FR-002`: the build also places `libggml-cuda`, with its versioned names and symlinks, beside `libggml`, `libggml-base` and `libggml-cpu` in the package's target directory.
+- None.

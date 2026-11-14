@@ -459,7 +459,8 @@ local function stacked_geometry(): compute.Geometry
   }
 end
 
-local backend = compute.load() as compute.Backend
+-- the numbers below are the CPU backend's, so these stay on the CPU
+local backend = compute.load(nil, false) as compute.Backend
 
 local function forwarded(
   handle: weights.Handle, shape: compute.Geometry

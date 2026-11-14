@@ -1,6 +1,7 @@
--- Builds ggml's CPU backend into the package's target directory and, because
--- lde skips Teal compilation when a build script is present, compiles src into
--- the same directory.
+-- Builds ggml with its CPU and CUDA backends into the package's target
+-- directory and, because lde skips Teal compilation when a build script is
+-- present, compiles src into the same directory. The backends are modules the
+-- library loads at run time, so a machine without a driver still opens it.
 
 local build = require("lde-build")
 local tl = require("tl")
@@ -30,6 +31,10 @@ build:sh(
 		"-DGGML_METAL=OFF",
 		"-DGGML_ACCELERATE=OFF",
 		"-DGGML_BLAS=OFF",
+		"-DGGML_CUDA=ON",
+		"-DCMAKE_CUDA_ARCHITECTURES=86",
+		"-DGGML_BACKEND_DL=ON",
+		"-DGGML_CPU_ALL_VARIANTS=ON",
 		"-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON",
 		"-DCMAKE_INSTALL_RPATH='$ORIGIN'",
 		'-DCMAKE_INSTALL_PREFIX="' .. build.outDir .. "/" .. CACHE .. '/install"',
@@ -39,6 +44,7 @@ build:sh(
 build:sh("cmake --build " .. CACHE .. "/build --target install --parallel")
 build:sh("rm -f libggml*.so*")
 build:sh("cp -P " .. CACHE .. "/install/lib/libggml*.so* .")
+build:sh("cp -P " .. CACHE .. "/install/bin/libggml*.so* .")
 
 for _, file in ipairs(build:scan(".", "**/*.tl")) do
 	if not file:match("%.d%.tl$") then

@@ -353,7 +353,8 @@ local function linear_only_entries(): {Entry}
   return both(entries, root_entries(2, {1, 0, 3, 4}))
 end
 
-local backend = compute.load() as compute.Backend
+-- the numbers below are the CPU backend's, so these stay on the CPU
+local backend = compute.load(nil, false) as compute.Backend
 
 local function loaded(meta: {Meta}, entries: {Entry}): weights.Handle
   local handle, failure = weights.load(fixture(meta, entries))
