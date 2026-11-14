@@ -22,11 +22,12 @@ route of the next spec needs it, so there is no boundary a plugin could sit behi
 
 The dialect keeps Jinja's tag syntax, its `-` trim markers and its `{# ... #}` comments, and runs
 expressions written in Python syntax. The tags run are `{{ }}`, `{% if %}`, `{% elif %}`,
-`{% else %}`, `{% for ... in ... %}`, `{% set %}` and `{% macro %}`, and the filters are `trim`
-and `length`; a tag outside that set, a filter outside it, and a method outside the seven that
-spec 20 names are refused as `FR-007` states. A template is rendered with `messages`,
-`add_generation_prompt`, `loop`, the names `{% set %}` binds, macro names, `namespace(...)`,
-`raise_exception` and the seven string methods, which `FR-011` states and a test asserts.
+`{% else %}`, `{% for ... in ... %}`, `{% set %}` and `{% macro %}`, and the filters run are `trim`,
+`length` and `tojson`; a tag outside that set, a filter outside it, and a method outside the seven
+that spec 20 names are refused as `FR-007` states. A template is rendered with `messages`,
+`add_generation_prompt`, `tools` when a tool list is given, `loop`, the names `{% set %}` binds,
+macro names, `namespace(...)`, `raise_exception` and the seven string methods, which `FR-011`
+states and a test asserts.
 
 `tokenizer.load` keeps `tokenizer.chat_template` as read and refuses neither its absence nor its
 kind, in the shape `10/FR-012` fixed for `pre` and `merges`, so a file is never refused for a key
@@ -91,10 +92,10 @@ tests here use hand-made fixtures, because a 23 GB file cannot be a test input.
   carriage return.
 - FR-006 (US-001) WHEN an output expression ends with `|trim`, THE SYSTEM SHALL write its value
   with the whitespace at both ends removed.
-- FR-007 (US-003) IF the template holds a tag the reader does not run, a filter other than `trim`
-  or `length`, a method other than the seven spec 20 names, a tag whose expression is missing or
-  will not parse, a closing tag with no block open, a block that is never closed, or an expression
-  that raises while it is evaluated, THEN THE SYSTEM SHALL return nil and one line naming
+- FR-007 (US-003) IF the template holds a tag the reader does not run, a filter other than `trim`,
+  `length` or `tojson`, a method other than the seven spec 20 names, a tag whose expression is
+  missing or will not parse, a closing tag with no block open, a block that is never closed, or an
+  expression that raises while it is evaluated, THEN THE SYSTEM SHALL return nil and one line naming
   `tokenizer.chat_template` and, for a tag or a filter, its name as written in the template. A
   construct that sits in a branch which is not taken, or in a macro that is never called, is read
   and never refused.
@@ -108,21 +109,21 @@ tests here use hand-made fixtures, because a 23 GB file cannot be a test input.
   otherwise, refusing neither its absence nor its kind, so that `FR-008` is answered by `render`
   alone.
 - FR-011 (US-003) WHEN an expression is evaluated, THE SYSTEM SHALL make reachable only `messages`,
-  `add_generation_prompt`, the name a `{% for %}` in scope binds, `loop`, the names `{% set %}`
-  binds, macro names, `namespace(...)`, `raise_exception` and the seven string methods spec 20
-  names, so that a template naming anything else reaches nil and opens no file and starts no
-  process.
+  `add_generation_prompt`, `tools` from the tool list `22/FR-001` binds, the name a `{% for %}` in
+  scope binds, `loop`, the names `{% set %}` binds, macro names, `namespace(...)`,
+  `raise_exception` and the seven string methods spec 20 names, so that a template naming anything
+  else reaches nil and opens no file and starts no process.
 
 ## Non-goals
 
 - No route, command, config key or streaming: the chat completions route and its call to
   `generate.text` are spec 18, and this call returns one finished string.
 - No tag or filter beyond the ones above: includes, named blocks, `import`, and every filter but
-  `trim` and `length` are refused as `FR-007` states, and `tokenizer.chat_template.<name>` is not
-  read.
-- Tools, tool calls, images and videos, and the `tojson`, `safe` and `string` filters: spec 20 only
-  reads them where a branch is never taken, and the request inputs `enable_thinking`,
-  `preserve_thinking` and `reasoning_content` are a follow-up.
+  `trim`, `length` and `tojson` are refused as `FR-007` states, and `tokenizer.chat_template.<name>`
+  is not read.
+- Tools, tool calls, images and videos, and the `safe` and `string` filters: spec 20 only reads
+  them where a branch is never taken, `tojson` being a filter spec 22 runs, and the request inputs
+  `enable_thinking`, `preserve_thinking` and `reasoning_content` are a follow-up.
 
 ## Tests
 
@@ -157,8 +158,8 @@ tests here use hand-made fixtures, because a 23 GB file cannot be a test input.
   on a copy whose template is `{% for message in messages %}` `render` returns nil and a line
   naming that key; that on a copy whose template is `{% if %}` `render` returns nil and a line
   naming that key; that on a copy whose template is `{% endif %}` `render` returns nil and a line
-  naming that key; that on a copy whose template is `{{ 'x'|tojson }}` `render` returns nil and a
-  line naming that key and `tojson`; that on a copy whose template is `{{ missing.field }}`
+  naming that key; that on a copy whose template is `{{ 'x'|safe }}` `render` returns nil and a
+  line naming that key and `safe`; that on a copy whose template is `{{ missing.field }}`
   `render` returns nil and a line naming that key; that on a copy whose template is
   `{{ io.open('x') }}` `render` of one valid message returns nil and a line naming that key, `io`
   reaching nothing; that on T-001's fixture `render` of the empty list returns nil and a line

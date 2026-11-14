@@ -1,6 +1,6 @@
 # 22: Show the model the functions it may call
 
-**Status**: pending   **Depends on**: 17, 20
+**Status**: done   **Depends on**: 17, 20
 
 ## Problem & context
 
@@ -253,7 +253,4 @@ end
 
 ## Amendments
 
-- `20/FR-001`: `tools` is no longer among the names a render leaves unbound, it being the value the third argument gives; only a call that gives none leaves it unbound, and `20/T-001`'s prompts stand because no case there gives one.
-- `17/FR-007`: `tojson` is a run filter, so the refusal names the filters this engine still does not run, `safe` and `string` among them, and the case that refuses a filter refuses `safe` instead of `tojson`.
-- `17/FR-011`: `tools`, bound from that third argument, joins the names an expression may reach.
-- `20/FR-012`: the filter list this refuses gains an exception, `tojson` being run by FR-008, while `safe` and `string` stay refused, and the unsupported-filter case refuses `safe` instead.
+- None.

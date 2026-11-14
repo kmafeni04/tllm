@@ -1,4 +1,5 @@
 local fs = require("fs")
+local json = require("json")
 local test = require("lde-test")
 local chat = require("tllm.chat")
 local tokenizer = require("tllm.tokenizer")
@@ -423,9 +424,11 @@ test.it(
     local _, stray_endif = chat.render(with_template("{% endif %}"), ONE)
     test.includes(stray_endif as string, "tokenizer.chat_template")
 
-    local _, tojson = chat.render(with_template("{{ 'x'|tojson }}"), ONE)
-    test.includes(tojson as string, "tokenizer.chat_template")
-    test.includes(tojson as string, "tojson")
+    local _, refused_filter = chat.render(with_template("{{ 'x'|safe }}"), ONE)
+    test.includes(refused_filter as string, "tokenizer.chat_template")
+    test.includes(refused_filter as string, "safe")
+    local filter_line = refused_filter as string
+    test.equal(filter_line:find("tojson", 1, true), nil, filter_line)
 
     local _, absent = chat.render(with_template("{{ missing.field }}"), ONE)
     test.includes(absent as string, "tokenizer.chat_template")
@@ -535,7 +538,9 @@ test.it(
     refused("{{ raise_exception() }}")
     refused("{{ raise_exception(3) }}")
     refused("{% include 'other' %}")
-    refused("{{ 'x'|tojson }}")
+    local safe_line = refused("{{ 'x'|safe }}")
+    test.includes(safe_line, "safe")
+    test.equal(safe_line:find("tojson", 1, true), nil, safe_line)
     refused("{{ missing.field }}")
     refused("{{ io.open('x') }}")
     refused("{{ 'a' + 5 }}")
@@ -679,5 +684,224 @@ test.it(
       wrote("{% macro m(a) %}{{ a }}{% endmacro %}{{ m(' x ')|trim }}", ONE),
       "x"
     )
+  end
+)
+
+local WANT = table.concat(
+  {
+    "<|im_start|>system\n",
+    "# Tools\n",
+    "\n",
+    "You have access to the following functions:\n",
+    "\n",
+    "<tools>\n",
+    "{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}}, \"required\": []}}}\n",
+    "</tools>\n",
+    "\n",
+    "If you choose to call a function ONLY reply in the following format with NO suffix:\n",
+    "\n",
+    "<tool_call>\n",
+    "<function=example_function_name>\n",
+    "<parameter=example_parameter_1>\n",
+    "value_1\n",
+    "</parameter>\n",
+    "<parameter=example_parameter_2>\n",
+    "This is the value for the second parameter\n",
+    "that can span\n",
+    "multiple lines\n",
+    "</parameter>\n",
+    "</function>\n",
+    "</tool_call>\n",
+    "\n",
+    "<IMPORTANT>\n",
+    "Reminder:\n",
+    "- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n",
+    "- Required parameters MUST be specified\n",
+    "- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n",
+    "- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n",
+    "</IMPORTANT><|im_end|>\n",
+    "<|im_start|>user\n",
+    "hi<|im_end|>\n",
+    "<|im_start|>assistant\n",
+    "<think>\n",
+  },
+  ""
+)
+
+-- The one-turn `hi` prompt: WANT's own tail, the lone turn and the opener.
+local ONE_TURN = table.concat(
+  {
+    "<|im_start|>user\n",
+    "hi<|im_end|>\n",
+    "<|im_start|>assistant\n",
+    "<think>\n",
+  },
+  ""
+)
+
+-- WANT's entry line, and the two ends of the block around it, so another
+-- entry list is proved in place rather than retyped whole.
+local BLOCK_FROM = WANT:find("<tools>\n", 1, true) as integer
+local BLOCK_TO = WANT:find("\n</tools>", 1, true) as integer
+local WEATHER = WANT:sub(BLOCK_FROM + 8, BLOCK_TO - 1)
+
+local function tools_prompt(entries: {string}): string
+  return WANT:sub(1, BLOCK_FROM + 7)
+    .. table.concat(entries, "\n")
+    .. WANT:sub(BLOCK_TO)
+end
+
+local function wrote_tools(template: string, tools: json.Value): string
+  local prompt, failure = chat.render(with_template(template), ONE, tools)
+  test.equal(failure, nil, template)
+  return prompt as string
+end
+
+local function wrote_plain(template: string): string
+  local prompt, failure = chat.render(with_template(template), ONE)
+  test.equal(failure, nil, template)
+  return prompt as string
+end
+
+test.it(
+  "a tool list becomes the tools block the file's template writes",
+  function()
+    local plain = wrote_plain(fixture.chat)
+    test.equal(plain, ONE_TURN)
+    test.equal(plain:find("<tools>", 1, true), nil)
+
+    local one = wrote_tools(fixture.chat, json.decode("[" .. WEATHER .. "]"))
+    test.equal(one, WANT)
+
+    local add = '{"type": "function", "function": {"name": "add", "parameters": {}}}'
+    local two = wrote_tools(
+      fixture.chat, json.decode("[" .. WEATHER .. ", " .. add .. "]")
+    )
+    test.equal(two, tools_prompt({WEATHER, add}))
+
+    local odd = wrote_tools(fixture.chat, json.decode("[5]"))
+    test.equal(odd, tools_prompt({"5"}))
+
+    test.equal(WANT:sub(#WANT - #ONE_TURN + 1), ONE_TURN)
+
+    -- The tools block's system turn is the only turn before that one.
+    local turns = 0
+    local walk = 1
+    while true do
+      local at = WANT:find("<|im_start|>", walk, true)
+      if at is nil then
+        break
+      end
+      turns = turns + 1
+      walk = (at as integer) + 1
+    end
+    test.equal(turns, 3)
+  end
+)
+
+test.it(
+  "which tool lists write no tools block, and which write one",
+  function()
+    test.equal(wrote_plain(fixture.chat), ONE_TURN)
+
+    local NO_BLOCK = {"[]", "5", "true", "null", '{"type": "function"}'}
+    for index = 1, #NO_BLOCK do
+      local tools_json = NO_BLOCK[index]
+      test.equal(
+        wrote_tools(fixture.chat, json.decode(tools_json)), ONE_TURN, tools_json
+      )
+    end
+
+    local chars = wrote_tools(fixture.chat, json.decode('"ab"'))
+    test.equal(chars, tools_prompt({'"a"', '"b"'}))
+
+    local hollow = wrote_tools(fixture.chat, json.decode("[[]]"))
+    test.equal(hollow, tools_prompt({"[]"}))
+  end
+)
+
+test.it(
+  "tojson writes every value as JSON",
+  function()
+    local add = '{"type": "function", "function": {"name": "add", '
+      .. '"parameters": {}}}'
+    test.equal(
+      wrote_tools(fixture.chat, json.decode("[" .. add .. "]")),
+      tools_prompt({add})
+    )
+
+    local head = '{"type": "function", "function": {"name": "add", '
+      .. '"parameters": {}'
+    local defaulted = head .. ', "default": 1.0}}'
+    local written = head .. ', "default": 1}}'
+    test.equal(
+      wrote_tools(fixture.chat, json.decode("[" .. defaulted .. "]")),
+      tools_prompt({written})
+    )
+
+    local mixed = [==[[true, false, null, ["a", 2], {"b": [], "a": 2.5}]]==]
+    test.equal(
+      wrote_tools(fixture.chat, json.decode("[" .. mixed .. "]")),
+      tools_prompt({mixed})
+    )
+  end
+)
+
+-- A template whose only output is the filter, over a tool list whose single
+-- entry is the value under test.
+local function wrote_json(entry: string): string
+  local prompt, failure = chat.render(
+    with_template("{{ tools[0] | tojson }}"),
+    ONE,
+    json.decode("[" .. entry .. "]")
+  )
+  test.equal(failure, nil, entry)
+  return prompt as string
+end
+
+test.it(
+  "every JSON kind, every escape and every key is written",
+  function()
+    test.equal(wrote_json([[{"b": 1, "a": 2}]]), [[{"b": 1, "a": 2}]])
+    test.equal(wrote_json([==[{"a\"b\\c": 1}]==]), [==[{"a\"b\\c": 1}]==])
+    test.equal(wrote_json([[{"k": ["x", "y"]}]]), [[{"k": ["x", "y"]}]])
+    test.equal(wrote_json("{}"), "{}")
+    test.equal(wrote_json("[]"), "[]")
+    test.equal(wrote_json([==["a\"b\\c"]==]), [==["a\"b\\c"]==])
+    test.equal(wrote_json([==["\t\n\r\b\f"]==]), [==["\t\n\r\b\f"]==])
+    test.equal(wrote_json([==["\u0001"]==]), [==["\u0001"]==])
+    test.equal(wrote_json([==["\u000E"]==]), [==["\u000e"]==])
+    test.equal(wrote_json([==["\u001A"]==]), [==["\u001a"]==])
+    test.equal(
+      wrote_json([==["caf\u00e9"]==]), '"caf' .. string.char(0xC3, 0xA9) .. '"'
+    )
+    test.equal(wrote_json("2"), "2")
+    test.equal(wrote_json("2.5"), "2.5")
+    test.equal(wrote_json("true"), "true")
+    test.equal(wrote_json("false"), "false")
+    test.equal(wrote_json("null"), "null")
+
+    local prompt, failure = chat.render(
+      with_template("{{ tools[0].absent | tojson }}"),
+      ONE,
+      json.decode([==[[{"b": 1, "a": 2}]]==])
+    )
+    test.equal(failure, nil)
+    test.equal(prompt, "null")
+  end
+)
+
+test.it(
+  "tojson is run and safe is not",
+  function()
+    local held = with_template("{{ 'x'|tojson }}")
+    local written, failure = chat.render(held, ONE)
+    test.equal(failure, nil)
+    test.equal(written, '"x"')
+
+    local line = refused("{{ 'x'|safe }}")
+    test.includes(line, "tokenizer.chat_template")
+    test.includes(line, "safe")
+    test.equal(line:find("tojson", 1, true), nil, line)
   end
 )

@@ -1,3 +1,4 @@
+local json = require("json")
 local tokenizer = require("tllm.tokenizer")
 local utf8lib = require("utf8lib")
 
@@ -7,7 +8,9 @@ local record chat
     content: string
   end
 
-  render: function(tokenizer.Tokenizer, {Message}): string | nil, string | nil
+  render: function(
+    tokenizer.Tokenizer, {Message}, tools?: json.Value
+  ): string | nil, string | nil
 end
 
 local type Msg = chat.Message
@@ -227,6 +230,100 @@ local function as_message(message: Msg): Val
   map_put(held, "role", as_text(message.role))
   map_put(held, "content", as_text(message.content))
   return held
+end
+
+local of_json: function(held: json.Value): Val
+
+of_json = function(held: json.Value): Val
+  if held:is("array") then
+    local items: {Val} = {}
+    for _, child in held:children() do
+      items[#items + 1] = of_json(child as json.Value)
+    end
+    return as_list(items)
+  end
+  if held:is("object") then
+    local map = as_map()
+    for name, child in held:children() do
+      map_put(map, name as string, of_json(child as json.Value))
+    end
+    return map
+  end
+  if held:is("null") then
+    return NOTHING
+  end
+  if held:is("boolean") then
+    return as_boolean(held:val() as boolean)
+  end
+  if held:is("number") then
+    return as_number(held:val() as number)
+  end
+  return as_text(held:val() as string)
+end
+
+local JSON_ESCAPES: {string: string} = {
+  ['"'] = '\\"',
+  ["\\"] = "\\\\",
+  ["\n"] = "\\n",
+  ["\t"] = "\\t",
+  ["\r"] = "\\r",
+  ["\b"] = "\\b",
+  ["\f"] = "\\f",
+}
+
+local function quoted(text: string): string
+  local pieces: {string} = {'"'}
+  for index = 1, #text do
+    local one = text:sub(index, index)
+    local held = JSON_ESCAPES[one]
+    if held is nil then
+      local code = one:byte() as integer
+      if code < 0x20 then
+        pieces[#pieces + 1] = string.format("\\u%04x", code)
+      else
+        pieces[#pieces + 1] = one
+      end
+    else
+      pieces[#pieces + 1] = held
+    end
+  end
+  pieces[#pieces + 1] = '"'
+  return table.concat(pieces)
+end
+
+local json_written: function(held: Val): string
+
+json_written = function(held: Val): string
+  local kind = held.kind
+  if kind == "text" then
+    return quoted(held.text)
+  end
+  if kind == "number" then
+    return tostring(held.num)
+  end
+  if kind == "boolean" then
+    if held.truth then
+      return "true"
+    end
+    return "false"
+  end
+  if kind == "list" then
+    local pieces: {string} = {}
+    for _, item in ipairs(held.items) do
+      pieces[#pieces + 1] = json_written(item)
+    end
+    return "[" .. table.concat(pieces, ", ") .. "]"
+  end
+  if kind == "map" then
+    local pieces: {string} = {}
+    for _, name in ipairs(held.order) do
+      pieces[#pieces + 1] = quoted(name)
+        .. ": "
+        .. json_written(held.fields[name] as Val)
+    end
+    return "{" .. table.concat(pieces, ", ") .. "}"
+  end
+  return "null"
 end
 
 local function fault(detail: string): string
@@ -1570,6 +1667,9 @@ local function filter_of(run: Runner, name: string, held: Val): Val
   if name == "trim" then
     return as_text(bare(written(held)))
   end
+  if name == "tojson" then
+    return as_text(json_written(held))
+  end
   if name == "length" then
     if held.kind == "text" then
       local size = utf8lib.len(held.text)
@@ -2172,7 +2272,7 @@ walk_nodes = function(run: Runner, nodes: {Node}): string | nil
 end
 
 function chat.render(
-  built: tokenizer.Tokenizer, messages: {Msg}
+  built: tokenizer.Tokenizer, messages: {Msg}, tools?: json.Value
 ): string | nil, string | nil
   local template = built.template
   if template is nil then
@@ -2217,13 +2317,14 @@ function chat.render(
   for _, message in ipairs(messages) do
     items[#items + 1] = as_message(message)
   end
-  local root: Scope = {
-    names = {
-      messages = as_list(items),
-      add_generation_prompt = as_boolean(true),
-    },
-    parent = nil,
+  local names: {string: Val} = {
+    messages = as_list(items),
+    add_generation_prompt = as_boolean(true),
   }
+  if not (tools is nil) then
+    names.tools = of_json(tools as json.Value)
+  end
+  local root: Scope = {names = names, parent = nil}
   local run: Runner = {
     root = root,
     frame = root,

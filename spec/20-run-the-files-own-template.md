@@ -34,8 +34,9 @@ no seat at that point.
   `tokenizer.chat_template` and with messages whose `role` and `content` are strings, THE SYSTEM
   SHALL return the prompt that template writes for them as its first value and nil as its second,
   with `messages` bound to the list in order and `add_generation_prompt` bound to true as
-  `17/FR-002` states, and with `tools`, `add_vision_id`, `enable_thinking`, `preserve_thinking` and
-  `reasoning_content` left unbound.
+  `17/FR-002` states, and with `add_vision_id`, `enable_thinking`, `preserve_thinking` and
+  `reasoning_content` left unbound. `tools` joins those unbound names only for a call that gives no
+  tool list, `22/FR-002` states; a call that gives one binds it as `22/FR-001` states.
 - FR-002 (US-002) WHEN the template is read, THE SYSTEM SHALL accept Python-syntax expressions:
   `and`, `or`, `not`, `in`, `not in`, `is`, `is not`, `~`, `+`, `-`, `*`, `==`, `!=`, `<`, `<=`,
   `>`, `>=`, parentheses, string, number, `true`/`false`/`none` and list literals, attribute
@@ -74,7 +75,8 @@ no seat at that point.
   and evaluate nothing in that branch, so that a name reached only there may stay unbound.
 - FR-011 (US-003) IF the template reaches `raise_exception` with a text, THEN THE SYSTEM SHALL
   return nil and the one line `tokenizer.chat_template: <text>` with newlines collapsed.
-- FR-012 (US-003) IF the reader evaluates a tag, a filter other than `trim` and `length`, or an
+- FR-012 (US-003) IF the reader evaluates a tag, a filter other than `trim`, `length` and `tojson`
+  (`tojson` being a filter `22/FR-008` runs, while `safe` and `string` stay refused), or an
   expression it cannot evaluate, THEN THE SYSTEM SHALL return nil and one line naming
   `tokenizer.chat_template`; a construct that sits in a branch FR-010 keeps from running, or in a
   macro that is never called, is read and never refused.
