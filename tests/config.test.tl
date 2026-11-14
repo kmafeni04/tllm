@@ -215,6 +215,8 @@ test.it(
       {with_model('"port":0'), "port"},
       {with_model('"port":"8080"'), "port"},
       {'{"port":8080,"models":"nope"}', "models"},
+      {with_model('"sessions":0'), "sessions"},
+      {with_model('"sessions":"2"'), "sessions"},
     }
     for _, case in ipairs(values) do
       local result = refused(case[1])
@@ -288,6 +290,7 @@ test.it(
     local endpoint = served.endpoint as serve.Endpoint
     test.equal(endpoint.host, "127.0.0.1")
     test.equal(endpoint.port, 8080)
+    test.equal(endpoint.sessions, 4)
     test.falsy(fs.exists(xdg .. "/tllm/config.json"))
     test.falsy(fs.exists(home .. "/.config/tllm/config.json"))
 
@@ -350,7 +353,7 @@ test.it(
     local xdg = temp_dir()
     local model = model_file(xdg)
     local config = write_config(
-      xdg, config_text(model, '"host":"127.0.0.2","port":9100')
+      xdg, config_text(model, '"host":"127.0.0.2","port":9100,"sessions":2')
     )
     local environment = {XDG_CONFIG_HOME = xdg}
 
@@ -359,6 +362,7 @@ test.it(
     local endpoint = from_file.endpoint as serve.Endpoint
     test.equal(endpoint.host, "127.0.0.2")
     test.equal(endpoint.port, 9100)
+    test.equal(endpoint.sessions, 2)
 
     local flag_port = run({"serve", "m", "--port", "9090"}, environment)
     local overridden = flag_port.endpoint as serve.Endpoint
@@ -370,6 +374,7 @@ test.it(
     local fallback = defaults.endpoint as serve.Endpoint
     test.equal(fallback.host, "127.0.0.1")
     test.equal(fallback.port, 8080)
+    test.equal(fallback.sessions, 4)
 
     fs.write(config, config_text(model, '"host":"localhost","port":9100'))
     local bad_host = run({"serve", "m", "--host", "127.0.0.1"}, environment)

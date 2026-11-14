@@ -40,12 +40,13 @@ local record generate
     temperature: number | nil
     top_k: integer | nil
     end_id: integer | nil
+    start: integer | nil
     on_token: function(string) | nil
   end
 
   text: function(
     compute.Model, tokenizer.Tokenizer, string, Options
-  ): string | nil, string | nil, integer | nil
+  ): string | nil, string | nil, integer | nil, {integer} | nil
 end
 ```
 
@@ -69,15 +70,15 @@ a sample takes are worked out by hand from `15/T-001`'s scores.
 
 ## Functional requirements
 
-- FR-001 (US-001) WHEN `generate.text(model, tokenizer, prompt, options)` is called with options FR-009 accepts, THE SYSTEM SHALL return the ids it sampled decoded by `tokenizer:decode` as the first value, nil as the second, and the number of ids it sampled as the third, nil when it returns nil, holding no part of the prompt, and report each token to `on_token` as it is appended when the options carry one.
-- FR-002 (US-002) WHEN a call begins, THE SYSTEM SHALL take the prompt's ids from `tokenizer:encode(prompt)`, call `model:forward` with each id and its index as the position, in list order, and take the first sampled token from the scores the last of those calls returns.
+- FR-001 (US-001) WHEN `generate.text(model, tokenizer, prompt, options)` is called with options FR-009 accepts, THE SYSTEM SHALL return the ids it sampled decoded by `tokenizer:decode` as the first value, nil as the second, the number of ids it sampled as the third, and the ids it sampled in the order it appended them as the fourth, nil when it returns nil, holding no part of the prompt, and report each token to `on_token` as it is appended when the options carry one.
+- FR-002 (US-002) WHEN a call begins, THE SYSTEM SHALL take the prompt's ids from `tokenizer:encode(prompt)`, call `model:forward` with each id from the options' `start` on and its index as the position, in list order, and take the first sampled token from the scores the last of those calls returns, `start` absent being 0, so a call may begin at a position the model has already reached.
 - FR-003 (US-002) WHEN a token is sampled that is neither the end id nor the last `max_tokens` allows, THE SYSTEM SHALL call `model:forward` with it at the next position and sample the next token from the scores that call returns.
 - FR-004 (US-003) WHEN `temperature` is absent or zero, THE SYSTEM SHALL take the sampled token as the id of the highest score, the lowest id among equal highest scores.
 - FR-005 (US-003) WHEN `temperature` is above zero, THE SYSTEM SHALL take the candidates as the `top_k` highest-scoring ids, fewer when the vocabulary is smaller than `top_k`, equal scores in increasing id order, all ids when `top_k` is absent, and take the sampled token as the first candidate whose probability summed with every candidate before it exceeds one draw, the last candidate when none does, each probability being the candidate's score minus the top candidate's score, divided by `temperature`, exponentiated, and divided by the sum of the candidates' exponentiated numbers.
 - FR-006 (US-003) WHEN a draw is taken, THE SYSTEM SHALL take it from a generator whose state starts at `seed` modulo 4294967296, each draw setting the state to 1664525 times the state plus 1013904223 modulo 4294967296 and being that state divided by 4294967296.
 - FR-007 (US-004) WHEN the sampled token is the end id, THE SYSTEM SHALL stop without appending it, the end id being `end_id` when given and the tokenizer's `end_id` otherwise, and no end id when both are absent.
 - FR-008 (US-004) WHEN `max_tokens` ids have been appended, THE SYSTEM SHALL stop.
-- FR-009 (US-005) IF `max_tokens` is below one, or `temperature` is given and is below zero, or `top_k` is given and is below one, THEN THE SYSTEM SHALL return nil and one line naming `generate` and the first option at fault in that order, these checks running before the prompt is encoded.
+- FR-009 (US-005) IF `max_tokens` is below one, or `temperature` is given and is below zero, or `top_k` is given and is below one, or `start` is given and is below zero, THEN THE SYSTEM SHALL return nil and one line naming `generate` and the first option at fault in that order, these checks running before the prompt is encoded, and IF `start` is given and is at or above the number of ids the prompt encodes to, THEN THE SYSTEM SHALL return nil and one line naming `generate`, `start` and that count.
 - FR-010 (US-005) IF `tokenizer:encode`, `model:forward` or `tokenizer:decode` returns nil, THEN THE SYSTEM SHALL return nil and that line unchanged, the decode being either the one taken of an id as it is appended or the one taken of the whole list at the end.
 - FR-011 (US-005) IF `tokenizer:encode` returns no ids, THEN THE SYSTEM SHALL return nil and one line naming `prompt`.
 
@@ -85,7 +86,7 @@ a sample takes are worked out by hand from `15/T-001`'s scores.
 
 - No route, command or config key: `serve` and the chat completions route are specs 17 and 18, and this call returns one finished string; streaming that string out as it is generated is spec 19.
 - No sampler beyond the three shapes above: no top-p, no repetition or presence penalty, no stop strings, and no bias or logit list.
-- No reuse of a model across calls: each call prefills from position zero, so the caller builds a model per call.
+- No reuse of a model across calls beyond the options' `start`: a call forwards the prompt's ids from `start` on, and the caller still builds or keeps the model it passes.
 
 ## Tests
 
@@ -134,11 +135,13 @@ a sample takes are worked out by hand from `15/T-001`'s scores.
 - T-004 (FR-003, FR-009, FR-010, FR-011): `a prompt and options that cannot be used are refused`,
   proves on T-001's fixture that `generate.text` with the prompt `""` and `{max_tokens = 2, seed =
   0}` returns nil and one line holding `prompt`; that `{max_tokens = 0, seed = 0}`,
-  `{max_tokens = 2, seed = 0, temperature = -1}` and `{max_tokens = 2, seed = 0, top_k = 0}` each
-  return nil and one line holding `generate` and, in turn, `max_tokens`, `temperature` and
-  `top_k`; that with the prompt `"a\255"` and `{max_tokens = 0, seed = 0, temperature = -1}` the
-  call returns nil and one line holding `generate` and `max_tokens`, the options checked in the
-  order FR-009 names them before the prompt is encoded; that on a fresh model built with
+  `{max_tokens = 2, seed = 0, temperature = -1}`, `{max_tokens = 2, seed = 0, top_k = 0}` and
+  `{max_tokens = 2, seed = 0, start = -1}` each return nil and one line holding `generate` and, in
+  turn, `max_tokens`, `temperature`, `top_k` and `start`; that `{max_tokens = 2, seed = 0, start =
+  1}` on the one-id prompt `a` returns nil and one line holding `generate` and `start`; that with
+  the prompt `"a\255"` and `{max_tokens = 0, seed = 0, temperature = -1}` the call returns nil and
+  one line holding `generate` and `max_tokens`, the options checked in the order FR-009 names them
+  before the prompt is encoded; that on a fresh model built with
   `positions` 2 the prompt `a` with `{max_tokens = 3, seed = 0}` returns nil and one line holding
   `blk.0.` and 2, the second sampled id being forwarded at a third position; that on a copy of
   T-001's fixture whose third piece stores the single byte `0xFF` with type 1 the call

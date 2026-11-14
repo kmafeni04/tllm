@@ -22,15 +22,17 @@ form body (`k=v&…`) with no way to send raw JSON, so it can prove a request re
 not carry a chat body. `mock_request` therefore carries the wiring cases and `answer` carries the
 rest.
 
-A reply's positions are sized from the budget, not the file's window. `16` refuses to reuse a model
-across calls and makes the caller size its positions, and `15` makes `positions` an argument so that
-a caller not asked for a long context says so. Taking the file's whole window would reserve about
-10.7 GB of cache for one short reply, the local file's context being 262144, so a body with no
-`max_tokens` gets a 256-token budget and the model a request uses takes `positions` of the prompt's
-ids plus that budget minus one. Checking the request against the file's window then needs the window
-as a number, so the route builds a model over the file's window, reads the `positions` it was built
-with and drops it, before building the one it generates from; that reading is the amendment to `15`.
-Answering `usage` needs the number of ids the generation sampled, which is the amendment to `16`.
+A reply's positions are sized from the budget, not the file's window. `16` takes an optional
+`start` so a call can resume a model another call reached, and makes the caller size the model it
+passes, and `15` makes `positions` an argument so that a caller not asked for a long context says
+so. Taking the file's whole window would reserve about 10.7 GB of cache for one short reply, the
+local file's context being 262144, so a body with no `max_tokens` gets a 256-token budget and the
+model a request uses takes `positions` of the prompt's ids plus that budget minus one, or the
+sizing `23/FR-004` gives a conversation. Checking the request against the file's window then needs
+the window as a number, so the route builds a model over the file's window, reads the `positions`
+it was built with and drops it, before taking the one it generates from; that reading is the
+amendment to `15`. Answering `usage` needs the number of ids the generation sampled, which is the
+amendment to `16`.
 
 The calls run in one order: the shape checks of FR-008, `chat.render`, `tokenizer:encode` on the
 rendered prompt, `compute.model` over the file's window to read the `positions` it was built with,
@@ -63,6 +65,7 @@ local record serve
     port: integer
     name: string
     path: string
+    sessions: integer
   end
 
   record Reply
@@ -94,17 +97,19 @@ end
   request carried.
 - FR-003 (US-001) WHEN `answer` is given a body FR-008's checks accept, THE SYSTEM SHALL take the
   model `build` kept for that server, its tokenizer and its backend, render the prompt from
-  `messages` with `chat.render`, build a model whose `positions` is the prompt's ids plus the budget
-  minus one, generate from that prompt and budget, and answer `OK` with a body that decodes to an
-  object whose `choices` is an array holding one object whose `index` is 0 and whose `message` is an
-  object whose `role` is `assistant` and whose `content` is the generated text.
+  `messages` with `chat.render`, take the generation model as the conversation's stored one where
+  `23/FR-001` reuses it and otherwise build one sized by `23/FR-004`, generate from that prompt and
+  budget, and answer `OK` with a body that decodes to an object whose `choices` is an array holding
+  one object whose `index` is 0 and whose `message` is an object whose `role` is `assistant` and
+  whose `content` is the generated text.
 - FR-004 (US-002) WHEN a successful reply is answered, THE SYSTEM SHALL hold in it a `usage` object
   whose `prompt_tokens` is the number of ids the rendered prompt encodes to, whose
-  `completion_tokens` is the number of ids the generation sampled, and whose `total_tokens` is their
-  sum.
+  `completion_tokens` is the number of ids the generation sampled, whose `total_tokens` is their
+  sum, and whose `prompt_tokens_details` is an object whose `cached_tokens` is the number of the
+  prompt's ids the turn did not forward.
 - FR-005 (US-001) WHEN the body holds a member other than `messages`, `temperature`, `top_k`,
-  `max_tokens`, `seed` and `stream`, THE SYSTEM SHALL ignore it, and `stream` is honoured rather
-  than ignored.
+  `max_tokens`, `seed`, `stream` and `session_id`, THE SYSTEM SHALL ignore it, and `stream` and
+  `session_id` are honoured rather than ignored.
 - FR-006 (US-003) WHEN the body holds `temperature`, `top_k` or `seed`, THE SYSTEM SHALL pass it to
   the generation as given, an absent `temperature` leaving the sampler greedy and an absent `seed`
   being 0.
@@ -115,7 +120,8 @@ end
   whose `role` and `content` are strings, or `temperature` is present and is not a number or is
   below zero, or `top_k` is present and is not a whole number or is below one, or `max_tokens` is
   present and is not a whole number or is below one, or `seed` is present and is not a whole number,
-  or `stream` is present and is not a boolean (that check coming after `seed`), THEN THE SYSTEM
+  or `stream` is present and is not a boolean (that check coming after `seed`), or `session_id` is
+  present and is not a string (that check coming after `stream`), THEN THE SYSTEM
   SHALL answer `BadRequest` with a body decoding to an object whose single member is
   `error`, an object whose `type` is `invalid_request_error` and whose `message` names the first
   fault in the order this requirement names them: `body`; `messages` and, for an entry, its position
@@ -144,9 +150,9 @@ end
   a streamed reply, their names and their order, are spec 19's.
 - No reply member beyond `choices` and `usage`: no `id`, `object`, `created`, `model` or
   `finish_reason`, and one choice only.
-- No reuse, trimming or reloading: each request builds its own generation model over the positions
-  it needs, and the window model only to read `positions`, so a second request starts from position
-  zero and no cache outlives a request.
+- No trimming or reloading: a request without a `session_id` builds its own generation model over
+  the positions it needs, and the window model only to read `positions`, so it starts from position
+  zero; `23` keeps a conversation's model between requests, so a cache does outlive a request.
 
 ## Tests
 
@@ -157,7 +163,8 @@ end
   that `answer(server, '{"messages":[{"role":"user","content":"a"}]}')` answers `OK` with a body
   decoding to `choices` holding one object whose `index` is 0 and whose `message` is
   `{role = "assistant", content = "a" written 256 times}` and `usage` of `{prompt_tokens = 1,
-  completion_tokens = 256, total_tokens = 257}`; that a body also holding `"max_tokens":2` answers
+  completion_tokens = 256, total_tokens = 257, prompt_tokens_details = {cached_tokens = 0}}`; that a
+  body also holding `"max_tokens":2` answers
   `aa` with `completion_tokens` 2 and `total_tokens` 3; and that on a copy whose
   `tokenizer.ggml.eos_token_id` is 0 the first body answers `content` `""` with `completion_tokens`
   0 and `total_tokens` 1.
@@ -175,9 +182,10 @@ end
   `{}`, `{"messages":5}` and `{"messages":[]}`, each with a message naming `messages`; and
   `{"messages":[{"role":"user"}]}` and `{"messages":[{"role":"user","content":["x"]}]}`, each with a
   message naming `messages` and `1`; a body whose only message is valid with
-  `"temperature":"hot"`, with `"temperature":-1`, with `"top_k":2.5`, with `"max_tokens":0` and with
-  `"seed":1.5`, the messages naming in turn `temperature`, `temperature`, `top_k`, `max_tokens` and
-  `seed`; a body holding an empty `messages` and `"temperature":-1`, its message naming `messages`;
+  `"temperature":"hot"`, with `"temperature":-1`, with `"top_k":2.5`, with `"max_tokens":0`,
+  with `"seed":1.5` and with `"session_id":5`, the messages naming in turn `temperature`,
+  `temperature`, `top_k`, `max_tokens`, `seed` and `session_id`; a body holding an empty `messages`
+  and `"temperature":-1`, its message naming `messages`;
   a body holding both `"temperature":-1` and `"top_k":0`, its message naming `temperature`; and a
   body whose message content is six copies of `a`, its message naming `messages`, `max_tokens`, `6`,
   `256` and `260`, six ids plus the 256-token budget minus one being past the positions the file

@@ -219,7 +219,7 @@ local function serve_code(
     config_path = explicit
   end
 
-  local ok, file_host, file_port, models = config.load(
+  local ok, file_host, file_port, models, file_sessions = config.load(
     environment, config_path, path_word, write_err
   )
   if not ok then
@@ -240,6 +240,7 @@ local function serve_code(
       port = bind_port,
       name = chosen.name,
       path = chosen.path,
+      sessions = file_sessions or 4,
     },
     write_err
   )

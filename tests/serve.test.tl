@@ -30,10 +30,15 @@ local record Choice
   message: ReplyMessage
 end
 
+local record PromptDetails
+  cached_tokens: integer
+end
+
 local record Usage
   prompt_tokens: integer
   completion_tokens: integer
   total_tokens: integer
+  prompt_tokens_details: PromptDetails
 end
 
 local record ChatReply
@@ -352,9 +357,17 @@ local function rejected(server: tltp.Server, body: string): ErrorBody
   return decoded
 end
 
-local function build(file_path: string, name: string): tltp.Server
+local function build(
+  file_path: string, name: string, sessions?: integer
+): tltp.Server
   local server, failure = serve.build(
-    {host = "127.0.0.1", port = 9090, name = name, path = file_path}
+    {
+      host = "127.0.0.1",
+      port = 9090,
+      name = name,
+      path = file_path,
+      sessions = sessions or 4,
+    }
   )
   test.equal(failure, nil, file_path)
   return server as tltp.Server
@@ -425,14 +438,26 @@ test.it(
 
     local not_gguf = fixture("GGML" .. u32(3) .. u64(0) .. u64(0))
     local bad, reason = serve.build(
-      {host = "127.0.0.1", port = 9090, name = "m", path = not_gguf}
+      {
+        host = "127.0.0.1",
+        port = 9090,
+        name = "m",
+        path = not_gguf,
+        sessions = 4,
+      }
     )
     test.equal(bad, nil)
     test.includes(reason as string, not_gguf)
 
     local missing = ROOT .. "/missing.gguf"
     local absent, absent_reason = serve.build(
-      {host = "127.0.0.1", port = 9090, name = "m", path = missing}
+      {
+        host = "127.0.0.1",
+        port = 9090,
+        name = "m",
+        path = missing,
+        sessions = 4,
+      }
     )
     test.equal(absent, nil)
     test.includes(absent_reason as string, missing)
@@ -555,7 +580,13 @@ test.it(
     local file_path = fixture("GGML" .. u32(3) .. u64(0) .. u64(0))
     local lines: {string} = {}
     local code = serve.start(
-      {host = "127.0.0.1", port = 9090, name = "m", path = file_path},
+      {
+        host = "127.0.0.1",
+        port = 9090,
+        name = "m",
+        path = file_path,
+        sessions = 4,
+      },
       function(line: string) lines[#lines + 1] = line end
     )
     test.equal(code, 1)
@@ -580,7 +611,12 @@ test.it(
     )
     test.deepEqual(
       full.usage,
-      {prompt_tokens = 1, completion_tokens = 256, total_tokens = 257}
+      {
+        prompt_tokens = 1,
+        completion_tokens = 256,
+        total_tokens = 257,
+        prompt_tokens_details = {cached_tokens = 0},
+      }
     )
 
     local short = answered(server, body_with("max_tokens", "2"))
@@ -661,6 +697,7 @@ test.it(
       {body_with("top_k", "2.5"), {"top_k"}},
       {body_with("max_tokens", "0"), {"max_tokens"}},
       {body_with("seed", "1.5"), {"seed"}},
+      {body_with("session_id", "5"), {"session_id"}},
       {'{"messages":[],"temperature":-1}', {"messages"}},
       {
         '{"messages":[{"role":"user","content":"a"}],"temperature":-1,"top_k":0}',
@@ -757,7 +794,13 @@ test.it(
       without_prefix(t001_meta(), "tokenizer."), t001_entries()
     )
     local refused_build, line = serve.build(
-      {host = "127.0.0.1", port = 9090, name = "m", path = no_tokens}
+      {
+        host = "127.0.0.1",
+        port = 9090,
+        name = "m",
+        path = no_tokens,
+        sessions = 4,
+      }
     )
     test.equal(refused_build, nil)
     test.includes(line as string, "tokenizer.ggml.model")
@@ -980,5 +1023,212 @@ test.it(
     local broken_payloads = collected(broken_run as tltp.StreamFn)
     test.equal(#broken_payloads, 1)
     test.deepEqual(events_of(broken_payloads)[1], ROLE_EVENT)
+  end
+)
+
+local FIRST_TURN = '{"messages":[{"role":"user","content":"a"}],"max_tokens":2,"session_id":"s"}'
+
+local SECOND_TURN = '{"messages":[{"role":"user","content":"a"},{"role":"assistant","content":"a"},{"role":"user","content":"a"}],"max_tokens":2,"session_id":"s"}'
+
+local function named(body: string, id: string): string
+  return (body:gsub('"session_id":"s"', '"session_id":"' .. id .. '"'))
+end
+
+local function held(server: tltp.Server, id: string): serve.Session
+  local session = serve.session_of(server, id)
+  test.truthy(session, id)
+  return session as serve.Session
+end
+
+test.it(
+  "a second turn reads only what it has not read",
+  function()
+    local server = build(meta_file(t001_meta(), t001_entries()), "m", 4)
+
+    local first = answered(server, FIRST_TURN)
+    test.equal(first.choices[1].message.content, "aa")
+    test.deepEqual(
+      first.usage,
+      {
+        prompt_tokens = 1,
+        completion_tokens = 2,
+        total_tokens = 3,
+        prompt_tokens_details = {cached_tokens = 0},
+      }
+    )
+    test.equal(held(server, "s").length, 2)
+    test.equal(held(server, "s").generation.positions, 4)
+
+    local second = answered(server, SECOND_TURN)
+    test.equal(second.choices[1].message.content, "aa")
+    test.equal(second.usage.prompt_tokens_details.cached_tokens, 2)
+    test.equal(held(server, "s").length, 4)
+
+    local other = answered(server, named(SECOND_TURN, "t"))
+    test.equal(other.usage.prompt_tokens_details.cached_tokens, 0)
+    test.equal(held(server, "t").length, 4)
+
+    local loose = '{"messages":[{"role":"user","content":"a"}],"max_tokens":2}'
+    local plain = answered(server, loose)
+    test.equal(plain.usage.prompt_tokens_details.cached_tokens, 0)
+    test.equal(held(server, "s").length, 4)
+    test.equal(held(server, "t").length, 4)
+
+    local wide = answered(
+      server,
+      '{"messages":[{"role":"user","content":"'
+        .. string.rep("a", 130)
+        .. '"}],"max_tokens":2,"session_id":"w"}'
+    )
+    test.equal(wide.usage.completion_tokens, 2)
+    test.equal(held(server, "w").generation.positions, 260)
+
+    local seeded = answered(
+      server,
+      '{"messages":[{"role":"user","content":"a"}],"max_tokens":2,'
+        .. '"temperature":1,"seed":7,"session_id":"v"}'
+    )
+    test.equal(seeded.usage.completion_tokens, 1)
+    test.equal(held(server, "v").length, 2)
+
+    local resumed = answered(server, named(SECOND_TURN, "v"))
+    test.equal(resumed.usage.prompt_tokens_details.cached_tokens, 2)
+  end
+)
+
+test.it(
+  "a turn that does not continue the stored context starts over",
+  function()
+    local server = build(meta_file(t001_meta(), t001_entries()), "m", 4)
+    answered(server, FIRST_TURN)
+    answered(server, SECOND_TURN)
+
+    local five = answered(
+      server,
+      '{"messages":[{"role":"user","content":"aaaaa"}],"max_tokens":2,'
+        .. '"session_id":"s"}'
+    )
+    test.equal(five.usage.prompt_tokens_details.cached_tokens, 0)
+    test.equal(held(server, "s").length, 6)
+
+    local pair = answered(
+      server,
+      '{"messages":[{"role":"user","content":"a"},'
+        .. '{"role":"assistant","content":"a"}],"max_tokens":2,'
+        .. '"session_id":"s"}'
+    )
+    test.equal(pair.usage.prompt_tokens_details.cached_tokens, 0)
+    test.equal(held(server, "s").length, 3)
+
+    local three = answered(
+      server,
+      '{"messages":[{"role":"user","content":"a"},'
+        .. '{"role":"assistant","content":"a"},'
+        .. '{"role":"user","content":"a"}],"max_tokens":2,'
+        .. '"session_id":"s"}'
+    )
+    test.equal(three.usage.prompt_tokens_details.cached_tokens, 0)
+    test.equal(held(server, "s").length, 4)
+
+    answered(server, named(FIRST_TURN, "x"))
+    local mismatched = answered(
+      server,
+      '{"messages":[{"role":"user","content":"baa"}],"max_tokens":2,'
+        .. '"session_id":"x"}'
+    )
+    test.equal(mismatched.usage.prompt_tokens_details.cached_tokens, 0)
+    test.equal(held(server, "x").length, 4)
+    test.equal(held(server, "x").generation.positions, 8)
+
+    local fresh = answered(server, named(FIRST_TURN, "u"))
+    test.equal(fresh.usage.prompt_tokens_details.cached_tokens, 0)
+    test.equal(held(server, "u").length, 2)
+  end
+)
+
+test.it(
+  "the server keeps only the configured number of conversations",
+  function()
+    local server = build(meta_file(t001_meta(), t001_entries()), "m", 2)
+
+    answered(server, named(FIRST_TURN, "s1"))
+    answered(server, named(FIRST_TURN, "s2"))
+    local reuse = answered(server, named(SECOND_TURN, "s1"))
+    test.equal(reuse.usage.prompt_tokens_details.cached_tokens, 2)
+    test.truthy(serve.session_of(server, "s1"))
+    test.truthy(serve.session_of(server, "s2"))
+
+    answered(server, named(SECOND_TURN, "s3"))
+    test.truthy(serve.session_of(server, "s1"))
+    test.truthy(serve.session_of(server, "s3"))
+    test.equal(serve.session_of(server, "s2"), nil)
+
+    local empty = serve.answer(server, '{"messages":[],"session_id":"s1"}')
+    test.equal(empty.status, "BadRequest")
+    test.equal(held(server, "s1").length, 4)
+    test.equal(held(server, "s3").length, 4)
+    test.equal(serve.session_of(server, "s9"), nil)
+
+    answered(server, named(SECOND_TURN, "s4"))
+    test.truthy(serve.session_of(server, "s3"))
+    test.truthy(serve.session_of(server, "s4"))
+    test.equal(serve.session_of(server, "s1"), nil)
+  end
+)
+
+local FAILING_TURN = '{"messages":[{"role":"user","content":"a"},'
+  .. '{"role":"assistant","content":"a"},'
+  .. '{"role":"user","content":"a"}],"max_tokens":2,'
+  .. '"temperature":1,"top_k":2,"seed":1000,"session_id":"s"}'
+
+local function unreadable_fixture(): string
+  return meta_file(
+    replaced(
+      t001_meta(), mstrings("tokenizer.ggml.tokens", {"a", "b", "\255"})
+    ),
+    t001_entries()
+  )
+end
+
+test.it(
+  "a failed turn leaves no context",
+  function()
+    local file_path = unreadable_fixture()
+    local server = build(file_path, "m", 4)
+    answered(server, FIRST_TURN)
+    test.equal(held(server, "s").length, 2)
+
+    local pieces = tokenizer.load(file_path) as tokenizer.Tokenizer
+    local _, decode_line = pieces:decode({2})
+    test.equal(refused(server, FAILING_TURN).error.message, decode_line)
+    test.equal(serve.session_of(server, "s"), nil)
+
+    local fresh = build(file_path, "m", 4)
+    answered(fresh, FIRST_TURN)
+    local _, failing_run = serve.stream(
+      fresh, (FAILING_TURN:gsub("}$", ',"stream":true}'))
+    )
+    local payloads = collected(failing_run as tltp.StreamFn)
+    test.equal(#payloads, 1)
+    test.deepEqual(events_of(payloads)[1], ROLE_EVENT)
+    test.equal(serve.session_of(fresh, "s"), nil)
+  end
+)
+
+test.it(
+  "a streamed turn stores its context too",
+  function()
+    local server = build(meta_file(t001_meta(), t001_entries()), "m", 4)
+
+    local streamed = (FIRST_TURN:gsub("}$", ',"stream":true}'))
+    local _, streamed_run = serve.stream(server, streamed)
+    test.truthy(streamed_run)
+    collected(streamed_run as tltp.StreamFn)
+    test.equal(held(server, "s").length, 2)
+
+    local resumed = answered(
+      server, (SECOND_TURN:gsub("}$", ',"stream":false}'))
+    )
+    test.equal(resumed.usage.prompt_tokens_details.cached_tokens, 2)
   end
 )

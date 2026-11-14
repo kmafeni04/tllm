@@ -78,7 +78,7 @@ mapped until the process ends.
 
 ## Functional requirements
 
-- FR-001 (US-001) WHEN `require("tllm.serve").build({host = "127.0.0.1", port = 9090, name = "m", path = P})` is called with `P` naming a GGUF file, THE SYSTEM SHALL return a `tltp.Server` whose config holds port 9090 and `bind_host` `127.0.0.1` and nil as its second return value.
+- FR-001 (US-001) WHEN `require("tllm.serve").build({host = "127.0.0.1", port = 9090, name = "m", path = P, sessions = 4})` is called with `P` naming a GGUF file, THE SYSTEM SHALL return a `tltp.Server` whose config holds port 9090 and `bind_host` `127.0.0.1` and nil as its second return value.
 - FR-002 (US-002) IF `weights.load(P)` returns a failure, THEN THE SYSTEM SHALL return nil and that failure as the reason.
 - FR-003 (US-002) WHEN `start` is called with an endpoint whose `path` the load refuses, THE SYSTEM SHALL write one line through the stderr writer holding the loader's reason, with its trailing whitespace stripped and one newline appended, and return exit code 1.
 - FR-004 (US-003) WHEN a GET request for `/health` is answered by a server `build` returned, THE SYSTEM SHALL answer status 200, content type `application/json`, and a body that decodes to an object whose members are `status` with the value `ok` and `model` with the value the endpoint's `name`.

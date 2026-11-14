@@ -94,7 +94,8 @@ non-goals that nothing is streamed. The record `serve` builds from the body is u
   in the order appended and never for an end id, with that text.
 - FR-009 (US-002) IF `generate.text` returns a failure, or `tltp.json_encode` gives nil for an
   event's data, THEN THE SYSTEM SHALL end the stream without writing the `finish_reason` event or
-  the `[DONE]` event.
+  the `[DONE]` event, and a streamed turn carrying a `session_id` whose generation returns nil
+  SHALL discard that conversation, so the next turn cannot answer from a half-read context.
 
 ## Non-goals
 

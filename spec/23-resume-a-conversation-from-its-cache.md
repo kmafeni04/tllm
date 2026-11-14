@@ -1,6 +1,6 @@
 # 23: A conversation resumes from the context it already read
 
-**Status**: pending   **Depends on**: 04, 08, 16, 18, 19
+**Status**: done   **Depends on**: 04, 08, 16, 18, 19
 
 ## Problem & context
 
@@ -159,9 +159,13 @@ start: integer | nil
   `assistant:a` with `"max_tokens":2` and `"session_id":"s"` answers `cached_tokens` 0 and leaves `s`
   3 ids long, the 6 stored ids not being the first ids of the prompt's 2; that the body of three
   `a`-content messages with `"max_tokens":2` and `"session_id":"s"` answers `cached_tokens` 0 and
-  leaves `s` 4 ids long, the 3 stored ids being all 3 of the prompt's; and that a body of the single
-  message `a` with `"max_tokens":2` and `"session_id":"u"` builds a model, answers `cached_tokens` 0
-  and leaves `u` 2 ids long.
+  leaves `s` 4 ids long, the 3 stored ids being all 3 of the prompt's; that after a first turn
+  naming `x` the body `{"messages":[{"role":"user","content":"baa"}],"max_tokens":2,
+  "session_id":"x"}` answers `cached_tokens` 0 and leaves `x` 4 ids long with a model of 8
+  positions, the 2 stored ids `{0, 0}` not being the first ids of the prompt's `{1, 0, 0}` while the
+  length and position checks both pass; and that a body of the single message `a` with
+  `"max_tokens":2` and `"session_id":"u"` builds a model, answers `cached_tokens` 0 and leaves `u`
+  2 ids long.
 - T-003 (FR-007, FR-010): `the server keeps only the configured number of conversations`, proves on
   `18/T-001`'s fixture built from an endpoint holding `sessions` 2 that after the T-001 body naming
   `s1` and the same body naming `s2`, a turn of T-001's second body naming `s1` answers `cached_tokens`
@@ -191,27 +195,4 @@ start: integer | nil
 
 ## Amendments
 
-- `04/FR-006`: `sessions` joins `host`, `port` and `models` as a key the file may hold.
-- `04/FR-007`: a `sessions` that is set must be an integer of one or more, checked after `models`
-  and refused by a line naming `sessions`; `04/T-006` gains a `sessions` of 0 and of `"2"`.
-- `04/FR-011`: `start` also receives the file's `sessions`, 4 when no file is read or the file sets
-  none, so the endpoint carries it, and `04/T-010` and `04/T-008` gain that default.
-- `08/FR-001`: the endpoint `build` is called with also holds `sessions`, and every `serve.build`
-  call in `tests/serve.test.tl` gains it, 4 where it names none.
-- `16/FR-001`: the call returns a fourth value, the ids it sampled in the order it appended them,
-  nil when it returns nil.
-- `16/FR-002`: an options `start` of zero or more makes the call forward the prompt's ids from
-  `start` on, each at its own index, and sample from the scores that forwarding gives; `start`
-  absent is 0, and the non-goal that every call prefills from position zero no longer holds.
-- `16/FR-009`: `start` joins the options checked, a negative one refused with the others before the
-  prompt is encoded, and one at or above the prompt's id count refused after it, naming `start`.
-- `18/FR-003`: the generation model is the conversation's stored one where `23/FR-001` reuses it and
-  a new one is sized by `23/FR-004`, so no model is built for every request of a conversation, and
-  the non-goal that no cache outlives a request no longer holds.
-- `18/FR-004`: `usage` also holds `prompt_tokens_details`, an object whose `cached_tokens` is the
-  number of the prompt's ids the turn did not forward.
-- `18/FR-005`: `session_id` is honoured rather than ignored.
-- `18/FR-008`: a `session_id` that is present and is not a string is refused, that check coming
-  after `stream`'s, and `18/T-003` gains that case.
-- `19/FR-009`: a streamed turn carrying a `session_id` whose generation returns nil discards that
-  conversation, so the next turn cannot answer from a half-read context.
+- None.

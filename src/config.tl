@@ -15,6 +15,7 @@ local record Settings
   host: string | nil
   port: integer | nil
   models: {string: string}
+  sessions: integer | nil
 end
 
 local function one_line(text: string): string
@@ -70,7 +71,12 @@ local function read_file(file_path: string): string | nil
 end
 
 local function unknown_key(fields: Fields): string | nil
-  local allowed: {string: boolean} = {host = true, port = true, models = true}
+  local allowed: {string: boolean} = {
+    host = true,
+    port = true,
+    models = true,
+    sessions = true,
+  }
   local keys: {string} = {}
   for key in pairs(fields) do
     local name = tostring(key)
@@ -107,7 +113,9 @@ local function parse(
     return nil
   end
 
-  local settings: Settings = {host = nil, port = nil, models = {}}
+  local settings: Settings = {
+    host = nil, port = nil, models = {}, sessions = nil
+  }
 
   local host = fields.host
   if host is string then
@@ -193,6 +201,24 @@ local function parse(
     return nil
   end
 
+  local sessions = fields.sessions
+  if sessions is number then
+    if not (sessions % 1 == 0 and sessions >= 1) then
+      refuse(
+        write_err,
+        "config " .. file_path .. ": sessions must be an integer of one or more"
+      )
+      return nil
+    end
+    settings.sessions = sessions as integer
+  elseif not (sessions is nil) then
+    refuse(
+      write_err,
+      "config " .. file_path .. ": sessions must be an integer of one or more"
+    )
+    return nil
+  end
+
   local names: {string} = {}
   for name in pairs(settings.models) do
     names[#names + 1] = name
@@ -230,11 +256,15 @@ end
 
 local function loaded(
   settings: Settings | nil
-): boolean, string | nil, integer | nil, {string: string}
+): boolean, string | nil, integer | nil, {string: string}, integer | nil
   if settings is Settings then
-    return true, settings.host, settings.port, settings.models
+    return true,
+      settings.host,
+      settings.port,
+      settings.models,
+      settings.sessions
   end
-  return false, nil, nil, {}
+  return false, nil, nil, {}, nil
 end
 
 function config.load(
@@ -242,7 +272,7 @@ function config.load(
   explicit: string | nil,
   path_word: boolean,
   write_err: function(string)
-): boolean, string | nil, integer | nil, {string: string}
+): boolean, string | nil, integer | nil, {string: string}, integer | nil
   if explicit is string then
     local text = read_file(explicit)
     if text is nil then

@@ -8,12 +8,13 @@ local record generate
     temperature: number | nil
     top_k: integer | nil
     end_id: integer | nil
+    start: integer | nil
     on_token: function(string) | nil
   end
 
   text: function(
     compute.Model, tokenizer.Tokenizer, string, Options
-  ): string | nil, string | nil, integer | nil
+  ): string | nil, string | nil, integer | nil, {integer} | nil
 end
 
 local type Options = generate.Options
@@ -115,6 +116,10 @@ local function faulted(options: Options): string | nil
   if not (top_k is nil) and top_k < 1 then
     return "generate: top_k " .. tostring(top_k) .. " is below one"
   end
+  local start = options.start
+  if not (start is nil) and start < 0 then
+    return "generate: start " .. tostring(start) .. " is below zero"
+  end
   return nil
 end
 
@@ -123,7 +128,7 @@ function generate.text(
   tokens: tokenizer.Tokenizer,
   prompt: string,
   options: Options
-): string | nil, string | nil, integer | nil
+): string | nil, string | nil, integer | nil, {integer} | nil
   local fault = faulted(options)
   if not (fault is nil) then
     return nil, fault
@@ -137,6 +142,16 @@ function generate.text(
     return nil, "generate: prompt holds no token ids"
   end
 
+  local start = options.start or 0
+  if start >= #ids then
+    return nil,
+      "generate: start "
+        .. tostring(start)
+        .. " is not below the prompt's "
+        .. tostring(#ids)
+        .. " ids"
+  end
+
   local end_id = options.end_id
   if end_id is nil then
     end_id = tokens.end_id
@@ -144,8 +159,8 @@ function generate.text(
 
   local scores: {number} | nil = nil
   local line: string | nil = nil
-  for index, id in ipairs(ids) do
-    scores, line = model:forward(id, index - 1)
+  for index = start + 1, #ids do
+    scores, line = model:forward(ids[index], index - 1)
     if scores is nil then
       return nil, line
     end
@@ -182,7 +197,7 @@ function generate.text(
   if answer is nil then
     return nil, decode_line
   end
-  return answer, nil, #produced
+  return answer, nil, #produced, produced
 end
 
 return generate

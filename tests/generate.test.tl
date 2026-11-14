@@ -530,6 +530,34 @@ test.it(
     answer, line = generate.text(
       fresh(handle, 4),
       tokens,
+      "a",
+      {
+        max_tokens = 2,
+        seed = 0,
+        start = -1,
+      }
+    )
+    test.equal(answer, nil)
+    test.includes(line as string, "generate")
+    test.includes(line as string, "start")
+
+    answer, line = generate.text(
+      fresh(handle, 4),
+      tokens,
+      "a",
+      {
+        max_tokens = 2,
+        seed = 0,
+        start = 1,
+      }
+    )
+    test.equal(answer, nil)
+    test.includes(line as string, "generate")
+    test.includes(line as string, "start")
+
+    answer, line = generate.text(
+      fresh(handle, 4),
+      tokens,
       "a\255",
       {
         max_tokens = 0,

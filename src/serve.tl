@@ -19,6 +19,13 @@ local record serve
     port: integer
     name: string
     path: string
+    sessions: integer
+  end
+
+  record Session
+    id: string
+    length: integer
+    generation: compute.Model
   end
 
   record Reply
@@ -31,6 +38,7 @@ local record serve
   start: function(Endpoint, function(string)): integer
   answer: function(tltp.Server, string): Reply
   stream: function(tltp.Server, string): tltp.Response, tltp.StreamFn | nil
+  session_of: function(tltp.Server, string): Session | nil
 end
 
 local record LooseObject
@@ -46,6 +54,18 @@ local record Request
   max_tokens: integer
   seed: integer
   stream: boolean
+  session_id: string | nil
+end
+
+local record Held
+  ids: {integer}
+  session: serve.Session
+end
+
+local record Store
+  held: {string: Held}
+  order: {string}
+  limit: integer
 end
 
 local record Prepared
@@ -54,6 +74,8 @@ local record Prepared
   prompt: string
   ids: {integer}
   generation: compute.Model
+  cached: integer
+  store: Store | nil
 end
 
 local record EventChoice
@@ -70,9 +92,22 @@ local DEFAULT_BUDGET: integer = 256
 local CHAT_PATH = "/v1/chat/completions"
 
 local models: {tltp.Server: serve.Model} = {}
+local stores: {tltp.Server: Store} = {}
 
 function serve.model_of(server: tltp.Server): serve.Model | nil
   return models[server]
+end
+
+function serve.session_of(server: tltp.Server, id: string): serve.Session | nil
+  local store = stores[server]
+  if store is nil then
+    return nil
+  end
+  local held = store.held[id]
+  if held is nil then
+    return nil
+  end
+  return held.session
 end
 
 local function error_body(message: string, kind: string): string
@@ -205,6 +240,15 @@ local function request_of(body: string): Request | nil, string | nil
     stream = stream_value as boolean
   end
 
+  local session_id: string | nil = nil
+  local session_value = fields.session_id
+  if not (session_value is nil) then
+    if not (session_value is string) then
+      return nil, "session_id: not a string"
+    end
+    session_id = session_value as string
+  end
+
   return {
     messages = messages,
     temperature = temperature,
@@ -212,6 +256,7 @@ local function request_of(body: string): Request | nil, string | nil
     max_tokens = budget,
     seed = seed,
     stream = stream,
+    session_id = session_id,
   }, nil
 end
 
@@ -227,6 +272,15 @@ local function budget_fault(
       .. tostring(positions)
       .. " positions the file allows"
   )
+end
+
+local function begins_with(ids: {integer}, prefix: {integer}): boolean
+  for index = 1, #prefix do
+    if ids[index] ~= prefix[index] then
+      return false
+    end
+  end
+  return true
 end
 
 local function prepared(
@@ -263,11 +317,43 @@ local function prepared(
     return nil, budget_fault(#ids, budget, window.positions)
   end
 
-  local generation, generation_line = compute.model(
-    model.backend, model.handle, needed
-  )
+  local id = request.session_id
+  local store: Store | nil = nil
+  local generation: compute.Model | nil = nil
+  local cached = 0
+
+  if id is string then
+    store = stores[server]
+    if store is Store then
+      local held = store.held[id]
+      if not (held is nil) then
+        if
+          held.session.length < #ids
+          and needed <= held.session.generation.positions
+          and begins_with(ids, held.ids)
+        then
+          generation = held.session.generation
+          cached = held.session.length
+        end
+      end
+    end
+  end
+
   if generation is nil then
-    return nil, failed(generation_line as string)
+    local taken = needed
+    if id is string then
+      taken = needed * 2
+      if taken > window.positions then
+        taken = window.positions
+      end
+    end
+    local built, generation_line = compute.model(
+      model.backend, model.handle, taken
+    )
+    if built is nil then
+      return nil, failed(generation_line as string)
+    end
+    generation = built
   end
 
   return {
@@ -276,6 +362,8 @@ local function prepared(
     prompt = prompt,
     ids = ids,
     generation = generation,
+    cached = cached,
+    store = store,
   }, nil
 end
 
@@ -288,22 +376,93 @@ local function options_of(
     seed = request.seed,
     temperature = request.temperature,
     top_k = request.top_k,
+    start = ready.cached,
     on_token = on_token,
   }
 end
 
+local function forwarded(ready: Prepared, sampled: {integer}): {integer}
+  local count = #sampled
+  if count == ready.request.max_tokens then
+    count = count - 1
+  end
+  local ids: {integer} = {}
+  for index = 1, #ready.ids do
+    ids[index] = ready.ids[index]
+  end
+  for index = 1, count do
+    ids[#ids + 1] = sampled[index]
+  end
+  return ids
+end
+
+local function forgotten(store: Store, id: string)
+  store.held[id] = nil
+  for index = #store.order, 1, -1 do
+    if store.order[index] == id then
+      table.remove(store.order, index)
+    end
+  end
+end
+
+local function used(store: Store, id: string)
+  for index = #store.order, 1, -1 do
+    if store.order[index] == id then
+      table.remove(store.order, index)
+    end
+  end
+  store.order[#store.order + 1] = id
+end
+
+local function kept(ready: Prepared, sampled: {integer})
+  local store = ready.store
+  local id = ready.request.session_id
+  if store is nil or not (id is string) then
+    return
+  end
+  local held = store.held[id]
+  if held is nil then
+    if #store.order >= store.limit then
+      forgotten(store, store.order[1])
+    end
+    held = {
+      ids = {},
+      session = {
+        id = id,
+        length = 0,
+        generation = ready.generation,
+      },
+    }
+    store.held[id] = held
+  end
+  held.ids = forwarded(ready, sampled)
+  held.session.length = #held.ids
+  held.session.generation = ready.generation
+  used(store, id)
+end
+
+local function lost(ready: Prepared)
+  local store = ready.store
+  local id = ready.request.session_id
+  if store is nil or not (id is string) then
+    return
+  end
+  forgotten(store, id)
+end
+
 local function finished(ready: Prepared): serve.Reply
-  local text, text_line, sampled = generate.text(
+  local text, text_line, completion, sampled = generate.text(
     ready.generation,
     ready.model.tokenizer,
     ready.prompt,
     options_of(ready, nil)
   )
   if text is nil then
+    lost(ready)
     return failed(text_line as string)
   end
 
-  local completion = sampled as integer
+  kept(ready, sampled as {integer})
   return {
     status = "OK",
     body = tltp.json_encode(
@@ -315,6 +474,7 @@ local function finished(ready: Prepared): serve.Reply
           prompt_tokens = #ready.ids,
           completion_tokens = completion,
           total_tokens = #ready.ids + completion,
+          prompt_tokens_details = {cached_tokens = ready.cached},
         },
       }
     ) as string,
@@ -335,7 +495,7 @@ local function producer(ready: Prepared): tltp.StreamFn
     emit(opening)
 
     local broken = false
-    local text, _, sampled = generate.text(
+    local text, _, count, sampled = generate.text(
       ready.generation,
       ready.model.tokenizer,
       ready.prompt,
@@ -354,12 +514,17 @@ local function producer(ready: Prepared): tltp.StreamFn
         end
       )
     )
-    if broken or text is nil then
+    if text is nil then
+      lost(ready)
+      return
+    end
+    kept(ready, sampled as {integer})
+    if broken then
       return
     end
 
     local reason = "stop"
-    if (sampled as integer) >= ready.request.max_tokens then
+    if (count as integer) >= ready.request.max_tokens then
       reason = "length"
     end
     local ending = event_data({index = 0, finish_reason = reason})
@@ -463,6 +628,7 @@ function serve.build(endpoint: serve.Endpoint): tltp.Server | nil, string | nil
     tokenizer = tokens,
     backend = backend,
   }
+  stores[server] = {held = {}, order = {}, limit = endpoint.sessions}
   install(server, endpoint.name)
   return server, nil
 end
