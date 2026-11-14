@@ -1,6 +1,6 @@
 # 20: Run the file's own chat template
 
-**Status**: pending   **Depends on**: 17, 09
+**Status**: done   **Depends on**: 17, 09
 
 ## Problem & context
 
@@ -132,12 +132,12 @@ no seat at that point.
   `~/.local/share/llm-models/Qwen3.6-35B-A3B/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf` and embedded as the
   fixture string, renders three message lists into these exact prompts. A system
   `be brief` and a user `hi` give
-  `<|im_start|>system\nbe brief<|im_end|>\n<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n<think\n`.
+  `<|im_start|>system\nbe brief<|im_end|>\n<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n<think>\n`.
   Two system turns `be brief` then `and plain`, then a user `hi`, give
-  `<|im_start|>system\nbe brief\nand plain<|im_end|>\n<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n<think\n`.
+  `<|im_start|>system\nbe brief\nand plain<|im_end|>\n<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n<think>\n`.
   A user `hi` then an assistant whose content is the two pieces `plan` and `answer` with the
-  closer between them, written `plan</thinkanswer`, give
-  `<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n<think\nplan\n</think\n\nanswer<|im_end|>\n<|im_start|>assistant\n<think\n`.
+  closer between them, written `plan</think>answer`, give
+  `<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n<think>\nplan\n</think>\n\nanswer<|im_end|>\n<|im_start|>assistant\n<think>\n`.
   It also proves the never-run branches were read without being run, which shows in the
   template parsing at all, and in the rendered text holding no tool or image marker.
 - T-002 (FR-003): `a set in a taken if outlives it and a set in a loop does not`, proves a name bound
@@ -188,13 +188,4 @@ no seat at that point.
 
 ## Amendments
 
-- `17/FR-007`: the refused set shrinks to tags, filters other than `trim` and `length`, methods
-  other than the seven this spec names, and expressions the reader cannot evaluate; `{% set %}`,
-  `{% macro %}`, `{# #}`, the `length` filter, the `is` tests and Python-syntax expressions now run,
-  so `17/T-003`'s macro case renders the empty string instead of being refused, and `17`'s context
-  sentence saying a comment and `{% set %}` are tags the reader does not run, with `trim` the only
-  filter, no longer holds.
-- `17/FR-011`: the reachable names grow to `loop`, names bound by `{% set %}`, macro names,
-  `namespace(...)`, `raise_exception` and the seven string methods; the context sentence saying the
-  file's template is a follow-up, the non-goal refusing Python-dialect templates, and the non-goal
-  listing `{% set %}`, macros, `loop` and `{# #}` as refused, no longer hold.
+- None.
