@@ -63,7 +63,8 @@ local record serve
   record Session
     id: string
     length: integer
-    generation: compute.Model
+    sequence: string
+    positions: integer
   end
 
   session_of: function(tltp.Server, string): Session | nil
@@ -93,31 +94,33 @@ start: integer | nil
   failure line, streamed or not, THE SYSTEM SHALL store under that name the prompt's ids followed
   by every sampled id the run forwarded, the last sampled id of a turn stopped by the budget not
   being stored because no forward took its position, and report that conversation through
-  `serve.session_of` with a `length` counting those ids; a streamed turn stores when `serve.step`
-  ends it, `25/FR-009`'s case.
+  `serve.session_of` with a `length` counting those ids; the conversation `session_of` reports
+  carries its `sequence` and `positions` in place of a model, `positions` being the positions
+  `reserve` gave that sequence. A streamed turn stores when `serve.step` ends it, `25/FR-009`'s
+  case.
 - FR-003 (US-001) WHEN a turn asks for a `session_id` the server holds no conversation under, THE
-  SYSTEM SHALL build that conversation a model and read the whole prompt from position zero, taking
-  `cached_tokens` as 0 when the reply is not streamed.
-- FR-004 (US-001) WHEN the server builds a conversation's model, THE SYSTEM SHALL give it twice the
-  turn's need, or the file window's positions when that is fewer, the turn's need being the prompt's
-  ids plus the budget minus one, and `18/FR-009` still refuses a turn whose need is past the file
-  window. Its tests' endpoints set `kv_cache` `f32`, so their recorded replies and `cached_tokens`
-  stand.
-- FR-005 (US-001) IF a turn's need is more than the positions the conversation's model holds, THEN
-  THE SYSTEM SHALL replace that model, read the whole prompt from position zero, and take
-  `cached_tokens` as 0 when the reply is not streamed.
+  SYSTEM SHALL reserve that conversation a sequence and read the whole prompt from position zero,
+  taking `cached_tokens` as 0 when the reply is not streamed.
+- FR-004 (US-001) WHEN the server reserves a conversation's sequence, THE SYSTEM SHALL reserve it
+  at twice the turn's need, or the file window's positions when that is fewer, the turn's need
+  being the prompt's ids plus the budget minus one, and the sequence stays reserved while the
+  conversation is stored; `18/FR-009` still refuses a turn whose need is past the file window. Its
+  tests' endpoints set `kv_cache` `f32`, so their recorded replies and `cached_tokens` stand.
+- FR-005 (US-001) IF a turn's need is more than the positions the conversation's sequence holds,
+  THEN THE SYSTEM SHALL release that sequence and reserve a larger one, read the whole prompt from
+  position zero, and take `cached_tokens` as 0 when the reply is not streamed.
 - FR-006 (US-002) IF a conversation's stored ids are not the prompt's first ids, or hold all of the
-  prompt's ids, THEN THE SYSTEM SHALL discard that conversation, build it a model as FR-004 sizes
-  it, read the whole prompt from position zero, and take `cached_tokens` as 0 when the reply is not
-  streamed.
+  prompt's ids, THEN THE SYSTEM SHALL discard that conversation, release its sequence, reserve one
+  as FR-004 sizes it, read the whole prompt from position zero, and take `cached_tokens` as 0 when
+  the reply is not streamed.
 - FR-007 (US-003) WHEN a turn stores a conversation under a name the server holds no conversation
   under and already holds as many conversations as the endpoint's `sessions` names, THE SYSTEM SHALL
-  discard the conversation no turn has used for longest, storing or reusing a conversation counting
-  as a use.
+  discard the conversation no turn has used for longest, release its sequence, and only a
+  conversation no live turn holds is evicted; storing or reusing a conversation counts as a use.
 - FR-008 (US-004) IF the generation of a turn carrying a `session_id` returns nil, THEN THE SYSTEM
-  SHALL discard that conversation and, when the reply was not streamed, answer the status and body
-  `18` answers for that fault, and when it was streamed end the stream as `19/FR-009` says and write
-  no further event.
+  SHALL discard that conversation and release its sequence as `26/FR-027` says and, when the reply
+  was not streamed, answer the status and body `18` answers for that fault, and when it was streamed
+  end the stream as `19/FR-009` says and write no further event.
 - FR-009 (US-001) WHEN a body carries no `session_id`, THE SYSTEM SHALL answer as `18` does, store
   nothing and take `cached_tokens` as 0 when the reply is not streamed.
 - FR-010 (US-004) IF a body is refused before its generation begins, THEN THE SYSTEM SHALL leave

@@ -66,9 +66,10 @@ local record compute
 
   record Attention
     block: function(
-      Attention, {number}, string, integer
-    ): {number} | nil, string | nil
-    cache_bytes: function(Attention, string): integer | nil
+      Attention, {Row}, string
+    ): {{number}} | nil, string | nil
+    cache_bytes: function(Attention, string, string): integer | nil
+    release: function(Attention, string)
   end
 
   attend: function(
@@ -93,10 +94,11 @@ end
   read, and a `cache_type` that is one of `compute`'s `CacheType` values, `f32`, `f16`, `q8_0` and
   `q4_0`, THE SYSTEM SHALL return an attention handle and nil, and IF `cache_type` is not one of
   those four, THEN THE SYSTEM SHALL return nil and one line naming `attend` and the type.
-- FR-002 (US-001) WHEN that handle's `block(hidden, prefix, position)` is called with `hidden`
-  holding one number per position of `<prefix>attn_norm.weight`, THE SYSTEM SHALL return one number
-  per position of `hidden`, being the gated attention numbers FR-003 to FR-007 describe, and nil
-  as its second value.
+- FR-002 (US-001) WHEN that handle's `block(rows, prefix)` is called with a batch of
+  `compute.Row`s, each row's `hidden` holding one number per position of
+  `<prefix>attn_norm.weight`, THE SYSTEM SHALL return one contribution row per input row in
+  order, each holding one number per position of that row's `hidden`, being the gated attention
+  numbers FR-003 to FR-007 describe for that row, and nil as its second value.
 - FR-003 (US-001) WHEN a block call begins, THE SYSTEM SHALL normalise `hidden` with
   `<prefix>attn_norm.weight` by `11/FR-004`'s norm and the geometry's `eps`, and read
   `<prefix>attn_q.weight`'s rows as one group per head in head order, the head's `head_length`
@@ -108,16 +110,20 @@ end
   query head and each key head by `11/FR-005`'s rope at `position` with the geometry's
   `rope_dimensions` and `rope_base`.
 - FR-005 (US-002) WHEN a block call's keys and values are ready, THE SYSTEM SHALL keep the rotated
-  key numbers and the value numbers under `prefix` at `position`, in a cache of
-  `geometry.positions` positions, one cache for each prefix, each held in a ggml tensor of the
-  geometry's `cache_type` in host memory, at 4 bytes per number for `f32`, 2 for `f16`, `34/32`
-  for `q8_0` and `18/32` for `q4_0`, so that a call for a prefix attends over the positions zero
-  to `position` and over no other prefix's positions, and SHALL report those bytes as
-  `cache_bytes(prefix)` once the cache exists and nil before. A refused block call stores nothing: every refusal of FR-009 to FR-012
-  happens before those numbers are written, so a prefix's next position is the same after a refused
-  call as before it.
-- FR-006 (US-001) WHEN the cached positions of a prefix are known, THE SYSTEM SHALL take a query
-  head's weight for a position as `11/FR-006`'s softmax, over the positions zero to `position`, of
+  key numbers and the value numbers under a sequence and `prefix` at that row's `position`, in a
+  cache of the positions `reserve` gave that sequence, a sequence no `reserve` named getting the
+  geometry's `positions` when a block call first names it, one cache for each sequence and prefix,
+  each held in a ggml tensor of the geometry's `cache_type` in host memory, at 4 bytes per number
+  for `f32`, 2 for `f16`, `34/32` for `q8_0` and `18/32` for `q4_0`, so that a call for a
+  sequence and prefix attends over the positions zero to the row's `position` and over no other
+  sequence's positions, and SHALL report those bytes as `cache_bytes(sequence, prefix)` once the
+  cache exists and nil before. Such a cache is freed by `release` and does not count against the
+  model's `sequences`. A refused block call stores nothing: every refusal of FR-009 to FR-012
+  happens before those numbers are written, so a sequence and prefix's next position is the same
+  after a refused call as before it.
+- FR-006 (US-001) WHEN the cached positions of a sequence and prefix are known, THE SYSTEM SHALL
+  take a query head's weight for a position as `11/FR-006`'s softmax, over the positions zero to
+  that row's `position` of its own sequence's cache, of
   that query head's sum of products with that position's key head numbers times one over the
   square root of `head_length`, the key/value head being `floor(head / (heads / kv_heads))`, and
   the head's attention numbers as those weights applied to that key/value head's value numbers.
@@ -136,13 +142,14 @@ end
   not hold `heads * head_length * 2` rows, `attn_k.weight` or `attn_v.weight` does not hold
   `kv_heads * head_length` rows, `attn_output.weight` does not hold `heads * head_length` numbers
   per row and one row per position of `hidden`, `attn_q_norm.weight` or `attn_k_norm.weight` does
-  not hold `head_length` numbers, `hidden` does not hold the numbers `attn_norm.weight` holds, or
-  any of the seven tensors holds a number of dimensions other than the one its role needs, THEN THE
-  SYSTEM SHALL return nil and one line naming `block`, the tensor and the numbers at fault.
-- FR-011 (US-003) IF `position` is negative, or is `geometry.positions` or more, or is not the one
-  after the last position that prefix's cache took, where a prefix holding no positions takes
-  position zero next, THEN THE SYSTEM SHALL return nil and one line naming `block`, the prefix and
-  the position.
+  not hold `head_length` numbers, any row's `hidden` does not hold the numbers
+  `attn_norm.weight` holds, or any of the seven tensors holds a number of dimensions other than
+  the one its role needs, THEN THE SYSTEM SHALL return nil and one line naming `block`, the tensor
+  and the numbers at fault. The shape checks are made against each row of the batch's hidden.
+- FR-011 (US-003) IF a row's `position` is negative, or is the positions `reserve` gave that
+  row's sequence or more, or is not the one after the last position that sequence and prefix's
+  cache took, where a sequence and prefix holding no positions takes position zero next, THEN THE
+  SYSTEM SHALL return nil and one line naming `block`, that row's sequence and its position.
 - FR-012 (US-003) IF the memory a prefix's cache or a block's graph needs cannot be allocated THEN
   THE SYSTEM SHALL return nil and one line naming `block`.
   Not testable: making that allocation fail needs a memory limit the suite cannot set portably; the

@@ -81,13 +81,18 @@ local record compute
 
   record Attention
     block: function(
-      Attention, {number}, string, integer
-    ): {number} | nil, string | nil
-    cache_bytes: function(Attention, string): integer | nil
+      Attention, {Row}, string
+    ): {{number}} | nil, string | nil
+    cache_bytes: function(Attention, string, string): integer | nil
+    release: function(Attention, string)
   end
 
   model: function(
-    Backend, weights.Handle, integer | nil, CacheType | nil
+    Backend,
+    weights.Handle,
+    integer | nil,
+    CacheType | nil,
+    sequences?: integer
   ): Model | nil, string | nil
 end
 
@@ -119,11 +124,14 @@ end
 - FR-004 (US-003) IF the cache type is `q8_0` or `q4_0` and the model's run holds a full-attention
   block whose `head_length` is not a multiple of 32, THEN THE SYSTEM SHALL return nil and one line
   naming the type and the head length, so that no cache of that type is made.
-- FR-005 (US-001) WHEN `attention.cache_bytes(prefix)` is called, THE SYSTEM SHALL return the bytes
-  a block call allocated for that prefix, and nil when no block call has named that prefix, a
-  prefix holding no cache being an answer and not a refusal.
-- FR-006 (US-001) WHEN a prefix's cache is allocated, THE SYSTEM SHALL have `cache_bytes` report
-  `2 * geometry.positions * kv_heads * head_length` numbers at 4 bytes each for f32, 2 for f16,
+- FR-005 (US-001) WHEN `cache_bytes(sequence, prefix)` is called, THE SYSTEM SHALL return the bytes
+  allocated for that sequence at every block of the run, whether `reserve` gave it those positions
+  or a block call named it first, and nil when neither has, a sequence holding no positions taken
+  being an answer and not a refusal.
+- FR-006 (US-001) WHEN a sequence's cache is allocated, THE SYSTEM SHALL have `cache_bytes` report
+  the bytes of that sequence's positions, the reserved ones or the geometry's `positions` when a
+  block call named it first, being
+  `2 * positions * kv_heads * head_length` numbers at 4 bytes each for f32, 2 for f16,
   `34 / 32` for q8_0 and `18 / 32` for q4_0, whatever the number of positions filled since.
 - FR-007 (US-004) WHEN a block call runs at position 1024 over a prefix's cache, THE SYSTEM SHALL
   return within ten times the time a call at position 1 takes, both over the backend

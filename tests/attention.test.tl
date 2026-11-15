@@ -4,6 +4,19 @@ local test = require("lde-test")
 local compute = require("tllm.compute")
 local weights = require("tllm.weights")
 
+local function first_row(hidden: {number}, position: integer): {compute.Row}
+  return {{sequence = "", hidden = hidden, position = position}}
+end
+
+local function first(
+  output: {{number}} | nil, line: string | nil
+): {number} | nil, string | nil
+  if output is nil then
+    return nil, line
+  end
+  return (output as {{number}})[1], line
+end
+
 local ROOT = os.tmpname()
 os.remove(ROOT)
 fs.mkdirAll(ROOT)
@@ -272,12 +285,19 @@ test.it(
     local block = (attention as compute.Attention).block
 
     test.deepEqual(
-      block(attention as compute.Attention, {1, 1, 1, 1}, "blk.0.", 0),
+      first(
+        block(
+          attention as compute.Attention, first_row({1, 1, 1, 1}, 0), "blk.0."
+        )
+      ),
       {1, 2, 0, 0}
     )
 
     local other = attended(loaded(toy_entries()), shape)
-    test.deepEqual(other.block(other, {3, 3, 3, 3}, "blk.0.", 0), {1, 2, 0, 0})
+    test.deepEqual(
+      first(other.block(other, first_row({3, 3, 3, 3}, 0), "blk.0.")),
+      {1, 2, 0, 0}
+    )
   end
 )
 
@@ -286,9 +306,12 @@ test.it(
   function()
     local attention = attended(loaded(toy_entries()), geometry())
     local block = attention.block
-    test.deepEqual(block(attention, {1, 1, 1, 1}, "blk.0.", 0), {1, 2, 0, 0})
+    test.deepEqual(
+      first(block(attention, first_row({1, 1, 1, 1}, 0), "blk.0.")),
+      {1, 2, 0, 0}
+    )
     close(
-      block(attention, {1, 0, 0, 0}, "blk.0.", 1),
+      first(block(attention, first_row({1, 0, 0, 0}, 1), "blk.0.")),
       {
         1.5587023,
         0.8825954,
@@ -297,15 +320,18 @@ test.it(
       }
     )
 
-    close(block(attention, {1, 0, 0, 0}, "blk.1.", 0), {2, 0, 0, 0})
+    close(
+      first(block(attention, first_row({1, 0, 0, 0}, 0), "blk.1.")),
+      {2, 0, 0, 0}
+    )
 
-    refused(block(attention, {1, 0, 0, 0}, "blk.0.", 3))
+    refused(first(block(attention, first_row({1, 0, 0, 0}, 3), "blk.0.")))
 
     local shape = geometry()
     shape.eps = 1
     local strict = attended(loaded(toy_entries()), shape)
     close(
-      strict.block(strict, {1, 1, 1, 1}, "blk.0.", 0),
+      first(strict.block(strict, first_row({1, 1, 1, 1}, 0), "blk.0.")),
       {
         0.7071068,
         1.4142136,
@@ -314,7 +340,7 @@ test.it(
       }
     )
     close(
-      strict.block(strict, {1, 0, 0, 0}, "blk.0.", 1),
+      first(strict.block(strict, first_row({1, 0, 0, 0}, 1), "blk.0.")),
       {
         0.8036810,
         0.6851070,
@@ -413,7 +439,9 @@ test.it(
     end
 
     local attention = attended(handle, shape)
-    local line = refused(attention.block(attention, {1, 1, 1, 1}, "blk.9.", 0))
+    local line = refused(
+      first(attention.block(attention, first_row({1, 1, 1, 1}, 0), "blk.9."))
+    )
     test.includes(line, "blk.9.attn_norm.weight")
 
     for _, suffix in ipairs(
@@ -431,7 +459,7 @@ test.it(
         loaded(without(toy_entries(), "blk.0." .. suffix)), shape
       )
       local missing_line = refused(
-        missing.block(missing, {1, 1, 1, 1}, "blk.0.", 0)
+        first(missing.block(missing, first_row({1, 1, 1, 1}, 0), "blk.0."))
       )
       test.includes(missing_line, suffix)
     end
@@ -443,7 +471,11 @@ test.it(
     )
     local half_attention = attended(loaded(half), shape)
     local half_line = refused(
-      half_attention.block(half_attention, {1, 1, 1, 1}, "blk.0.", 0)
+      first(
+        half_attention.block(
+          half_attention, first_row({1, 1, 1, 1}, 0), "blk.0."
+        )
+      )
     )
     test.includes(half_line, "attn_k")
     test.includes(half_line, "f16")
@@ -454,7 +486,11 @@ test.it(
     }
     for _, shape_case in ipairs(shapes) do
       local case_line = refused(
-        attention.block(attention, shape_case[1] as {number}, "blk.0.", 0)
+        first(
+          attention.block(
+            attention, first_row(shape_case[1] as {number}, 0), "blk.0."
+          )
+        )
       )
       test.includes(case_line, shape_case[2] as string)
     end
@@ -523,14 +559,22 @@ test.it(
         shape
       )
       local changed_line = refused(
-        changed_attention.block(changed_attention, {1, 1, 1, 1}, "blk.0.", 0)
+        first(
+          changed_attention.block(
+            changed_attention, first_row({1, 1, 1, 1}, 0), "blk.0."
+          )
+        )
       )
       test.includes(changed_line, changed[1] as string)
     end
 
     for _, position in ipairs({-1, 4}) do
       local position_line = refused(
-        attention.block(attention, {1, 1, 1, 1}, "blk.0.", position)
+        first(
+          attention.block(
+            attention, first_row({1, 1, 1, 1}, position), "blk.0."
+          )
+        )
       )
       test.includes(position_line, "blk.0.")
       test.includes(position_line, tostring(position))
@@ -549,7 +593,11 @@ test.it(
     )
     local absent_attention = attended(loaded(absent), shape)
     local absent_line = refused(
-      absent_attention.block(absent_attention, {1, 1, 1, 1}, "blk.0.", 0)
+      first(
+        absent_attention.block(
+          absent_attention, first_row({1, 1, 1, 1}, 0), "blk.0."
+        )
+      )
     )
     test.includes(absent_line, "attn_k.weight")
 
@@ -570,7 +618,11 @@ test.it(
     )
     local mistyped_attention = attended(loaded(mistyped), shape)
     local mistyped_line = refused(
-      mistyped_attention.block(mistyped_attention, {1, 1, 1, 1}, "blk.0.", 0)
+      first(
+        mistyped_attention.block(
+          mistyped_attention, first_row({1, 1, 1, 1}, 0), "blk.0."
+        )
+      )
     )
     test.includes(mistyped_line, "attn_k")
     test.includes(mistyped_line, "f16")
@@ -587,14 +639,21 @@ test.it(
     )
     local wrong_attention = attended(loaded(wrong_rows), shape)
     local wrong_line = refused(
-      wrong_attention.block(wrong_attention, {1, 1, 1, 1}, "blk.0.", 5)
+      first(
+        wrong_attention.block(
+          wrong_attention, first_row({1, 1, 1, 1}, 5), "blk.0."
+        )
+      )
     )
     test.includes(wrong_line, "attn_q.weight")
 
     local fresh = attended(loaded(toy_entries()), shape)
-    refused(fresh.block(fresh, {1, 1}, "blk.0.", 0))
-    refused(fresh.block(fresh, {1, 1, 1, 1}, "blk.0.", 1))
-    test.deepEqual(fresh.block(fresh, {1, 1, 1, 1}, "blk.0.", 0), {1, 2, 0, 0})
+    refused(first(fresh.block(fresh, first_row({1, 1}, 0), "blk.0.")))
+    refused(first(fresh.block(fresh, first_row({1, 1, 1, 1}, 1), "blk.0.")))
+    test.deepEqual(
+      first(fresh.block(fresh, first_row({1, 1, 1, 1}, 0), "blk.0.")),
+      {1, 2, 0, 0}
+    )
   end
 )
 
@@ -729,6 +788,9 @@ test.it(
     shape.heads = 4
     shape.kv_heads = 2
     local attention = attended(loaded(entries), shape)
-    close(attention.block(attention, {1, 1, 1, 1}, "blk.0.", 0), {1, 2, 3, 4})
+    close(
+      first(attention.block(attention, first_row({1, 1, 1, 1}, 0), "blk.0.")),
+      {1, 2, 3, 4}
+    )
   end
 )

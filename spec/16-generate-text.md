@@ -44,7 +44,7 @@ local record generate
   end
 
   text: function(
-    compute.Model, tokenizer.Tokenizer, string, Options
+    compute.Model, tokenizer.Tokenizer, string, Options, sequence?: string
   ): string | nil, string | nil, integer | nil, {integer} | nil
 end
 ```
@@ -69,9 +69,9 @@ a sample takes are worked out by hand from `15/T-001`'s scores.
 
 ## Functional requirements
 
-- FR-001 (US-001) WHEN `generate.text(model, tokenizer, prompt, options)` is called with options FR-009 accepts, THE SYSTEM SHALL return the ids it sampled decoded by `tokenizer:decode` as the first value, nil as the second, the number of ids it sampled as the third, and the ids it sampled in the order it appended them as the fourth, nil when it returns nil, holding no part of the prompt. Its tests build their models with `f32`, so the numbers and reply they record stand.
-- FR-002 (US-002) WHEN a call begins, THE SYSTEM SHALL take the prompt's ids from `tokenizer:encode(prompt)`, call `model:forward` with each id from the options' `start` on and its index as the position, in list order, and take the first sampled token from the scores the last of those calls returns, `start` absent being 0, so a call may begin at a position the model has already reached.
-- FR-003 (US-002) WHEN a token is sampled that is neither the end id nor the last `max_tokens` allows, THE SYSTEM SHALL call `model:forward` with it at the next position and sample the next token from the scores that call returns.
+- FR-001 (US-001) WHEN `generate.text(model, tokenizer, prompt, options, sequence)` is called with options FR-009 accepts, THE SYSTEM SHALL take the optional sequence name, `""` when it is absent, and drive a run through its rows, returning the ids it sampled decoded by `tokenizer:decode` as the first value, nil as the second, the number of ids it sampled as the third, and the ids it sampled in the order it appended them as the fourth, nil when it returns nil, holding no part of the prompt. Its tests build their models with `f32`, so the numbers and reply they record stand.
+- FR-002 (US-002) WHEN a call begins, THE SYSTEM SHALL take the prompt's ids from `tokenizer:encode(prompt)`, forward each id from the options' `start` on as a one-row pass at its position on the run's sequence, in list order, and take the first sampled token from the scores the last of those rows returns, `start` absent being 0, so a call may begin at a position the model has already reached.
+- FR-003 (US-002) WHEN a token is sampled that is neither the end id nor the last `max_tokens` allows, THE SYSTEM SHALL forward it as a one-row pass at the next position and sample the next token from the scores that row returns.
 - FR-004 (US-003) WHEN `temperature` is absent or zero, THE SYSTEM SHALL take the sampled token as the id of the highest score, the lowest id among equal highest scores.
 - FR-005 (US-003) WHEN `temperature` is above zero, THE SYSTEM SHALL take the candidates as the `top_k` highest-scoring ids, fewer when the vocabulary is smaller than `top_k`, equal scores in increasing id order, all ids when `top_k` is absent, and take the sampled token as the first candidate whose probability summed with every candidate before it exceeds one draw, the last candidate when none does, each probability being the candidate's score minus the top candidate's score, divided by `temperature`, exponentiated, and divided by the sum of the candidates' exponentiated numbers.
 - FR-006 (US-003) WHEN a draw is taken, THE SYSTEM SHALL take it from a generator whose state starts at `seed` modulo 4294967296, each draw setting the state to 1664525 times the state plus 1013904223 modulo 4294967296 and being that state divided by 4294967296.

@@ -1,6 +1,6 @@
 # 26: Several conversations' tokens in one pass
 
-**Status**: pending   **Depends on**: 12, 13, 14, 15, 16, 18, 19, 21, 23, 24, 25
+**Status**: done   **Depends on**: 12, 13, 14, 15, 16, 18, 19, 21, 23, 24, 25
 
 ## Problem & context
 
@@ -66,7 +66,7 @@ local record compute
     block: function(
       FeedForward, {Row}, string
     ): {{number}} | nil, string | nil
-    scores: function(FeedForward, {{number}}): {{{number}}} | nil, string | nil
+    scores: function(FeedForward, {{number}}): {{number}} | nil, string | nil
   end
 
   record LinearAttention
@@ -82,7 +82,7 @@ local record compute
     reserve: function(Model, string, integer): string | nil
     release: function(Model, string)
     cache_bytes: function(Model, string, string): integer | nil
-    pass: function(Model, {Input}): {{{number}}} | nil, string | nil
+    pass: function(Model, {Input}): {{number}} | nil, string | nil
   end
 
   model: function(
@@ -325,11 +325,12 @@ recorded numbers are unchanged, the sequence's positions being the geometry's `p
   with content `b` each answer a producer; that resuming each producer once, with a collector per
   producer and one shared list recording which collector took each payload, leaves both suspended
   with only the `role` event collected and the list `{A, B}`; that one `serve.step` returns 2 and
-  leaves the list `{A, B, A, B}`, each collector holding the `role` event and one `a`; that the next
-  `serve.step` returns 0 and leaves each collector holding the `role` event, `a`, `a`, the `length`
-  finish event and `[DONE]`, with the list `{A, B, A, B, A, A, A, B, B, B}`; and that the two `a`
-  pieces of each collector are together the text `serve.answer` gives for the same body on a second
-  server built from the same file, so batching changed neither reply.
+  leaves the list `{A, B, A, B}`, each collector holding the `role` event and the first piece its
+  body answers with; that the next `serve.step` returns 0 and leaves each collector holding the
+  `role` event, its body's two pieces, the `length` finish event and `[DONE]`, with the list
+  `{A, B, A, B, A, A, A, B, B, B}`; and that each collector's pieces are together the text
+  `serve.answer` gives for the same body on a second server built from the same file, so batching
+  changed neither reply.
 - T-005 (FR-015, FR-020, FR-021, FR-022, FR-024, FR-025): `a turn waits for a sequence and starts
   when one frees`, proves on `18/T-001`'s fixture built with `sessions` 1 that
   `serve.model_of(server).generation` holds `sequences` 1; that A's producer for T-004's first body
@@ -347,7 +348,11 @@ recorded numbers are unchanged, the sequence's positions being the geometry's `p
   two bodies are resumed and one step returns 2, that C's and D's producers for those bodies then
   leave both collectors at the `role` event, that the next step returns 2 and leaves C's and D's
   collectors there while A and B end, and that the step after it returns 2 with C's and D's
-  collectors each holding their first `a`, so both waiters were admitted in one step.
+  collectors each holding the first piece their body answers with, so both waiters were admitted
+  in one step; and that on a fourth server built with `sessions` 1, a streamed body carrying
+  `"session_id":"s"` is stepped once, T-004's first body is then resumed and waits while `s`
+  finishes and is stored, and the step after that evicts `s` and gives the waiter its first piece,
+  so a waiter is admitted once a stored conversation's sequence is freed.
 - T-006 (FR-017, FR-018, FR-019, FR-023, FR-027): `a reply that cannot wait is told so, a stored
   conversation keeps its sequence and a discarded one frees it`, proves on `18/T-001`'s fixture
   built with `sessions` 1 that
@@ -398,77 +403,4 @@ recorded numbers are unchanged, the sequence's positions being the geometry's `p
 
 ## Amendments
 
-- `12/FR-002`: the block call takes a batch of `compute.Row`s and a prefix, and answers one
-  contribution row per input row in order, in place of one hidden, a prefix and a position.
-- `12/FR-005`: a cache is kept under a sequence and a prefix, with the positions `reserve` gave
-  that sequence, a sequence no `reserve` named getting the geometry's `positions` when a block call
-  first names it; such a cache is reported by `cache_bytes`, freed by `release`, and does not count
-  against the model's `sequences`, and `cache_bytes` takes that sequence as well as the prefix.
-- `12/FR-006`: the positions a row attends over are zero to its position of its own sequence's
-  cache.
-- `12/FR-010`: the shape checks are made against each row of the batch's hidden.
-- `12/FR-011`: the position fault is per row, naming that row's sequence and its position, and the
-  bound is the positions `reserve` gave that sequence, not the geometry's `positions`.
-- `13/FR-002`: the block call takes a batch of `compute.Row`s and a prefix, answering one row per
-  input row.
-- `13/FR-008`: `scores` takes a batch of hidden rows and answers one score row per input row.
-- `13/FR-009`: `top_token` calls `attention:block` and `feed_forward:block` with a list holding one
-  `compute.Row` whose sequence is `""` and whose position is the argument, and
-  `feed_forward:scores` with a list holding one hidden.
-- `13/FR-013`: the shape checks are made against each row of the batch's hidden.
-- `13/FR-014`: a refused call `top_token` makes is refused through that one-row batch, its line
-  unchanged.
-- `14/FR-002`: the block call takes a batch of `compute.Row`s and a prefix, answering one row per
-  input row.
-- `14/FR-010`: the history and state are kept under a sequence and a prefix, and are freed with
-  that sequence as `26/FR-005` says.
-- `14/FR-013`: the shape checks are made against each row of the batch's hidden.
-- `14/FR-014`: the position fault is per row, naming that row's sequence.
-- `15/FR-001`: `compute.model` takes a fifth `sequences` argument, 1 when it is absent.
-- `15/FR-005`: `forward` is a pass of one row on the sequence `""`.
-- `15/FR-006`: each block is called once for all of the pass's rows, and `scores` once for all of
-  its hidden rows.
-- `15/FR-007`: the position is checked against the row's sequence.
-- `15/FR-011`: one is added to the row's sequence, not to one count for the model.
-- `15/FR-012`: a refused row adds no position to any sequence.
-- `16/FR-001`: `text` takes an optional sequence name, `""` when absent, and drives a run through
-  its rows.
-- `16/FR-002`: a prompt id is forwarded as a one-row pass at its position on the run's sequence.
-- `16/FR-003`: a sampled token is forwarded as a one-row pass at the next position.
-- `18/FR-003`: a turn takes the server's one model and reserves a sequence where `23/FR-001`
-  reuses a stored conversation's.
-- `18/FR-009`: the window is the server's model, its `positions` being the file's context length.
-- `18/FR-012`: `compute.model` leaves the per-request faults, a model the server cannot build being
-  `build`'s refusal, as `26/T-007` has it, and a reservation `reserve` refuses is the turn's own
-  fault, its line the body's.
-- `19/FR-007`: no model is built per request, that build being `serve.build`'s one model, and a
-  reservation `reserve` refuses is that turn's fault.
-- `23/FR-002`: the conversation `session_of` reports carries its `sequence` and `positions` in place
-  of a model, `positions` being the positions `reserve` gave that sequence.
-- `23/FR-003`: a new conversation gets a reserved sequence, not a model.
-- `23/FR-004`: that sequence is reserved at twice the turn's need, capped by the file window, and
-  stays reserved while the conversation is stored.
-- `23/FR-005`: a need past a conversation's reserved positions releases that sequence and reserves
-  a larger one.
-- `23/FR-006`: a conversation that does not continue the prompt releases its sequence and reserves
-  one as `23/FR-004` sizes it.
-- `23/FR-007`: an evicted conversation's sequence is released, and only a conversation no live turn
-  holds is evicted.
-- `23/FR-008`: a discarded conversation's sequence is released as `26/FR-027` says.
-- `24/FR-005`: `cache_bytes` takes a sequence as well as a prefix and reports the bytes allocated
-  for that sequence at every block of the run, whether `reserve` gave it those positions or a block
-  call named it first, nil when neither has, a sequence holding no positions taken being an answer
-  and not a refusal.
-- `24/FR-006`: the bytes are those of that sequence's positions, the reserved ones or the
-  geometry's `positions` when a block call named it first.
-- `25/FR-001`: `open` takes an optional sequence name, `""` when absent, and the run exposes
-  `next` and `accept` in place of `step`.
-- `25/FR-002`: a step forwards one prompt id as one row of the pass.
-- `25/FR-003`: sampling happens when a row's scores are accepted, not after a forward of its own.
-- `25/FR-004`: a failed row is the pass's nil line, which reaches its run through `fail`, ending
-  that run and recording the line as its `failure`.
-- `25/FR-005`: a discarded conversation's sequence is released as `26/FR-027` says.
-- `25/FR-007`: one step makes one pass for every turn that has a row, and returns how many turns
-  are still registered after it, waiting ones included.
-- `25/FR-015`: a second turn on a live conversation reserves a sequence of its own and waits for a
-  free one when none is free.
+- None.

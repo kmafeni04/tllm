@@ -13,6 +13,7 @@ local record serve
     tokenizer: tokenizer.Tokenizer
     backend: compute.Backend
     kv_cache: compute.CacheType | nil
+    generation: compute.Model
   end
 
   record Endpoint
@@ -27,7 +28,8 @@ local record serve
   record Session
     id: string
     length: integer
-    generation: compute.Model
+    sequence: string
+    positions: integer
   end
 
   record Reply
@@ -78,9 +80,12 @@ local record Prepared
   request: Request
   prompt: string
   ids: {integer}
-  generation: compute.Model
+  sequence: string
+  positions: integer
   cached: integer
   store: Store | nil
+  waiting: boolean
+  reserved: boolean
 end
 
 local record EventChoice
@@ -95,9 +100,10 @@ end
 
 local record Turn
   ready: Prepared
-  run: generate.Run
+  run: generate.Run | nil
   emit: tltp.EmitFn
   live: boolean
+  waiting: boolean
 end
 
 local DEFAULT_BUDGET: integer = 256
@@ -106,7 +112,8 @@ local CHAT_PATH = "/v1/chat/completions"
 local models: {tltp.Server: serve.Model} = {}
 local stores: {tltp.Server: Store} = {}
 local turns: {tltp.Server: {Turn}} = {}
-local in_flight: {tltp.Server: {string: boolean}} = {}
+local reservations: {tltp.Server: {string: boolean}} = {}
+local held: {tltp.Server: {string: boolean}} = {}
 
 function serve.model_of(server: tltp.Server): serve.Model | nil
   return models[server]
@@ -117,11 +124,11 @@ function serve.session_of(server: tltp.Server, id: string): serve.Session | nil
   if store is nil then
     return nil
   end
-  local held = store.held[id]
-  if held is nil then
+  local found = store.held[id]
+  if found is nil then
     return nil
   end
-  return held.session
+  return found.session
 end
 
 local function error_body(message: string, kind: string): string
@@ -165,9 +172,9 @@ local function messages_of(value: Loose): {chat.Message} | nil, string | nil
     if not (entry is LooseObject) then
       return nil, entry_fault(index)
     end
-    local held = entry as Fields
-    local role = held.role
-    local content = held.content
+    local fields = entry as Fields
+    local role = fields.role
+    local content = fields.content
     if not (role is string) or not (content is string) then
       return nil, entry_fault(index)
     end
@@ -238,11 +245,11 @@ local function request_of(body: string): Request | nil, string | nil
   local seed = 0
   local seed_value = fields.seed
   if not (seed_value is nil) then
-    local held = whole(seed_value)
-    if held is nil then
+    local seed_number = whole(seed_value)
+    if seed_number is nil then
       return nil, "seed: not a whole number"
     end
-    seed = held
+    seed = seed_number
   end
 
   local stream = false
@@ -288,17 +295,57 @@ local function budget_fault(
   )
 end
 
-local function marked(server: tltp.Server, id: string): boolean
-  local marks = in_flight[server]
-  return marks ~= nil and marks[id] == true
+local function is_held(server: tltp.Server, name: string): boolean
+  local marks = held[server]
+  return marks ~= nil and marks[name] == true
 end
 
-local function unmark(server: tltp.Server, id: string)
-  local marks = in_flight[server]
+local function mark_held(server: tltp.Server, name: string)
+  local marks = held[server]
+  if marks is nil then
+    marks = {}
+    held[server] = marks
+  end
+  marks[name] = true
+end
+
+local function unmark_held(server: tltp.Server, name: string)
+  local marks = held[server]
   if marks is nil then
     return
   end
-  marks[id] = nil
+  marks[name] = nil
+end
+
+local function is_reserved(server: tltp.Server, name: string): boolean
+  local marks = reservations[server]
+  return marks ~= nil and marks[name] == true
+end
+
+local function free_slots(server: tltp.Server): integer
+  local model = models[server]
+  if model is nil then
+    return 0
+  end
+  local count = 0
+  local marks = reservations[server]
+  if not (marks is nil) then
+    for _ in pairs(marks) do
+      count = count + 1
+    end
+  end
+  return model.generation.sequences - count
+end
+
+local function release_name(server: tltp.Server, name: string)
+  local model = models[server]
+  if not (model is nil) then
+    model.generation:release(name)
+  end
+  local marks = reservations[server]
+  if not (marks is nil) then
+    marks[name] = nil
+  end
 end
 
 local function begins_with(ids: {integer}, prefix: {integer}): boolean
@@ -308,6 +355,92 @@ local function begins_with(ids: {integer}, prefix: {integer}): boolean
     end
   end
   return true
+end
+
+local function forgotten(store: Store, id: string)
+  store.held[id] = nil
+  for index = #store.order, 1, -1 do
+    if store.order[index] == id then
+      table.remove(store.order, index)
+    end
+  end
+end
+
+local function used(store: Store, id: string)
+  for index = #store.order, 1, -1 do
+    if store.order[index] == id then
+      table.remove(store.order, index)
+    end
+  end
+  store.order[#store.order + 1] = id
+end
+
+-- the oldest stored conversation no live turn holds
+local function evict_one(server: tltp.Server, store: Store): boolean
+  for _, id in ipairs(store.order) do
+    local held_conversation = store.held[id]
+    if
+      not (held_conversation is nil)
+      and not is_held(server, held_conversation.session.sequence)
+    then
+      forgotten(store, id)
+      release_name(server, held_conversation.session.sequence)
+      return true
+    end
+  end
+  return false
+end
+
+local function reserve_sequence(
+  server: tltp.Server, base: string, positions: integer
+): string | nil, string | nil
+  local model = models[server]
+  if model is nil then
+    return nil, "model: this server holds none"
+  end
+  local attempt = 0
+  while attempt < 100000 do
+    local name = base
+    if attempt > 0 then
+      if base == "" then
+        name = "turn" .. attempt
+      else
+        name = base .. "#" .. attempt
+      end
+    end
+    if not is_reserved(server, name) then
+      local line = model.generation:reserve(name, positions)
+      if line is nil then
+        local marks = reservations[server]
+        if marks is nil then
+          marks = {}
+          reservations[server] = marks
+        end
+        marks[name] = true
+        return name, nil
+      end
+      if line:find("is already held", 1, true) == nil then
+        return nil, line
+      end
+    end
+    attempt = attempt + 1
+  end
+  return nil, "reserve: no free sequence name"
+end
+
+local function too_many(server: tltp.Server): serve.Reply
+  local store = stores[server]
+  local limit = 0
+  if not (store is nil) then
+    limit = store.limit
+  end
+  return {
+    status = "TooManyRequests",
+    body = error_body(
+      "the server holds no free session; sessions is " .. tostring(limit),
+      "too_many_requests"
+    ),
+  }
 end
 
 local function prepared(
@@ -333,66 +466,88 @@ local function prepared(
     return nil, failed(encode_line as string)
   end
 
-  local window, window_line = compute.model(
-    model.backend, model.handle, nil, model.kv_cache
-  )
-  if window is nil then
-    return nil, failed(window_line as string)
-  end
-
+  local generation = model.generation
+  local window = generation.positions
   local budget = request.max_tokens
   local needed = #ids + budget - 1
-  if needed > window.positions then
-    return nil, budget_fault(#ids, budget, window.positions)
+  if needed > window then
+    return nil, budget_fault(#ids, budget, window)
   end
 
   local id = request.session_id
-  local store: Store | nil = nil
-  local generation: compute.Model | nil = nil
+  local store: Store | nil = stores[server]
+  local sequence = ""
+  local positions = needed * 2
+  if positions > window then
+    positions = window
+  end
   local cached = 0
+  local waiting = false
+  local reserved = false
+  local found_session: serve.Session | nil = nil
 
-  if id is string then
-    store = stores[server]
-    if store is Store then
-      local held = store.held[id]
-      if not (held is nil) then
-        if
-          held.session.length < #ids
-          and needed <= held.session.generation.positions
-          and begins_with(ids, held.ids)
-          and not marked(server, id)
-        then
-          generation = held.session.generation
-          cached = held.session.length
-        end
+  if id is string and store is Store then
+    local found = store.held[id]
+    if not (found is nil) then
+      local session = found.session
+      if
+        session.length < #ids
+        and needed <= session.positions
+        and begins_with(ids, found.ids)
+        and not is_held(server, session.sequence)
+      then
+        found_session = session
+      elseif not is_held(server, session.sequence) then
+        forgotten(store, id)
+        release_name(server, session.sequence)
       end
     end
   end
 
-  if generation is nil then
-    local taken = needed
-    if id is string then
-      taken = needed * 2
-      if taken > window.positions then
-        taken = window.positions
-      end
-    end
-    local built, generation_line = compute.model(
-      model.backend, model.handle, taken, model.kv_cache
-    )
-    if built is nil then
-      return nil, failed(generation_line as string)
-    end
-    generation = built
-  end
-
-  if id is string then
-    local marks = in_flight[server]
+  if not (found_session is nil) then
+    sequence = found_session.sequence
+    positions = found_session.positions
+    cached = found_session.length
+    local marks = reservations[server]
     if marks is nil then
       marks = {}
-      in_flight[server] = marks
+      reservations[server] = marks
     end
-    marks[id] = true
+    marks[sequence] = true
+    mark_held(server, sequence)
+    return {
+      server = server,
+      model = model,
+      request = request,
+      prompt = prompt,
+      ids = ids,
+      sequence = sequence,
+      positions = positions,
+      cached = cached,
+      store = store,
+      waiting = false,
+      reserved = true,
+    }, nil
+  end
+
+  if free_slots(server) < 1 and store is Store then
+    evict_one(server, store)
+  end
+
+  if free_slots(server) < 1 then
+    if not request.stream then
+      return nil, too_many(server)
+    end
+    waiting = true
+    sequence = id or ""
+  else
+    local name, reserve_line = reserve_sequence(server, id or "", positions)
+    if name is nil then
+      return nil, failed(reserve_line as string)
+    end
+    sequence = name
+    mark_held(server, sequence)
+    reserved = true
   end
 
   return {
@@ -401,9 +556,12 @@ local function prepared(
     request = request,
     prompt = prompt,
     ids = ids,
-    generation = generation,
+    sequence = sequence,
+    positions = positions,
     cached = cached,
     store = store,
+    waiting = waiting,
+    reserved = reserved,
   }, nil
 end
 
@@ -433,28 +591,11 @@ local function forwarded(ready: Prepared, sampled: {integer}): {integer}
   return ids
 end
 
-local function forgotten(store: Store, id: string)
-  store.held[id] = nil
-  for index = #store.order, 1, -1 do
-    if store.order[index] == id then
-      table.remove(store.order, index)
-    end
-  end
-end
-
-local function used(store: Store, id: string)
-  for index = #store.order, 1, -1 do
-    if store.order[index] == id then
-      table.remove(store.order, index)
-    end
-  end
-  store.order[#store.order + 1] = id
-end
-
 local function released(ready: Prepared)
-  local id = ready.request.session_id
-  if id is string then
-    unmark(ready.server, id)
+  unmark_held(ready.server, ready.sequence)
+  if ready.reserved then
+    release_name(ready.server, ready.sequence)
+    ready.reserved = false
   end
 end
 
@@ -462,25 +603,32 @@ local function kept(ready: Prepared, sampled: {integer})
   local store = ready.store
   local id = ready.request.session_id
   if id is string and store is Store then
-    local held = store.held[id]
-    if held is nil then
-      if #store.order >= store.limit then
-        forgotten(store, store.order[1])
+    local existing = store.held[id]
+    if
+      not (existing is nil) and existing.session.sequence ~= ready.sequence
+    then
+      forgotten(store, id)
+      if not is_held(ready.server, existing.session.sequence) then
+        release_name(ready.server, existing.session.sequence)
       end
-      held = {
-        ids = {},
-        session = {
-          id = id,
-          length = 0,
-          generation = ready.generation,
-        },
-      }
-      store.held[id] = held
     end
-    held.ids = forwarded(ready, sampled)
-    held.session.length = #held.ids
-    held.session.generation = ready.generation
+    if store.held[id] == nil and #store.order >= store.limit then
+      evict_one(ready.server, store)
+    end
+    local ids = forwarded(ready, sampled)
+    store.held[id] = {
+      ids = ids,
+      session = {
+        id = id,
+        length = #ids,
+        sequence = ready.sequence,
+        positions = ready.positions,
+      },
+    }
     used(store, id)
+    unmark_held(ready.server, ready.sequence)
+    ready.reserved = false
+    return
   end
   released(ready)
 end
@@ -489,14 +637,23 @@ local function lost(ready: Prepared)
   local store = ready.store
   local id = ready.request.session_id
   if id is string and store is Store then
-    forgotten(store, id)
+    local existing = store.held[id]
+    if
+      not (existing is nil) and existing.session.sequence == ready.sequence
+    then
+      forgotten(store, id)
+    end
   end
   released(ready)
 end
 
 local function finished(ready: Prepared): serve.Reply
   local text, text_line, completion, sampled = generate.text(
-    ready.generation, ready.model.tokenizer, ready.prompt, options_of(ready)
+    ready.model.generation,
+    ready.model.tokenizer,
+    ready.prompt,
+    options_of(ready),
+    ready.sequence
   )
   if text is nil then
     lost(ready)
@@ -550,7 +707,7 @@ local function dropped(server: tltp.Server, turn: Turn)
 end
 
 local function producer(
-  server: tltp.Server, ready: Prepared, run: generate.Run
+  server: tltp.Server, ready: Prepared, run: generate.Run | nil
 ): tltp.StreamFn
   return function(emit: tltp.EmitFn): boolean | nil
     local opening = event_data({index = 0, delta = {role = "assistant"}})
@@ -560,7 +717,13 @@ local function producer(
     end
     emit(opening)
 
-    local turn: Turn = {ready = ready, run = run, emit = emit, live = true}
+    local turn: Turn = {
+      ready = ready,
+      run = run,
+      emit = emit,
+      live = true,
+      waiting = ready.waiting,
+    }
     local list = registered(server)
     list[#list + 1] = turn
 
@@ -572,43 +735,33 @@ local function producer(
   end
 end
 
-local function advance(server: tltp.Server, turn: Turn)
-  local run = turn.run
-  local piece, line = run.step(run)
-  if not (line is nil) then
-    lost(turn.ready)
+local function admit(server: tltp.Server, turn: Turn): boolean
+  local ready = turn.ready
+  local name = reserve_sequence(server, ready.sequence, ready.positions)
+  if name is nil then
+    lost(ready)
     dropped(server, turn)
-    return
+    return false
   end
+  ready.sequence = name
+  ready.reserved = true
+  mark_held(server, name)
 
-  if not (piece is nil) then
-    local data = event_data({index = 0, delta = {content = piece}})
-    if data is nil then
-      lost(turn.ready)
-      dropped(server, turn)
-      return
-    end
-    turn.emit(data)
-  end
-
-  if not run.done then
-    return
-  end
-
-  local reason = "stop"
-  if #run.produced >= turn.ready.request.max_tokens then
-    reason = "length"
-  end
-  local ending = event_data({index = 0, finish_reason = reason})
-  if ending is nil then
-    lost(turn.ready)
+  local run = generate.open(
+    ready.model.generation,
+    ready.model.tokenizer,
+    ready.prompt,
+    options_of(ready),
+    name
+  )
+  if run is nil then
+    lost(ready)
     dropped(server, turn)
-    return
+    return false
   end
-  turn.emit(ending)
-  turn.emit("[DONE]")
-  kept(turn.ready, run.produced)
-  dropped(server, turn)
+  turn.run = run
+  turn.waiting = false
+  return true
 end
 
 function serve.step(server: tltp.Server): integer
@@ -616,15 +769,90 @@ function serve.step(server: tltp.Server): integer
   if list is nil then
     return 0
   end
-  local order: {Turn} = {}
+  local snapshot: {Turn} = {}
   for index = 1, #list do
-    order[index] = list[index]
+    snapshot[index] = list[index]
   end
-  local live = 0
-  for _, turn in ipairs(order) do
-    if turn.live then
-      advance(server, turn)
+
+  for _, turn in ipairs(snapshot) do
+    if turn.live and turn.waiting then
+      if free_slots(server) < 1 then
+        local store = stores[server]
+        if store is nil then
+          break
+        end
+        if not evict_one(server, store) then
+          break
+        end
+      end
+      admit(server, turn)
     end
+  end
+
+  local active: {Turn} = {}
+  local inputs: {compute.Input} = {}
+  for _, turn in ipairs(list) do
+    if turn.live and not turn.waiting then
+      local run = turn.run
+      if not (run is nil) then
+        local input = run.next(run)
+        if not (input is nil) then
+          active[#active + 1] = turn
+          inputs[#inputs + 1] = input
+        end
+      end
+    end
+  end
+
+  if #inputs > 0 then
+    local model = models[server] as serve.Model
+    local rows = model.generation:pass(inputs)
+    if rows is nil then
+      for _, turn in ipairs(active) do
+        lost(turn.ready)
+        dropped(server, turn)
+      end
+    else
+      local planes = rows as {{number}}
+      for index, turn in ipairs(active) do
+        local run = turn.run as generate.Run
+        local piece, accept_line = run.accept(run, planes[index])
+        if not (accept_line is nil) then
+          lost(turn.ready)
+          dropped(server, turn)
+        else
+          if not (piece is nil) then
+            local data = event_data({index = 0, delta = {content = piece}})
+            if data is nil then
+              lost(turn.ready)
+              dropped(server, turn)
+            else
+              turn.emit(data)
+            end
+          end
+          if turn.live and run.done then
+            local reason = "stop"
+            if #run.produced >= turn.ready.request.max_tokens then
+              reason = "length"
+            end
+            local ending = event_data({index = 0, finish_reason = reason})
+            if ending is nil then
+              lost(turn.ready)
+              dropped(server, turn)
+            else
+              turn.emit(ending)
+              turn.emit("[DONE]")
+              kept(turn.ready, run.produced)
+              dropped(server, turn)
+            end
+          end
+        end
+      end
+    end
+  end
+
+  local live = 0
+  for _, turn in ipairs(list) do
     if turn.live then
       live = live + 1
     end
@@ -648,6 +876,9 @@ function serve.answer(server: tltp.Server, body: string): serve.Reply
   if ready is nil then
     return failure as serve.Reply
   end
+  if ready.waiting then
+    return too_many(server)
+  end
   return finished(ready)
 end
 
@@ -661,12 +892,20 @@ function serve.stream(
   end
 
   if not ready.request.stream then
+    if ready.waiting then
+      local fault = too_many(server)
+      return server:json(fault.status, fault.body), nil
+    end
     local reply = finished(ready)
     return server:json(reply.status, reply.body), nil
   end
 
   local run, open_line = generate.open(
-    ready.generation, ready.model.tokenizer, ready.prompt, options_of(ready)
+    ready.model.generation,
+    ready.model.tokenizer,
+    ready.prompt,
+    options_of(ready),
+    ready.sequence
   )
   if run is nil then
     released(ready)
@@ -674,7 +913,11 @@ function serve.stream(
     return server:json(fault.status, fault.body), nil
   end
 
-  local stream_fn = producer(server, ready, run)
+  local held_run: generate.Run | nil = run
+  if ready.waiting then
+    held_run = nil
+  end
+  local stream_fn = producer(server, ready, held_run)
   return server:sse(stream_fn), stream_fn
 end
 
@@ -733,6 +976,13 @@ function serve.build(endpoint: serve.Endpoint): tltp.Server | nil, string | nil
     return nil, backend_failure
   end
 
+  local generation, generation_failure = compute.model(
+    backend, handle, nil, endpoint.kv_cache, endpoint.sessions
+  )
+  if generation is nil then
+    return nil, generation_failure
+  end
+
   local server = tltp.Server.new(
     {port = endpoint.port, bind_host = endpoint.host, logging = false}
   )
@@ -743,6 +993,7 @@ function serve.build(endpoint: serve.Endpoint): tltp.Server | nil, string | nil
     tokenizer = tokens,
     backend = backend,
     kv_cache = endpoint.kv_cache,
+    generation = generation,
   }
   stores[server] = {held = {}, order = {}, limit = endpoint.sessions}
   install(server, endpoint.name)

@@ -4,6 +4,19 @@ local test = require("lde-test")
 local compute = require("tllm.compute")
 local weights = require("tllm.weights")
 
+local function first_row(hidden: {number}, position: integer): {compute.Row}
+  return {{sequence = "", hidden = hidden, position = position}}
+end
+
+local function first(
+  output: {{number}} | nil, line: string | nil
+): {number} | nil, string | nil
+  if output is nil then
+    return nil, line
+  end
+  return (output as {{number}})[1], line
+end
+
 local ROOT = os.tmpname()
 os.remove(ROOT)
 fs.mkdirAll(ROOT)
@@ -278,15 +291,24 @@ test.it(
   function()
     local handle = loaded(toy_entries())
     local attention = linear(handle, geometry())
-    close(attention.block(attention, {1, 1}, "blk.0.", 0), {100, 241.4213562})
+    close(
+      first(attention.block(attention, first_row({1, 1}, 0), "blk.0.")),
+      {100, 241.4213562}
+    )
 
     local other = linear(loaded(toy_entries()), geometry())
-    close(other.block(other, {3, 3}, "blk.0.", 0), {100, 241.4213562})
+    close(
+      first(other.block(other, first_row({3, 3}, 0), "blk.0.")),
+      {100, 241.4213562}
+    )
 
     local shape = geometry()
     shape.eps = 1
     local strict = linear(loaded(toy_entries()), shape)
-    close(strict.block(strict, {1, 1}, "blk.0.", 0), {70.6498381, 170.6241588})
+    close(
+      first(strict.block(strict, first_row({1, 1}, 0), "blk.0.")),
+      {70.6498381, 170.6241588}
+    )
   end
 )
 
@@ -294,12 +316,18 @@ test.it(
   "a second token reads the conv history and the state",
   function()
     local attention = linear(loaded(toy_entries()), geometry())
-    close(attention.block(attention, {1, 1}, "blk.0.", 0), {100, 241.4213562})
     close(
-      attention.block(attention, {1, 0}, "blk.0.", 1),
+      first(attention.block(attention, first_row({1, 1}, 0), "blk.0.")),
+      {100, 241.4213562}
+    )
+    close(
+      first(attention.block(attention, first_row({1, 0}, 1), "blk.0.")),
       {193.2903421, 251.3696764}
     )
-    close(attention.block(attention, {1, 1}, "blk.1.", 0), {100, 241.4213562})
+    close(
+      first(attention.block(attention, first_row({1, 1}, 0), "blk.1.")),
+      {100, 241.4213562}
+    )
   end
 )
 
@@ -314,9 +342,12 @@ test.it(
     local shape = geometry()
     shape.linear_conv_kernel = 3
     local attention = linear(loaded(entries), shape)
-    close(attention.block(attention, {1, 1}, "blk.0.", 0), {100, 241.4213562})
     close(
-      attention.block(attention, {1, 0}, "blk.0.", 1),
+      first(attention.block(attention, first_row({1, 1}, 0), "blk.0.")),
+      {100, 241.4213562}
+    )
+    close(
+      first(attention.block(attention, first_row({1, 0}, 1), "blk.0.")),
       {170.7414208, 304.1506948}
     )
   end
@@ -420,7 +451,9 @@ test.it(
     end
 
     local attention = linear(handle, shape)
-    local line = refused(attention.block(attention, {1, 1}, "blk.9.", 0))
+    local line = refused(
+      first(attention.block(attention, first_row({1, 1}, 0), "blk.9."))
+    )
     test.includes(line, "blk.9.attn_norm.weight")
 
     for _, suffix in ipairs(
@@ -440,7 +473,9 @@ test.it(
       local missing = linear(
         loaded(without(toy_entries(), "blk.0." .. suffix)), shape
       )
-      local missing_line = refused(missing.block(missing, {1, 1}, "blk.0.", 0))
+      local missing_line = refused(
+        first(missing.block(missing, first_row({1, 1}, 0), "blk.0."))
+      )
       test.includes(missing_line, suffix)
     end
 
@@ -463,7 +498,9 @@ test.it(
       )
       local half_attention = linear(loaded(half), shape)
       local half_line = refused(
-        half_attention.block(half_attention, {1, 1}, "blk.0.", 0)
+        first(
+          half_attention.block(half_attention, first_row({1, 1}, 0), "blk.0.")
+        )
       )
       test.includes(half_line, name)
       test.includes(half_line, "f16")
@@ -475,7 +512,11 @@ test.it(
     }
     for _, shape_case in ipairs(shapes) do
       local case_line = refused(
-        attention.block(attention, shape_case[1] as {number}, "blk.0.", 0)
+        first(
+          attention.block(
+            attention, first_row(shape_case[1] as {number}, 0), "blk.0."
+          )
+        )
       )
       test.includes(case_line, shape_case[2] as string)
     end
@@ -513,18 +554,24 @@ test.it(
         shape
       )
       local changed_line = refused(
-        changed_attention.block(changed_attention, {1, 1}, "blk.0.", 0)
+        first(
+          changed_attention.block(
+            changed_attention, first_row({1, 1}, 0), "blk.0."
+          )
+        )
       )
       test.includes(changed_line, name)
     end
 
     local position_line = refused(
-      attention.block(attention, {1, 1}, "blk.0.", -1)
+      first(attention.block(attention, first_row({1, 1}, -1), "blk.0."))
     )
     test.includes(position_line, "blk.0.")
     test.includes(position_line, "-1")
     local fresh = linear(loaded(toy_entries()), shape)
-    local ahead = refused(fresh.block(fresh, {1, 1}, "blk.0.", 2))
+    local ahead = refused(
+      first(fresh.block(fresh, first_row({1, 1}, 2), "blk.0."))
+    )
     test.includes(ahead, "blk.0.")
     test.includes(ahead, "2")
 
@@ -540,7 +587,9 @@ test.it(
     )
     local absent_attention = linear(loaded(absent), shape)
     local absent_line = refused(
-      absent_attention.block(absent_attention, {1, 1}, "blk.0.", 0)
+      first(
+        absent_attention.block(absent_attention, first_row({1, 1}, 0), "blk.0.")
+      )
     )
     test.includes(absent_line, "ssm_out.weight")
 
@@ -566,7 +615,11 @@ test.it(
     )
     local mistyped_attention = linear(loaded(mistyped), shape)
     local mistyped_line = refused(
-      mistyped_attention.block(mistyped_attention, {1, 1}, "blk.0.", 0)
+      first(
+        mistyped_attention.block(
+          mistyped_attention, first_row({1, 1}, 0), "blk.0."
+        )
+      )
     )
     test.includes(mistyped_line, "attn_qkv")
     test.includes(mistyped_line, "f16")
@@ -593,7 +646,9 @@ test.it(
     )
     local wrong_attention = linear(loaded(wrong_rows), shape)
     local wrong_line = refused(
-      wrong_attention.block(wrong_attention, {1, 1}, "blk.0.", 0)
+      first(
+        wrong_attention.block(wrong_attention, first_row({1, 1}, 0), "blk.0.")
+      )
     )
     test.includes(wrong_line, "attn_qkv.weight")
 
@@ -609,15 +664,23 @@ test.it(
     )
     local late_attention = linear(loaded(late), shape)
     local late_line = refused(
-      late_attention.block(late_attention, {1, 1}, "blk.0.", 2)
+      first(
+        late_attention.block(late_attention, first_row({1, 1}, 2), "blk.0.")
+      )
     )
     test.includes(late_line, "attn_gate.weight")
 
     local kept = linear(loaded(toy_entries()), shape)
-    refused(kept.block(kept, {1, 1}, "blk.0.", 1))
-    close(kept.block(kept, {1, 1}, "blk.0.", 0), {100, 241.4213562})
-    refused(kept.block(kept, {1, 1}, "blk.0.", 0))
-    close(kept.block(kept, {1, 0}, "blk.0.", 1), {193.2903421, 251.3696764})
+    refused(first(kept.block(kept, first_row({1, 1}, 1), "blk.0.")))
+    close(
+      first(kept.block(kept, first_row({1, 1}, 0), "blk.0.")),
+      {100, 241.4213562}
+    )
+    refused(first(kept.block(kept, first_row({1, 1}, 0), "blk.0.")))
+    close(
+      first(kept.block(kept, first_row({1, 0}, 1), "blk.0.")),
+      {193.2903421, 251.3696764}
+    )
   end
 )
 
@@ -700,10 +763,12 @@ test.it(
     shape.linear_conv_kernel = 1
     local attention = linear(loaded(entries), shape)
     close(
-      attention.block(attention, {1, 1}, "blk.0.", 0),
+      first(attention.block(attention, first_row({1, 1}, 0), "blk.0.")),
       {367.9124626, 304.6669094}
     )
-    local scan = attention.block(attention, {1, 2}, "blk.0.", 1) as {number}
+    local scan = first(
+      attention.block(attention, first_row({1, 2}, 1), "blk.0.")
+    ) as {number}
     close(scan, {209.3171647, 219.4780173})
     test.truthy(
       math.abs(scan[1] - 206.6115929) > 1e-4

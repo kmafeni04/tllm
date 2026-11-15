@@ -307,9 +307,12 @@ local function blocked(
   prefix: string,
   position: integer
 ): {number}
-  local numbers, line = attention.block(attention, hidden, prefix, position)
+  local numbers, line = attention.block(
+    attention, {{sequence = "", hidden = hidden, position = position}}, prefix
+  )
   test.equal(line, nil)
-  return numbers as {number}
+  local rows = numbers as {{number}}
+  return rows[1]
 end
 
 test.it(
@@ -324,10 +327,10 @@ test.it(
     }
     for _, cost in ipairs(costs) do
       local attention = attended(handle, geometry(4, cost.kind))
-      test.equal(attention.cache_bytes(attention, "blk.0."), nil)
+      test.equal(attention.cache_bytes(attention, "", "blk.0."), nil)
       blocked(attention, ones(32), "blk.0.", 0)
-      test.equal(attention.cache_bytes(attention, "blk.0."), cost.bytes)
-      test.equal(attention.cache_bytes(attention, "blk.2."), nil)
+      test.equal(attention.cache_bytes(attention, "", "blk.0."), cost.bytes)
+      test.equal(attention.cache_bytes(attention, "", "blk.2."), nil)
     end
   end
 )

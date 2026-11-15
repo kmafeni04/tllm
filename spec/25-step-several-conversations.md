@@ -84,11 +84,13 @@ local record generate
     done: boolean
     failure: string | nil
     produced: {integer}
-    step: function(Run): string | nil, string | nil
+    next: function(Run): compute.Input | nil
+    accept: function(Run, {number}): string | nil, string | nil
+    fail: function(Run, string)
   end
 
   open: function(
-    compute.Model, tokenizer.Tokenizer, string, Options
+    compute.Model, tokenizer.Tokenizer, string, Options, sequence?: string
   ): Run | nil, string | nil
 end
 
@@ -108,43 +110,48 @@ end
 
 ## Functional requirements
 
-- FR-001 (US-001) WHEN `generate.open(model, tokenizer, prompt, options)` is called, THE SYSTEM
-  SHALL return a run and nil and make no forward, and IF `16/FR-009`, `16/FR-010` or `16/FR-011`
-  refuse those arguments, THEN THE SYSTEM SHALL return nil and the line `generate.text` gives for
-  them.
+- FR-001 (US-001) WHEN `generate.open(model, tokenizer, prompt, options, sequence)` is called, THE
+  SYSTEM SHALL take the optional sequence name, `""` when it is absent, return a run and nil, and
+  make no forward, the run exposing `next` and `accept` in place of `step`, and IF `16/FR-009`,
+  `16/FR-010` or `16/FR-011` refuse those arguments, THEN THE SYSTEM SHALL return nil and the line
+  `generate.text` gives for them.
 - FR-002 (US-001) WHEN a run has an unforwarded prompt id, THE SYSTEM SHALL forward that id and only
-  that id, at its own position, the one `16/FR-002` gives it, and return no text, so a prompt of
-  several ids takes one step per id.
-- FR-003 (US-001) WHEN a run whose prompt ids have all been forwarded is stepped, THE SYSTEM SHALL
-  take the next token from the scores the last forward returned by the rules `16/FR-004`,
-  `16/FR-005` and `16/FR-006` give, and IF that token is not the end id, THEN THE SYSTEM SHALL
-  append it, return its decode as the step's text, and forward it at the next position unless that
-  append reached `max_tokens`, and IF it is the end id, THEN THE SYSTEM SHALL end the run without
-  appending it, the run also ending when `max_tokens` ids are appended; a run's `produced` SHALL
-  hold the ids it appended, in the order it appended them, and its `done` SHALL be true once it has
-  ended, by the end id, by the count or by a failure. The end-id ending is proven through
-  `16/T-003`, which exercises a run once `text` loops over one.
+  that id as one row of the pass, at its own position, the one `16/FR-002` gives it, and return no
+  text, so a prompt of several ids takes one step per id.
+- FR-003 (US-001) WHEN a row's scores are accepted, THE SYSTEM SHALL take the next token from them
+  by the rules `16/FR-004`, `16/FR-005` and `16/FR-006` give, sampling happening when a row's
+  scores are accepted and not after a forward of its own, and IF that token is not the end id, THEN
+  THE SYSTEM SHALL append it, return its decode as the step's text, and forward it as a row at the
+  next position unless that append reached `max_tokens`, and IF it is the end id, THEN THE SYSTEM
+  SHALL end the run without appending it, the run also ending when `max_tokens` ids are appended; a
+  run's `produced` SHALL hold the ids it appended, in the order it appended them, and its `done`
+  SHALL be true once it has ended, by the end id, by the count or by a failure. The end-id ending
+  is proven through `16/T-003`, which exercises a run once `text` loops over one.
 - FR-004 (US-005) IF a forward or a decode in a step returns nil, THEN THE SYSTEM SHALL end the run,
   return nil as that step's text and that line unchanged, and record that line as the run's
-  failure; a step of a run that is done SHALL return no text and make no forward.
+  failure; a failed row is the pass's nil line, which reaches its run through `fail`, ending that
+  run and recording the line as its `failure`; a step of a run that is done SHALL return no text and
+  make no forward.
 - FR-005 (US-004) WHEN the producer of a streamed turn is first resumed, THE SYSTEM SHALL write the
   opening event `19/FR-003` names, record the emit it is given, register that turn with the
   scheduler, write no other event, and yield; IF that event cannot be encoded, THEN THE SYSTEM
-  SHALL register no turn, discard the conversation and return; WHEN it is resumed while that turn
+  SHALL register no turn, discard the conversation and return, releasing its sequence as
+  `26/FR-027` says; WHEN it is resumed while that turn
   is still live, THE SYSTEM SHALL write no event and yield again, so a turn slower than tltp's
   one-second resume keeps its connection; WHEN it is resumed after that turn has ended, THE SYSTEM
   SHALL write no event and return.
 - FR-006 (US-004) WHEN the scheduler writes an event for a turn, THE SYSTEM SHALL write it through
   the emit that turn's producer was given and through no other turn's emit.
-- FR-007 (US-003) WHEN `serve.step(server)` is called, THE SYSTEM SHALL step each turn that is still
-  live exactly once, in the order the turns registered, and return how many turns are still live.
+- FR-007 (US-003) WHEN `serve.step(server)` is called, THE SYSTEM SHALL make one pass for every
+  turn that has a row, step each turn that is still live exactly once, in the order the turns
+  registered, and return how many turns are still registered after it, waiting ones included.
 - FR-008 (US-002) WHEN a step of a turn appends a token and `tokenizer:decode` gives text for that
   one id, THE SYSTEM SHALL write, through that turn's own emit, the event `19/FR-004` names for that
   text.
 - FR-009 (US-002) WHEN a step ends its turn, THE SYSTEM SHALL write, in this order, the event
   carrying `finish_reason` that `19/FR-005` names and then the `[DONE]` event, store the
-  conversation as `23/FR-002` says, and drop that turn from the scheduler so its run, model and
-  emit are released and it is never stepped again. The `stop` reason is proven through `19/T-001`,
+  conversation as `23/FR-002` says, and drop that turn from the scheduler so its run, sequence
+  and emit are released and it is never stepped again. The `stop` reason is proven through `19/T-001`,
   which its amendment drives through `serve.step`.
 - FR-010 (US-005) IF a step returns a failure line, or `tltp.json_encode` gives nil for an event's
   data, THEN THE SYSTEM SHALL write no further event for that turn, discard its conversation as
@@ -165,10 +172,11 @@ end
   report a build failure through its `write_err` argument and return 1, and WHEN the build
   succeeds, THE SYSTEM SHALL repeat `serve.round(server)` while it returns nil.
 - FR-015 (US-004) WHEN a turn names a `session_id` whose stored conversation is in flight, THE
-  SYSTEM SHALL build that turn a model of its own, sized as `23/FR-004` sizes a conversation's
-  model, read the whole prompt from position zero, and take `cached_tokens` as 0 when the reply is
-  not streamed; a stored conversation is in flight from the moment a turn is given its model until
-  that turn stores it, discards it, or is refused by FR-013.
+  SYSTEM SHALL give that turn a reserved sequence of its own, sized as `23/FR-004` sizes a
+  conversation's sequence, waiting for a free one when none is free, read the whole prompt from
+  position zero, and take `cached_tokens` as 0 when the reply is not streamed; a stored
+  conversation is in flight from the moment a turn is given its sequence until that turn stores it,
+  discards it, or is refused by FR-013.
 - FR-016 (US-003) WHEN a round that `serve.start` repeats returns a line, THE SYSTEM SHALL write
   that line through `serve.start`'s `write_err` argument with one trailing newline and return 1.
 - FR-017 (US-003) IF a round that `serve.start` repeats raises an error, THEN THE SYSTEM SHALL

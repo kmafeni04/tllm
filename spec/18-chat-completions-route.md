@@ -98,12 +98,12 @@ end
   `serve.stream(server, the raw request body)` gives, the request body being the raw text the
   request carried.
 - FR-003 (US-001) WHEN `answer` is given a body FR-008's checks accept, THE SYSTEM SHALL take the
-  model `build` kept for that server, its tokenizer and its backend, render the prompt from
-  `messages` with `chat.render`, take the generation model as the conversation's stored one where
-  `23/FR-001` reuses it and otherwise build one sized by `23/FR-004`, generate from that prompt and
-  budget, and answer `OK` with a body that decodes to an object whose `choices` is an array holding
-  one object whose `index` is 0 and whose `message` is an object whose `role` is `assistant` and
-  whose `content` is the generated text.
+  server's one model, its tokenizer and its backend, render the prompt from `messages` with
+  `chat.render`, reserve a sequence where `23/FR-001` reuses a stored conversation's and otherwise
+  reserve one sized by `23/FR-004`, generate from that prompt and budget, and answer `OK` with a
+  body that decodes to an object whose `choices` is an array holding one object whose `index` is 0
+  and whose `message` is an object whose `role` is `assistant` and whose `content` is the generated
+  text.
 - FR-004 (US-002) WHEN a successful reply is answered, THE SYSTEM SHALL hold in it a `usage` object
   whose `prompt_tokens` is the number of ids the rendered prompt encodes to, whose
   `completion_tokens` is the number of ids the generation sampled, whose `total_tokens` is their
@@ -128,12 +128,12 @@ end
   `error`, an object whose `type` is `invalid_request_error` and whose `message` names the first
   fault in the order this requirement names them: `body`; `messages` and, for an entry, its position
   counting from one; the member at fault.
-- FR-009 (US-004) WHEN `chat.render` and `tokenizer:encode` have answered, THE SYSTEM SHALL build a
-  model over the file's window, taking the endpoint's `kv_cache` as the cache type of every model
-  it builds, nil meaning `f16`, and, IF the prompt's ids plus the budget minus one are more than the
-  `positions` that model was built with, THEN THE SYSTEM SHALL answer `BadRequest` as FR-008
-  describes it, the message naming `messages`, `max_tokens`, the prompt's id count, the budget and
-  that `positions`. Its tests set `f32` wherever they pin a reply.
+- FR-009 (US-004) WHEN `chat.render` and `tokenizer:encode` have answered, THE SYSTEM SHALL take
+  the server's one model over the file's window, its `positions` being the file's context length,
+  and, IF the prompt's ids plus the budget minus one are more than the `positions` that model was
+  built with, THEN THE SYSTEM SHALL answer `BadRequest` as FR-008 describes it, the message naming
+  `messages`, `max_tokens`, the prompt's id count, the budget and that `positions`. Its tests set
+  `f32` wherever they pin a reply.
 - FR-010 (US-005) WHEN `build` is called, THE SYSTEM SHALL load the file's tokenizer with
   `tokenizer.load` and hold it on the model it keeps, returning nil and that loader's line as its
   second value when it refuses.
@@ -142,10 +142,12 @@ end
   refuses.
   Not testable: `build` calls `compute.load` with no argument, so whether it refuses depends on the
   host's libraries; the field it fills is proven by every case that generates.
-- FR-012 (US-005) IF `tokenizer:encode` for the rendered prompt, `chat.render`, `compute.model` or
-  `generate.text` returns a failure, THEN THE SYSTEM SHALL answer `InternalServerError` with a body
-  decoding to an object whose single member is `error`, an object whose `message` is that line and
-  whose `type` is `internal_error`.
+- FR-012 (US-005) IF `tokenizer:encode` for the rendered prompt, `chat.render`, a reservation
+  `reserve` refuses or `generate.text` returns a failure, THEN THE SYSTEM SHALL answer
+  `InternalServerError` with a body decoding to an object whose single member is `error`, an object
+  whose `message` is that line and whose `type` is `internal_error`. `compute.model` leaves the
+  per-request faults: a model the server cannot build is `build`'s refusal, as `26/T-007` has it,
+  and a reservation `reserve` refuses is the turn's own fault, its line the body's.
 
 ## Non-goals
 
@@ -153,9 +155,9 @@ end
   a streamed reply, their names and their order, are spec 19's.
 - No reply member beyond `choices` and `usage`: no `id`, `object`, `created`, `model` or
   `finish_reason`, and one choice only.
-- No trimming or reloading: a request without a `session_id` builds its own generation model over
-  the positions it needs, and the window model only to read `positions`, so it starts from position
-  zero; `23` keeps a conversation's model between requests, so a cache does outlive a request.
+- No trimming or reloading: a request without a `session_id` reserves its own sequence over the
+  positions it needs, starting from position zero; `23` keeps a conversation's sequence between
+  requests, so a cache does outlive a request.
 
 ## Tests
 

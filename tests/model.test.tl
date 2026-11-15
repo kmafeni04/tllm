@@ -934,3 +934,257 @@ test.it(
     differs(forward(narrow, 1, 1), first)
   end
 )
+
+local function model_sequences(
+  handle: weights.Handle, positions: integer, sequences: integer
+): compute.Model
+  local model, failure = compute.model(
+    backend, handle, positions, "f32", sequences
+  )
+  test.equal(failure, nil)
+  return model as compute.Model
+end
+
+local function contributing_entries(): {Entry}
+  return replaced(
+    t001_entries(),
+    "blk.0.attn_output.weight",
+    f32("blk.0.attn_output.weight", {2, 2}, {1, 0, 0, 1})
+  )
+end
+
+test.it(
+  "a pass gives each row the numbers it gets alone",
+  function()
+    local handle = loaded(t001_meta(), contributing_entries())
+    local model = model_sequences(handle, 4, 2)
+    test.equal(model.sequences, 2)
+    test.equal(model:reserve("a", 4), nil)
+    test.equal(model:reserve("b", 4), nil)
+
+    local reference_a = model_of(handle, 4)
+    local a0 = forward(reference_a, 0, 0)
+    local reference_b = model_of(handle, 4)
+    local b0 = forward(reference_b, 1, 0)
+    test.greater(math.abs(b0[2] - a0[2]), 1e-3)
+
+    local rows, line = model:pass(
+      {
+        {sequence = "a", token = 0, position = 0},
+        {sequence = "b", token = 1, position = 0},
+      }
+    )
+    test.equal(line, nil)
+    local got = rows as {{number}}
+    test.equal(#got, 2)
+    test.equal(#got[1], 3)
+    test.equal(#got[2], 3)
+    close(got[1], a0, 1e-5)
+    close(got[2], b0, 1e-5)
+
+    local a1 = forward(reference_a, 0, 1)
+    local b1 = forward(reference_b, 1, 1)
+    local second, second_line = model:pass(
+      {
+        {sequence = "b", token = 1, position = 1},
+        {sequence = "a", token = 0, position = 1},
+      }
+    )
+    test.equal(second_line, nil)
+    local other_rows = second as {{number}}
+    close(other_rows[1], b1, 1e-5)
+    close(other_rows[2], a1, 1e-5)
+
+    local fresh = model_sequences(handle, 4, 2)
+    test.equal(fresh:reserve("a", 4), nil)
+    test.equal(fresh:reserve("b", 4), nil)
+    local duplicate, duplicate_line = fresh:pass(
+      {
+        {sequence = "a", token = 0, position = 0},
+        {sequence = "a", token = 1, position = 0},
+      }
+    )
+    test.equal(duplicate, nil)
+    test.includes(duplicate_line as string, "pass")
+    test.includes(duplicate_line as string, "a")
+
+    local unknown, unknown_line = fresh:pass(
+      {{sequence = "c", token = 0, position = 0}}
+    )
+    test.equal(unknown, nil)
+    test.includes(unknown_line as string, "pass")
+    test.includes(unknown_line as string, "c")
+
+    local ahead, ahead_line = fresh:pass(
+      {{sequence = "a", token = 0, position = 2}}
+    )
+    test.equal(ahead, nil)
+    test.includes(ahead_line as string, "pass")
+    test.includes(ahead_line as string, "a")
+
+    local kept, kept_line = fresh:pass(
+      {
+        {sequence = "a", token = 0, position = 0},
+        {sequence = "b", token = 1, position = 0},
+      }
+    )
+    test.equal(kept_line, nil)
+    local kept_rows = kept as {{number}}
+    close(kept_rows[1], a0, 1e-5)
+    close(kept_rows[2], b0, 1e-5)
+
+    local empty, empty_line = fresh:pass({})
+    test.equal(empty, nil)
+    test.includes(empty_line as string, "pass")
+
+    local one = model_sequences(handle, 4, 2)
+    close(forward(one, 0, 0), a0, 1e-5)
+    test.equal(one:cache_bytes("", "blk.0."), 64)
+  end
+)
+
+test.it(
+  "a sequence's space is reserved, reported and released",
+  function()
+    local handle = loaded(t001_meta(), contributing_entries())
+    local model = model_sequences(handle, 4, 2)
+    test.equal(model:cache_bytes("a", "blk.0."), nil)
+    test.equal(model:reserve("a", 3), nil)
+    test.equal(model:cache_bytes("a", "blk.0."), 48)
+
+    local again = model:reserve("a", 3) as string
+    test.includes(again, "reserve")
+    test.includes(again, "a")
+
+    local zero = model:reserve("b", 0) as string
+    test.truthy(zero)
+    local wide = model:reserve("b", 5) as string
+    test.truthy(wide)
+
+    test.equal(model:reserve("b", 4), nil)
+    test.equal(model:cache_bytes("b", "blk.0."), 64)
+
+    local full = model:reserve("c", 1) as string
+    test.truthy(full)
+
+    model:release("a")
+    test.equal(model:cache_bytes("a", "blk.0."), nil)
+    model:release("a")
+    model:release("zzz")
+    test.equal(model:cache_bytes("b", "blk.0."), 64)
+
+    test.equal(model:reserve("c", 4), nil)
+    test.equal(model:cache_bytes("c", "blk.0."), 64)
+
+    local released, released_line = model:pass(
+      {{sequence = "a", token = 0, position = 0}}
+    )
+    test.equal(released, nil)
+    test.includes(released_line as string, "pass")
+    test.includes(released_line as string, "a")
+
+    local single = model_of(handle, 4)
+    test.equal(single:reserve("a", 1), nil)
+    local second = single:reserve("b", 1) as string
+    test.truthy(second)
+  end
+)
+
+ffi.cdef(
+  [[
+struct tllm_pass_wall { long seconds; long nanos; };
+int clock_gettime(int clock_id, struct tllm_pass_wall *at);
+]]
+)
+
+local record PassWall
+  seconds: integer
+  nanos: integer
+end
+
+local record PassClocks
+  clock_gettime: function(integer, ffi.CData): integer
+end
+
+local function now(): number
+  local at = ffi.new("struct tllm_pass_wall") as PassWall
+  (ffi.C as PassClocks).clock_gettime(1, at as ffi.CData)
+  return tonumber(at.seconds) + tonumber(at.nanos) / 1e9
+end
+
+test.it(
+  "a pass costs no more than its rows one by one",
+  function()
+    local handle = loaded(t001_meta(), contributing_entries())
+    local rows: {compute.Input} = {
+      {sequence = "a", token = 0, position = 0},
+      {sequence = "b", token = 0, position = 0},
+      {sequence = "c", token = 0, position = 0},
+      {sequence = "d", token = 0, position = 0},
+    }
+
+    local function pair(): number, number
+      local batched = model_sequences(handle, 4, 4)
+      local single = model_sequences(handle, 4, 4)
+      for _, name in ipairs({"a", "b", "c", "d"}) do
+        test.equal(batched:reserve(name, 4), nil)
+        test.equal(single:reserve(name, 4), nil)
+      end
+      collectgarbage("collect")
+      local started = now()
+      local result = batched:pass(rows)
+      local together = now() - started
+      test.truthy(result)
+      local apart: number = 0
+      collectgarbage("collect")
+      for _, row in ipairs(rows) do
+        local before = now()
+        single:pass({row})
+        apart = apart + (now() - before)
+      end
+      return together, apart
+    end
+
+    pair()
+    pair()
+    collectgarbage("collect")
+    local together: number = 0
+    local apart: number = 0
+    for _ = 1, 3 do
+      local one, four = pair()
+      together = together + one
+      apart = apart + four
+    end
+    test.lessEqual(together, apart)
+  end
+)
+
+test.it(
+  "a released name starts from zeros",
+  function()
+    local handle = loaded(t002_meta(), t002_entries())
+    local model = model_sequences(handle, 4, 2)
+
+    test.equal(model:reserve("a", 2), nil)
+    local first, first_line = model:pass(
+      {{sequence = "a", token = 2, position = 0}}
+    )
+    test.equal(first_line, nil)
+    local wanted = (first as {{number}})[1]
+
+    model:release("a")
+    test.equal(model:reserve("a", 2), nil)
+    local again, again_line = model:pass(
+      {{sequence = "a", token = 2, position = 0}}
+    )
+    test.equal(again_line, nil)
+    close((again as {{number}})[1], wanted, 1e-5)
+
+    test.equal(model:reserve("b", 2), nil)
+    local other, other_line = model:pass(
+      {{sequence = "b", token = 2, position = 0}}
+    )
+    test.equal(other_line, nil)
+    close((other as {{number}})[1], wanted, 1e-5)
+  end
+)

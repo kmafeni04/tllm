@@ -250,20 +250,6 @@ local function replaced(meta: {Meta}, entry: Meta): {Meta}
   return result
 end
 
-local function tokenizer_meta(): {Meta}
-  return {
-    mtext("tokenizer.ggml.model", "gpt2"),
-    mtext("tokenizer.ggml.pre", "gpt2"),
-    mstrings("tokenizer.ggml.tokens", {"a"}),
-    mint_array("tokenizer.ggml.token_type", {1}),
-    mstrings("tokenizer.ggml.merges", {}),
-  }
-end
-
-local function one_tensor_gguf(): string
-  return meta_bytes(tokenizer_meta(), {f32("a", {2, 3}, zeros(6))})
-end
-
 local function t001_meta(): {Meta}
   return {
     mtext("general.architecture", "qwen35moe"),
@@ -411,7 +397,7 @@ end
 test.it(
   "a gguf is mapped at build and a bad file is refused",
   function()
-    local file_path = fixture(one_tensor_gguf())
+    local file_path = meta_file(t001_meta(), t001_entries())
     local server = build(file_path, "m")
     test.equal(server.config.port, 9090)
     test.equal(server.config.bind_host, "127.0.0.1")
@@ -420,7 +406,7 @@ test.it(
     test.truthy(model)
     test.equal(model.path, file_path)
     test.equal(model.name, "m")
-    test.truthy(model.handle.tensors["a"])
+    test.truthy(model.handle.tensors["token_embd.weight"])
 
     local unrelated = tltp.Server.new(
       {port = 9091, bind_host = "127.0.0.1", logging = false}
@@ -471,7 +457,7 @@ test.it(
 test.it(
   "unrouted paths answer json 404",
   function()
-    local server = build(fixture(one_tensor_gguf()), "m")
+    local server = build(meta_file(t001_meta(), t001_entries()), "m")
     for _, path in ipairs({"/nope", "/nope/"}) do
       local response = server:mock_request(path)
       test.equal(response.status, "NotFound", path)
@@ -488,9 +474,9 @@ test.it(
 test.it(
   "wrong method answers json 404",
   function()
-    local response = build(fixture(one_tensor_gguf()), "m"):mock_request(
-      "/health", {method = "post"}
-    )
+    local response = build(
+      meta_file(t001_meta(), t001_entries()), "m"
+    ):mock_request("/health", {method = "post"})
     test.equal(response.status, "NotFound")
     test.deepEqual(
       tltp.json_decode(response.body) as ErrorBody,
@@ -502,7 +488,7 @@ test.it(
 test.it(
   "route error answers json 500",
   function()
-    local server = build(fixture(one_tensor_gguf()), "m")
+    local server = build(meta_file(t001_meta(), t001_entries()), "m")
     server:get("/boom", function(): tltp.Response error("boom") end)
     local response = server:mock_request("/boom")
     test.equal(response.status, "InternalServerError")
@@ -776,15 +762,22 @@ test.it(
     )
     test.includes(refused(blank, A_BODY).error.message, "prompt")
 
-    local unmeasured = build(
-      meta_file(
-        without_meta(t001_meta(), "qwen35moe.embedding_length"), t001_entries()
-      ),
-      "m"
+    local unmeasured, unmeasured_line = serve.build(
+      {
+        host = "127.0.0.1",
+        port = 9090,
+        name = "m",
+        path = meta_file(
+          without_meta(t001_meta(), "qwen35moe.embedding_length"),
+          t001_entries()
+        ),
+        sessions = 4,
+        kv_cache = "f32",
+      }
     )
-    local unmeasured_reply = refused(unmeasured, A_BODY)
-    test.includes(unmeasured_reply.error.message, "model")
-    test.includes(unmeasured_reply.error.message, "embedding_length")
+    test.equal(unmeasured, nil)
+    test.includes(unmeasured_line as string, "model")
+    test.includes(unmeasured_line as string, "embedding_length")
   end
 )
 
@@ -837,8 +830,8 @@ local function begun(
       )
     end
   )
-  local ok = coroutine.resume(co)
-  test.equal(ok, true)
+  local ok, reason = coroutine.resume(co)
+  test.equal(ok, true, tostring(reason))
   return {co = co, payloads = payloads}
 end
 
@@ -1006,18 +999,22 @@ test.it(
     test.equal(raw_response.status, "InternalServerError")
     test.equal(raw_error.error.message, encode_line)
 
-    local unmeasured = build(
-      meta_file(
-        without_meta(t001_meta(), "qwen35moe.embedding_length"), t001_entries()
-      ),
-      "m"
+    local unmeasured, unmeasured_line = serve.build(
+      {
+        host = "127.0.0.1",
+        port = 9090,
+        name = "m",
+        path = meta_file(
+          without_meta(t001_meta(), "qwen35moe.embedding_length"),
+          t001_entries()
+        ),
+        sessions = 4,
+        kv_cache = "f32",
+      }
     )
-    local unmeasured_response, unmeasured_error = stream_refused(
-      unmeasured, STREAM_BODY
-    )
-    test.equal(unmeasured_response.status, "InternalServerError")
-    test.includes(unmeasured_error.error.message, "model")
-    test.includes(unmeasured_error.error.message, "embedding_length")
+    test.equal(unmeasured, nil)
+    test.includes(unmeasured_line as string, "model")
+    test.includes(unmeasured_line as string, "embedding_length")
   end
 )
 
@@ -1091,7 +1088,7 @@ test.it(
       }
     )
     test.equal(held(server, "s").length, 2)
-    test.equal(held(server, "s").generation.positions, 4)
+    test.equal(held(server, "s").positions, 4)
 
     local second = answered(server, SECOND_TURN)
     test.equal(second.choices[1].message.content, "aa")
@@ -1115,7 +1112,7 @@ test.it(
         .. '"}],"max_tokens":2,"session_id":"w"}'
     )
     test.equal(wide.usage.completion_tokens, 2)
-    test.equal(held(server, "w").generation.positions, 260)
+    test.equal(held(server, "w").positions, 260)
 
     local seeded = answered(
       server,
@@ -1172,7 +1169,7 @@ test.it(
     )
     test.equal(mismatched.usage.prompt_tokens_details.cached_tokens, 0)
     test.equal(held(server, "x").length, 4)
-    test.equal(held(server, "x").generation.positions, 8)
+    test.equal(held(server, "x").positions, 8)
 
     local fresh = answered(server, named(FIRST_TURN, "u"))
     test.equal(fresh.usage.prompt_tokens_details.cached_tokens, 0)
@@ -1272,9 +1269,19 @@ test.it(
   function()
     local file_path = meta_file(t001_meta(), t001_entries())
 
-    local broken = refused(build(file_path, "m", 4, "q8_0"), A_BODY)
-    test.includes(broken.error.message, "q8_0")
-    test.includes(broken.error.message, "2")
+    local broken, broken_line = serve.build(
+      {
+        host = "127.0.0.1",
+        port = 9090,
+        name = "m",
+        path = file_path,
+        sessions = 4,
+        kv_cache = "q8_0",
+      }
+    )
+    test.equal(broken, nil)
+    test.includes(broken_line as string, "q8_0")
+    test.includes(broken_line as string, "2")
 
     local float = serve.answer(build(file_path, "m", 4, "f32"), A_BODY)
     test.equal(float.status, "OK")
@@ -1314,9 +1321,6 @@ test.it(
     test.deepEqual(order, {"A", "B"})
 
     test.equal(serve.step(server), 2)
-    test.deepEqual(order, {"A", "B"})
-
-    test.equal(serve.step(server), 2)
     test.deepEqual(order, {"A", "B", "A", "B"})
 
     test.equal(serve.step(server), 0)
@@ -1353,7 +1357,6 @@ test.it(
     local _, unreadable_run = serve.stream(unreadable, streaming(FAILING_BODY))
     test.truthy(unreadable_run)
     local unreadable_watcher = begun(unreadable_run as tltp.StreamFn, nil, "A")
-    test.equal(serve.step(unreadable), 1)
     test.equal(serve.step(unreadable), 0)
     test.deepEqual(events_of(unreadable_watcher.payloads), {ROLE_EVENT})
     test.equal(serve.session_of(unreadable, "s"), nil)
@@ -1374,7 +1377,6 @@ test.it(
     local _, broken_run = serve.stream(broken, streaming(FAILING_BODY))
     test.truthy(broken_run)
     local broken_watcher = begun(broken_run as tltp.StreamFn, nil, "B")
-    test.equal(serve.step(broken), 1)
     test.equal(serve.step(broken), 0)
     test.deepEqual(events_of(broken_watcher.payloads), {ROLE_EVENT})
     test.equal(serve.session_of(broken, "s"), nil)
@@ -1428,7 +1430,6 @@ test.it(
 
     test.equal(serve.round(server), nil)
     test.equal(serve.round(server), nil)
-    test.equal(serve.round(server), nil)
     test.equal(#watcher.payloads, 5)
     local events = events_of(watcher.payloads)
     test.deepEqual(events[1], ROLE_EVENT)
@@ -1467,25 +1468,26 @@ test.it(
     local _, first_fn = serve.stream(server, streamed("s1"))
     local first = begun(first_fn as tltp.StreamFn, order, "A")
     test.equal(serve.step(server), 1)
+    test.equal(#first.payloads, 2)
+    test.deepEqual(events_of(first.payloads)[2], token_event("a"))
 
     local _, second_fn = serve.stream(server, streamed("s2"))
     local second = begun(second_fn as tltp.StreamFn, order, "B")
     test.deepEqual(events_of(second.payloads), {ROLE_EVENT})
-
-    test.equal(serve.step(server), 2)
-    test.equal(#first.payloads, 2)
-    test.equal(#second.payloads, 1)
 
     test.equal(serve.step(server), 1)
     test.equal(#first.payloads, 5)
     test.deepEqual(events_of(first.payloads)[4], finish_event("length"))
     test.equal(#second.payloads, 2)
     test.deepEqual(events_of(second.payloads)[2], token_event("a"))
+
+    test.equal(serve.step(server), 0)
+    test.equal(#second.payloads, 5)
   end
 )
 
 test.it(
-  "a second turn on a live session builds its own model",
+  "a second turn on a live session takes its own sequence",
   function()
     local server = build(meta_file(t001_meta(), t001_entries()), "m", 4)
 
@@ -1493,7 +1495,7 @@ test.it(
     test.equal(first.choices[1].message.content, "aa")
     test.equal(first.usage.prompt_tokens_details.cached_tokens, 0)
     test.equal(held(server, "s").length, 2)
-    test.equal(held(server, "s").generation.positions, 4)
+    test.equal(held(server, "s").positions, 4)
 
     local _, live_fn = serve.stream(
       server, (SECOND_TURN:gsub("}$", ',"stream":true}'))
@@ -1505,11 +1507,265 @@ test.it(
     local second = answered(server, SECOND_TURN)
     test.equal(second.choices[1].message.content, "aa")
     test.equal(second.usage.prompt_tokens_details.cached_tokens, 0)
-    test.equal(held(server, "s").generation.positions, 8)
+    test.equal(held(server, "s").positions, 8)
 
     test.equal(serve.step(server), 1)
-    test.equal(#watcher.payloads, 1)
-    test.equal(serve.step(server), 1)
+    test.equal(#watcher.payloads, 2)
     test.deepEqual(events_of(watcher.payloads)[2], token_event("a"))
+    test.equal(serve.step(server), 0)
+    test.equal(#watcher.payloads, 5)
+  end
+)
+
+local function stream_text(watcher: Watcher): string
+  local parts: {string} = {}
+  for _, event in ipairs(events_of(watcher.payloads)) do
+    local delta = event.choices[1].delta
+    if not (delta is nil) and delta.content ~= nil then
+      parts[#parts + 1] = delta.content as string
+    end
+  end
+  return table.concat(parts)
+end
+
+test.it(
+  "two turns advance in one pass and keep their own streams",
+  function()
+    local file_path = meta_file(t001_meta(), t001_entries())
+    local server = build(file_path, "m", 2)
+    local body_a = '{"messages":[{"role":"user","content":"a"}],"max_tokens":2,"stream":true}'
+    local body_b = '{"messages":[{"role":"user","content":"b"}],"max_tokens":2,"stream":true}'
+
+    local order: {string} = {}
+    local _, a_fn = serve.stream(server, body_a)
+    local _, b_fn = serve.stream(server, body_b)
+    test.truthy(a_fn)
+    test.truthy(b_fn)
+    local a = begun(a_fn as tltp.StreamFn, order, "A")
+    local b = begun(b_fn as tltp.StreamFn, order, "B")
+    test.equal(coroutine.status(a.co), "suspended")
+    test.equal(coroutine.status(b.co), "suspended")
+    test.deepEqual(events_of(a.payloads), {ROLE_EVENT})
+    test.deepEqual(events_of(b.payloads), {ROLE_EVENT})
+    test.deepEqual(order, {"A", "B"})
+
+    local check = build(file_path, "check", 2)
+    local wanted_a = answered(check, body_a).choices[1].message.content
+    local wanted_b = answered(check, body_b).choices[1].message.content
+    local first_a = wanted_a:sub(1, 1)
+    local first_b = wanted_b:sub(1, 1)
+
+    test.equal(serve.step(server), 2)
+    test.deepEqual(order, {"A", "B", "A", "B"})
+    test.deepEqual(events_of(a.payloads), {ROLE_EVENT, token_event(first_a)})
+    test.deepEqual(events_of(b.payloads), {ROLE_EVENT, token_event(first_b)})
+
+    test.equal(serve.step(server), 0)
+    test.deepEqual(order, {"A", "B", "A", "B", "A", "A", "A", "B", "B", "B"})
+    test.deepEqual(
+      events_of(a.payloads),
+      {
+        ROLE_EVENT,
+        token_event(first_a),
+        token_event(wanted_a:sub(2, 2)),
+        finish_event("length"),
+      }
+    )
+    test.equal(a.payloads[5], "[DONE]")
+    test.deepEqual(
+      events_of(b.payloads),
+      {
+        ROLE_EVENT,
+        token_event(first_b),
+        token_event(wanted_b:sub(2, 2)),
+        finish_event("length"),
+      }
+    )
+    test.equal(b.payloads[5], "[DONE]")
+    test.equal(stream_text(a), wanted_a)
+    test.equal(stream_text(b), wanted_b)
+  end
+)
+
+test.it(
+  "a turn waits for a sequence and starts when one frees",
+  function()
+    local file_path = meta_file(t001_meta(), t001_entries())
+    local body_a = '{"messages":[{"role":"user","content":"a"}],"max_tokens":2,"stream":true}'
+    local body_b = '{"messages":[{"role":"user","content":"b"}],"max_tokens":2,"stream":true}'
+
+    local server = build(file_path, "m", 1)
+    local model = serve.model_of(server) as serve.Model
+    test.equal(model.generation.sequences, 1)
+
+    local _, a_fn = serve.stream(server, body_a)
+    local a = begun(a_fn as tltp.StreamFn, nil, "A")
+    test.equal(serve.step(server), 1)
+    test.deepEqual(events_of(a.payloads)[2], token_event("a"))
+
+    local _, b_fn = serve.stream(server, body_a)
+    local b = begun(b_fn as tltp.StreamFn, nil, "B")
+    test.deepEqual(events_of(b.payloads), {ROLE_EVENT})
+
+    test.equal(serve.step(server), 1)
+    test.deepEqual(events_of(b.payloads), {ROLE_EVENT})
+    test.equal(#a.payloads, 5)
+
+    test.equal(serve.step(server), 1)
+    test.deepEqual(events_of(b.payloads)[2], token_event("a"))
+    test.equal(serve.step(server), 0)
+    test.equal(#b.payloads, 5)
+
+    local stored = build(file_path, "stored", 1)
+    local _, s_fn = serve.stream(stored, streamed("s"))
+    begun(s_fn as tltp.StreamFn, nil, "S")
+    test.equal(serve.step(stored), 1)
+    test.equal(serve.step(stored), 0)
+    test.truthy(serve.session_of(stored, "s"))
+
+    local _, evict_fn = serve.stream(stored, body_a)
+    test.truthy(evict_fn)
+    test.equal(serve.session_of(stored, "s"), nil)
+    local evict = begun(evict_fn as tltp.StreamFn, nil, "E")
+    test.equal(serve.step(stored), 1)
+    test.deepEqual(events_of(evict.payloads)[2], token_event("a"))
+
+    local third = build(file_path, "third", 2)
+    local _, third_a = serve.stream(third, body_a)
+    local _, third_b_fn = serve.stream(third, body_b)
+    local a_live = begun(third_a as tltp.StreamFn, nil, "A")
+    local b_live = begun(third_b_fn as tltp.StreamFn, nil, "B")
+    test.equal(serve.step(third), 2)
+    test.equal(#a_live.payloads, 2)
+    test.equal(#b_live.payloads, 2)
+
+    local _, third_c = serve.stream(third, body_a)
+    local _, third_d = serve.stream(third, body_b)
+    local c = begun(third_c as tltp.StreamFn, nil, "C")
+    local d = begun(third_d as tltp.StreamFn, nil, "D")
+    test.deepEqual(events_of(c.payloads), {ROLE_EVENT})
+    test.deepEqual(events_of(d.payloads), {ROLE_EVENT})
+
+    test.equal(serve.step(third), 2)
+    test.deepEqual(events_of(c.payloads), {ROLE_EVENT})
+    test.deepEqual(events_of(d.payloads), {ROLE_EVENT})
+    test.equal(#a_live.payloads, 5)
+    test.equal(#b_live.payloads, 5)
+
+    test.equal(serve.step(third), 2)
+    test.deepEqual(events_of(c.payloads)[2], token_event("a"))
+    test.deepEqual(events_of(d.payloads)[2], token_event("c"))
+
+    local full = build(file_path, "full", 1)
+    local _, storing_fn = serve.stream(full, streamed("s"))
+    local storing = begun(storing_fn as tltp.StreamFn, nil, "S")
+    test.equal(serve.step(full), 1)
+
+    local _, waiting_fn = serve.stream(full, body_a)
+    local waiting = begun(waiting_fn as tltp.StreamFn, nil, "W")
+    test.deepEqual(events_of(waiting.payloads), {ROLE_EVENT})
+    test.equal(serve.step(full), 1)
+    test.equal(#storing.payloads, 5)
+    test.truthy(serve.session_of(full, "s"))
+    test.deepEqual(events_of(waiting.payloads), {ROLE_EVENT})
+
+    test.equal(serve.step(full), 1)
+    test.deepEqual(events_of(waiting.payloads)[2], token_event("a"))
+    test.equal(serve.session_of(full, "s"), nil)
+  end
+)
+
+test.it(
+  "a reply that cannot wait is told so, a stored conversation keeps its sequence and a discarded one frees it",
+  function()
+    local file_path = meta_file(t001_meta(), t001_entries())
+    local body_a = '{"messages":[{"role":"user","content":"a"}],"max_tokens":2,"stream":true}'
+    local plain = '{"messages":[{"role":"user","content":"a"}],"max_tokens":2}'
+
+    local live = build(file_path, "live", 1)
+    local _, live_fn = serve.stream(live, body_a)
+    local watcher = begun(live_fn as tltp.StreamFn, nil, "A")
+    local before = #watcher.payloads
+    local reply = serve.answer(live, plain)
+    test.equal(reply.status, "TooManyRequests")
+    local decoded = tltp.json_decode(reply.body) as ErrorBody
+    test.equal(decoded.error.type, "too_many_requests")
+    test.includes(decoded.error.message, "sessions")
+    test.equal(serve.session_of(live, "s"), nil)
+    test.equal(#watcher.payloads, before)
+
+    local one = build(file_path, "one", 4)
+    local first = answered(one, FIRST_TURN)
+    test.equal(first.usage.prompt_tokens_details.cached_tokens, 0)
+    local kept = held(one, "s")
+    test.equal(kept.length, 2)
+    test.equal(kept.positions, 4)
+    test.equal(kept.sequence, "s")
+
+    local second = answered(one, SECOND_TURN)
+    test.equal(second.usage.prompt_tokens_details.cached_tokens, 2)
+    test.equal(held(one, "s").length, 4)
+    test.equal(held(one, "s").sequence, "s")
+
+    local two = build(file_path, "two", 2)
+    answered(two, FIRST_TURN)
+    local _, copy_fn = serve.stream(two, streaming(FIRST_TURN))
+    begun(copy_fn as tltp.StreamFn, nil, "A")
+    test.equal(serve.step(two), 1)
+
+    local fresh = answered(two, FIRST_TURN)
+    test.equal(fresh.usage.prompt_tokens_details.cached_tokens, 0)
+    local other = held(two, "s").sequence
+    test.notEqual(other, "s")
+
+    test.equal(serve.step(two), 0)
+    test.equal(held(two, "s").sequence, "s")
+    local generation = (serve.model_of(two) as serve.Model).generation
+    test.equal(generation:cache_bytes(other, "blk.0."), nil)
+    test.truthy(generation:cache_bytes("s", "blk.0."))
+
+    local bad = build(unreadable_fixture(), "bad", 1)
+    answered(bad, FIRST_TURN)
+    test.equal(held(bad, "s").length, 2)
+    local failing = '{"messages":[{"role":"user","content":"a"},'
+      .. '{"role":"assistant","content":"a"},'
+      .. '{"role":"user","content":"a"}],"max_tokens":2,'
+      .. '"temperature":1,"top_k":2,"seed":1000,"session_id":"s"}'
+    local lost_reply = serve.answer(bad, failing)
+    test.equal(lost_reply.status, "InternalServerError")
+    test.equal(serve.session_of(bad, "s"), nil)
+    local bad_generation = (serve.model_of(bad) as serve.Model).generation
+    test.equal(bad_generation:cache_bytes("s", "blk.0."), nil)
+    test.equal(serve.answer(bad, plain).status, "OK")
+  end
+)
+
+test.it(
+  "a model the server cannot build is a start failure",
+  function()
+    local file_path = meta_file(t001_meta(), t001_entries())
+    local endpoint: serve.Endpoint = {
+      host = "127.0.0.1",
+      port = 9090,
+      name = "m",
+      path = file_path,
+      sessions = 4,
+      kv_cache = "q8_0",
+    }
+    local server, line = serve.build(endpoint)
+    test.equal(server, nil)
+    test.includes(line as string, "q8_0")
+    test.includes(line as string, "2")
+
+    local written: {string} = {}
+    local code = serve.start(
+      endpoint, function(one: string) written[#written + 1] = one end
+    )
+    test.equal(code, 1)
+    test.equal(#written, 1)
+    test.includes(written[1], "q8_0")
+    test.includes(written[1], "2")
+    test.equal(written[1]:sub(-1), "\n")
+    test.equal(written[1]:find("\n"), #written[1])
   end
 )

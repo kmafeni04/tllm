@@ -53,11 +53,11 @@ local weights = require("tllm.weights")
 local record compute
   record FeedForward
     block: function(
-      FeedForward, {number}, string
-    ): {number} | nil, string | nil
+      FeedForward, {Row}, string
+    ): {{number}} | nil, string | nil
     scores: function(
-      FeedForward, {number}
-    ): {number} | nil, string | nil
+      FeedForward, {{number}}
+    ): {{number}} | nil, string | nil
   end
 
   feed_forward: function(
@@ -83,11 +83,12 @@ end
   `backend` that `compute.load` returned and a `geometry` whose `experts_used` is one or more
   and whose `eps` is zero or more, THE SYSTEM SHALL return a feed-forward handle and nil. Its
   tests give the geometry `cache_type` `f32`, so their numbers stand.
-- FR-002 (US-001) WHEN that handle's `block(hidden, prefix)` is called with `hidden` holding
-  one number per position of `<prefix>post_attention_norm.weight`, THE SYSTEM SHALL return
-  one number per position of `hidden`, being the sum of `hidden`, the weighted expert output
-  FR-003 to FR-006 describe and the gated shared output FR-007 describes, and nil as its
-  second value.
+- FR-002 (US-001) WHEN that handle's `block(rows, prefix)` is called with a batch of
+  `compute.Row`s, each row's `hidden` holding one number per position of
+  `<prefix>post_attention_norm.weight`, THE SYSTEM SHALL return one contribution row per input
+  row in order, each holding one number per position of that row's `hidden`, being the sum of
+  that row's `hidden`, the weighted expert output FR-003 to FR-006 describe and the gated shared
+  output FR-007 describes, and nil as its second value.
 - FR-003 (US-001) WHEN a block call begins, THE SYSTEM SHALL normalise `hidden` with
   `<prefix>post_attention_norm.weight` by `11/FR-004`'s norm and the geometry's `eps`, and
   read `<prefix>ffn_gate_inp.weight` as one group of hidden-length numbers per row.
@@ -114,17 +115,19 @@ end
   `sigmoid_gate` returns for the one-number list holding the sum over the hidden positions of
   `<prefix>ffn_gate_inp_shexp.weight`'s number times the normalised hidden's number and the
   one-number list holding 1.
-- FR-008 (US-002) WHEN `scores(hidden)` is called with `hidden` holding one number per
-  position of `output_norm.weight`, THE SYSTEM SHALL return one number per row of
-  `output.weight`, being `11/FR-002`'s matrix product of `output.weight` with `hidden`
-  normalised by `output_norm.weight` by `11/FR-004`'s norm and the geometry's `eps`.
+- FR-008 (US-002) WHEN `scores(hidden)` is called with a batch of hidden rows, each holding one
+  number per position of `output_norm.weight`, THE SYSTEM SHALL return one score row per input
+  row in order, each holding one number per row of `output.weight`, being `11/FR-002`'s matrix
+  product of `output.weight` with that hidden row normalised by `output_norm.weight` by
+  `11/FR-004`'s norm and the geometry's `eps`.
 - FR-009 (US-003) WHEN `compute.top_token(attention, feed_forward, hidden, prefixes, position)`
-  is called with a non-empty `prefixes`, THE SYSTEM SHALL return the index, counting from
-  zero, of the largest number `feed_forward:scores` returns for `running`, where `running`
-  starts as `hidden` and, for each prefix in list order, becomes the numbers of that prefix's
-  `feed_forward:block` applied to the result of adding that prefix's
-  `attention:block(running, prefix, position)` numbers to `running` position by position, and
-  nil as its second value.
+  is called with a non-empty `prefixes`, THE SYSTEM SHALL call `attention:block` and
+  `feed_forward:block` with a list holding one `compute.Row` whose sequence is `""` and whose
+  position is the argument, and `feed_forward:scores` with a list holding one hidden, and SHALL
+  return the index, counting from zero, of the largest number `feed_forward:scores` returns for
+  `running`, where `running` starts as `hidden` and, for each prefix in list order, becomes the
+  numbers of that prefix's `feed_forward:block` applied to the result of adding that prefix's
+  `attention:block` numbers to `running` position by position, and nil as its second value.
 - FR-010 (US-003) WHEN two or more of the scores are equal and largest, THE SYSTEM SHALL
   return the lowest of their indices.
 - FR-011 (US-004) IF `compute.feed_forward` is given a backend that `compute.load` did not
@@ -141,7 +144,7 @@ end
   `ffn_gate_exps.weight`, `ffn_down_exps.weight`, `ffn_up_shexp.weight`,
   `ffn_gate_shexp.weight`, `ffn_down_shexp.weight`, `ffn_gate_inp_shexp.weight` for `block`,
   and `output_norm.weight` then `output.weight` for `scores`.
-- FR-013 (US-004) IF a tensor's shape does not fit `hidden` or the other tensors, that is if
+- FR-013 (US-004) IF a tensor's shape does not fit a row of `hidden` or the other tensors, that is if
   `post_attention_norm.weight` is not one-dimensional or does not hold one number per
   position of `hidden`; `ffn_gate_inp.weight` is not two-dimensional, its first dimension is
   not the number of `hidden`'s positions, or it holds no rows; `ffn_gate_inp_shexp.weight` is
@@ -162,11 +165,12 @@ end
   does not hold the numbers `hidden` holds; or `output.weight` is not two-dimensional, its
   first dimension is not the number of `hidden`'s positions, or it holds no rows, THEN THE
   SYSTEM SHALL return nil and one line naming the operation, the tensor and the numbers at
-  fault.
+  fault. The shape checks are made against each row of the batch's hidden.
 - FR-014 (US-004) IF `compute.top_token` is given an empty `prefixes`, or a call it makes on
   `attention:block`, `feed_forward:block` or `feed_forward:scores` returns nil, THEN THE
   SYSTEM SHALL return nil and one line naming `top_token` for the empty list and the refusing
-  call's line otherwise.
+  call's line otherwise; a refused call `top_token` makes is refused through that one-row batch,
+  its line unchanged.
 - FR-015 (US-004) IF more than one refusal applies to a `block` or `scores` call, THEN THE
   SYSTEM SHALL report a missing tensor before a tensor of a type the operation does not read,
   a type fault before a shape that does not fit, and of two faults in FR-013's list the earlier

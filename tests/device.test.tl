@@ -4,6 +4,19 @@ local test = require("lde-test")
 local compute = require("tllm.compute")
 local weights = require("tllm.weights")
 
+local function first_row(hidden: {number}, position: integer): {compute.Row}
+  return {{sequence = "", hidden = hidden, position = position}}
+end
+
+local function only(
+  output: {{number}} | nil, line: string | nil
+): {number} | nil, string | nil
+  if output is nil then
+    return nil, line
+  end
+  return (output as {{number}})[1], line
+end
+
 local ROOT = os.tmpname()
 os.remove(ROOT)
 fs.mkdirAll(ROOT)
@@ -505,9 +518,9 @@ on_device(
     local cpu_attention = attended(cpu, handle)
     agreeing(
       "attention block",
-      attention:block(probe, "blk.1.", 0),
+      only(attention:block(first_row(probe, 0), "blk.1.")),
       nil,
-      cpu_attention:block(probe, "blk.1.", 0),
+      only(cpu_attention:block(first_row(probe, 0), "blk.1.")),
       nil
     )
 
@@ -515,16 +528,16 @@ on_device(
     local cpu_feed = forwarded(cpu, handle)
     agreeing(
       "feed forward block",
-      feed:block(probe, "blk.0."),
+      only(feed:block(first_row(probe, 0), "blk.0.")),
       nil,
-      cpu_feed:block(probe, "blk.0."),
+      only(cpu_feed:block(first_row(probe, 0), "blk.0.")),
       nil
     )
     agreeing(
       "feed forward scores",
-      feed:scores(probe),
+      only(feed:scores({probe})),
       nil,
-      cpu_feed:scores(probe),
+      only(cpu_feed:scores({probe})),
       nil
     )
 
@@ -532,9 +545,9 @@ on_device(
     local cpu_linear = pressed(cpu, handle)
     agreeing(
       "linear attention block",
-      linear:block(probe, "blk.0.", 0),
+      only(linear:block(first_row(probe, 0), "blk.0.")),
       nil,
-      cpu_linear:block(probe, "blk.0.", 0),
+      only(cpu_linear:block(first_row(probe, 0), "blk.0.")),
       nil
     )
 

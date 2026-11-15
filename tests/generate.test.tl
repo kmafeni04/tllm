@@ -623,15 +623,33 @@ end
 
 local function spied(model: compute.Model): Seen
   local seen: Seen = {ids = {}, positions = {}}
-  local forward = model.forward
-  model.forward = function(
-    self: compute.Model, token: integer, position: integer
-  ): {number} | nil, string | nil
-    seen.ids[#seen.ids + 1] = token
-    seen.positions[#seen.positions + 1] = position
-    return forward(self, token, position)
+  local pass = model.pass
+  model.pass = function(
+    self: compute.Model, inputs: {compute.Input}
+  ): {{number}} | nil, string | nil
+    for _, input in ipairs(inputs) do
+      seen.ids[#seen.ids + 1] = input.token
+      seen.positions[#seen.positions + 1] = input.position
+    end
+    return pass(self, inputs)
   end
   return seen
+end
+
+local function advance(
+  model: compute.Model, run: generate.Run
+): string | nil, string | nil
+  local input = run.next(run)
+  if input is nil then
+    return nil, nil
+  end
+  local rows, line = model:pass({input})
+  if rows is nil then
+    run.fail(run, line as string)
+    return nil, line
+  end
+  local planes = rows as {{number}}
+  return run.accept(run, planes[1])
 end
 
 local function opened(
@@ -643,6 +661,10 @@ local function opened(
   local run, line = generate.open(model, tokens, prompt, options)
   test.equal(line, nil)
   test.truthy(run)
+  local reserved = model:reserve("", model.positions)
+  if not (reserved is nil) then
+    test.equal(reserved:find("is already held", 1, true), nil)
+  end
   return run as generate.Run
 end
 
@@ -655,56 +677,51 @@ test.it(
     local wide = fresh(handle, 4)
     local wide_seen = spied(wide)
     local run = opened(wide, tokens, "a", {max_tokens = 2, seed = 0})
-    local piece, line = run.step(run)
-    test.equal(piece, nil)
+    local piece, line = advance(wide, run)
+    test.equal(piece, "a")
     test.equal(line, nil)
     test.deepEqual(wide_seen.ids, {0})
     test.deepEqual(wide_seen.positions, {0})
 
-    piece, line = run.step(run)
-    test.equal(piece, "a")
-    test.equal(line, nil)
-    piece, line = run.step(run)
+    piece, line = advance(wide, run)
     test.equal(piece, "a")
     test.equal(line, nil)
     test.deepEqual(run.produced, {0, 0})
     test.equal(run.done, true)
+    test.deepEqual(wide_seen.ids, {0, 0})
     test.deepEqual(wide_seen.positions, {0, 1})
 
     local narrow = fresh(handle, 2)
     local narrow_seen = spied(narrow)
     local pair = opened(narrow, tokens, "aa", {max_tokens = 1, seed = 0})
-    piece, line = pair.step(pair)
+    piece, line = advance(narrow, pair)
     test.equal(piece, nil)
     test.equal(line, nil)
-    piece, line = pair.step(pair)
-    test.equal(piece, nil)
+    piece, line = advance(narrow, pair)
+    test.equal(piece, "a")
     test.equal(line, nil)
     test.deepEqual(narrow_seen.ids, {0, 0})
     test.deepEqual(narrow_seen.positions, {0, 1})
-    piece, line = pair.step(pair)
-    test.equal(piece, "a")
-    test.equal(line, nil)
     test.equal(pair.done, true)
     test.deepEqual(pair.produced, {0})
 
     local cramped = fresh(handle, 2)
     local cramped_seen = spied(cramped)
     local over = opened(cramped, tokens, "a", {max_tokens = 3, seed = 0})
-    piece, line = over.step(over)
-    test.equal(piece, nil)
-    test.equal(line, nil)
-    piece, line = over.step(over)
+    piece, line = advance(cramped, over)
     test.equal(piece, "a")
     test.equal(line, nil)
-    piece, line = over.step(over)
+    piece, line = advance(cramped, over)
+    test.equal(piece, "a")
+    test.equal(line, nil)
+    piece, line = advance(cramped, over)
     test.equal(piece, nil)
     test.includes(line as string, "blk.0.")
     test.includes(line as string, "2")
     test.equal(line, over.failure)
     test.equal(over.done, true)
     test.deepEqual(cramped_seen.positions, {0, 1, 2})
-    piece, line = over.step(over)
+    piece, line = advance(cramped, over)
     test.equal(piece, nil)
     test.equal(line, nil)
     test.equal(#cramped_seen.positions, 3)

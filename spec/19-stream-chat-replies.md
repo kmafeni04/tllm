@@ -83,9 +83,10 @@ non-goals that nothing is streamed. The record `serve` builds from the body is u
   status and the body `serve.answer` gives for that body, as `application/json`.
 - FR-007 (US-004) IF the body is one `18/FR-008` refuses, or the prompt's ids plus the budget minus
   one are past the positions the file allows as `18/FR-009` says, or `chat.render`,
-  `tokenizer:encode`, building the window model or building the generation model fails, THEN THE
-  SYSTEM SHALL answer that status and body as `application/json`, write no event, and answer nil as
-  the producer.
+  `tokenizer:encode` or a reservation `reserve` refuses fails, THEN THE SYSTEM SHALL answer that
+  status and body as `application/json`, write no event, and answer nil as the producer. No model
+  is built per request: that build is `serve.build`'s one model, and a reservation `reserve`
+  refuses is that turn's fault.
 - FR-009 (US-002) IF a turn's step returns a failure line, or `tltp.json_encode` gives nil for an
   event's data, THEN THE SYSTEM SHALL have `serve.step` end that turn without writing the
   `finish_reason` event or the `[DONE]` event; a streamed turn carrying a `session_id` whose step

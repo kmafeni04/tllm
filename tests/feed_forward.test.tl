@@ -4,6 +4,29 @@ local test = require("lde-test")
 local compute = require("tllm.compute")
 local weights = require("tllm.weights")
 
+local function first_row(hidden: {number}, position: integer): {compute.Row}
+  return {{sequence = "", hidden = hidden, position = position}}
+end
+
+local function first(
+  output: {{number}} | nil, line: string | nil
+): {number} | nil, string | nil
+  if output is nil then
+    return nil, line
+  end
+  return (output as {{number}})[1], line
+end
+
+local function score_one(
+  feed_forward: compute.FeedForward, hidden: {number}
+): {number} | nil, string | nil
+  local rows, line = feed_forward.scores(feed_forward, {hidden})
+  if rows is nil then
+    return nil, line
+  end
+  return (rows as {{number}})[1], line
+end
+
 local ROOT = os.tmpname()
 os.remove(ROOT)
 fs.mkdirAll(ROOT)
@@ -501,13 +524,22 @@ test.it(
   function()
     local feed_forward = forwarded(loaded(toy_entries()), geometry())
     local block = feed_forward.block
-    close(block(feed_forward, {1, 1}, "blk.0."), {5.3214286, 9.6428571})
-    close(block(feed_forward, {2, 2}, "blk.0."), {6.3214286, 10.6428571})
+    close(
+      first(block(feed_forward, first_row({1, 1}, 0), "blk.0.")),
+      {5.3214286, 9.6428571}
+    )
+    close(
+      first(block(feed_forward, first_row({2, 2}, 0), "blk.0.")),
+      {6.3214286, 10.6428571}
+    )
 
     local strict_shape = geometry()
     strict_shape.eps = 1
     local strict = forwarded(loaded(toy_entries()), strict_shape)
-    close(strict.block(strict, {1, 1}, "blk.0."), {3.1178393, 5.2356787})
+    close(
+      first(strict.block(strict, first_row({1, 1}, 0), "blk.0.")),
+      {3.1178393, 5.2356787}
+    )
   end
 )
 
@@ -520,7 +552,10 @@ test.it(
       f32("blk.0.ffn_gate_inp.weight", {2, 4}, zeros(8))
     )
     local feed_forward = forwarded(loaded(entries), geometry())
-    close(feed_forward.block(feed_forward, {1, 1}, "blk.0."), {3.25, 5.5})
+    close(
+      first(feed_forward.block(feed_forward, first_row({1, 1}, 0), "blk.0.")),
+      {3.25, 5.5}
+    )
   end
 )
 
@@ -528,15 +563,12 @@ test.it(
   "the final norm gives one score per token",
   function()
     local feed_forward = forwarded(loaded(toy_entries()), geometry())
-    close(
-      feed_forward.scores(feed_forward, {3, 4}),
-      {0.8485281, 1.1313708, 1.9798990}
-    )
+    close(score_one(feed_forward, {3, 4}), {0.8485281, 1.1313708, 1.9798990})
 
     local strict_shape = geometry()
     strict_shape.eps = 1
     local strict = forwarded(loaded(toy_entries()), strict_shape)
-    close(strict.scores(strict, {3, 4}), {0.8164966, 1.0886621, 1.9051587})
+    close(score_one(strict, {3, 4}), {0.8164966, 1.0886621, 1.9051587})
   end
 )
 
@@ -634,14 +666,18 @@ test.it(
     local feed_forward = forwarded(handle, shape)
     local block = feed_forward.block
 
-    local other_prefix_line = refused(block(feed_forward, {1, 1}, "blk.9."))
+    local other_prefix_line = refused(
+      first(block(feed_forward, first_row({1, 1}, 0), "blk.9."))
+    )
     test.includes(other_prefix_line, "blk.9.post_attention_norm.weight")
 
     local missing_router = forwarded(
       loaded(without(toy_entries(), "blk.0.ffn_gate_inp.weight")), shape
     )
     local missing_router_line = refused(
-      missing_router.block(missing_router, {1, 1}, "blk.0.")
+      first(
+        missing_router.block(missing_router, first_row({1, 1}, 0), "blk.0.")
+      )
     )
     test.includes(missing_router_line, "ffn_gate_inp.weight")
 
@@ -661,7 +697,7 @@ test.it(
       shape
     )
     local half_router_line = refused(
-      half_router.block(half_router, {1, 1}, "blk.0.")
+      first(half_router.block(half_router, first_row({1, 1}, 0), "blk.0."))
     )
     test.includes(half_router_line, "ffn_gate_inp")
     test.includes(half_router_line, "f16")
@@ -681,7 +717,9 @@ test.it(
       ),
       shape
     )
-    local half_up_line = refused(half_up.block(half_up, {1, 1}, "blk.0."))
+    local half_up_line = refused(
+      first(half_up.block(half_up, first_row({1, 1}, 0), "blk.0."))
+    )
     test.includes(half_up_line, "ffn_up_exps")
     test.includes(half_up_line, "f16")
 
@@ -700,12 +738,14 @@ test.it(
       ),
       shape
     )
-    local half_output_line = refused(half_output.scores(half_output, {1, 1}))
+    local half_output_line = refused(score_one(half_output, {1, 1}))
     test.includes(half_output_line, "output")
     test.includes(half_output_line, "f16")
 
     for _, hidden in ipairs({ones(1), ones(3)}) do
-      local short_line = refused(block(feed_forward, hidden, "blk.0."))
+      local short_line = refused(
+        first(block(feed_forward, first_row(hidden, 0), "blk.0."))
+      )
       test.includes(short_line, "post_attention_norm.weight")
     end
 
@@ -720,7 +760,7 @@ test.it(
       shape
     )
     local narrow_router_line = refused(
-      narrow_router.block(narrow_router, {1, 1}, "blk.0.")
+      first(narrow_router.block(narrow_router, first_row({1, 1}, 0), "blk.0."))
     )
     test.includes(narrow_router_line, "ffn_gate_inp.weight")
 
@@ -734,7 +774,9 @@ test.it(
       ),
       shape
     )
-    local flat_down_line = refused(flat_down.block(flat_down, {1, 1}, "blk.0."))
+    local flat_down_line = refused(
+      first(flat_down.block(flat_down, first_row({1, 1}, 0), "blk.0."))
+    )
     test.includes(flat_down_line, "ffn_down_exps.weight")
 
     local narrow_shared = forwarded(
@@ -748,7 +790,7 @@ test.it(
       shape
     )
     local narrow_shared_line = refused(
-      narrow_shared.block(narrow_shared, {1, 1}, "blk.0.")
+      first(narrow_shared.block(narrow_shared, first_row({1, 1}, 0), "blk.0."))
     )
     test.includes(narrow_shared_line, "ffn_down_shexp.weight")
 
@@ -763,7 +805,7 @@ test.it(
       shape
     )
     local short_gate_line = refused(
-      short_gate.block(short_gate, {1, 1}, "blk.0.")
+      first(short_gate.block(short_gate, first_row({1, 1}, 0), "blk.0."))
     )
     test.includes(short_gate_line, "ffn_gate_exps.weight")
 
@@ -791,18 +833,20 @@ test.it(
     local few_shape = geometry()
     few_shape.experts_used = 3
     local few = forwarded(loaded(few_experts), few_shape)
-    local few_line = refused(few.block(few, {1, 1}, "blk.0."))
+    local few_line = refused(
+      first(few.block(few, first_row({1, 1}, 0), "blk.0."))
+    )
     test.includes(few_line, "ffn_gate_inp.weight")
 
     for _, hidden in ipairs({ones(1), ones(3)}) do
-      local score_line = refused(feed_forward.scores(feed_forward, hidden))
+      local score_line = refused(score_one(feed_forward, hidden))
       test.includes(score_line, "output_norm.weight")
     end
 
     local no_output = forwarded(
       loaded(without(toy_entries(), "output.weight")), shape
     )
-    local no_output_line = refused(no_output.scores(no_output, {1, 1}))
+    local no_output_line = refused(score_one(no_output, {1, 1}))
     test.includes(no_output_line, "output.weight")
 
     local flat_output = forwarded(
@@ -813,7 +857,7 @@ test.it(
       ),
       shape
     )
-    local flat_output_line = refused(flat_output.scores(flat_output, {1, 1}))
+    local flat_output_line = refused(score_one(flat_output, {1, 1}))
     test.includes(flat_output_line, "output.weight")
 
     local absent_down = without(toy_entries(), "blk.0.ffn_down_exps.weight")
@@ -828,7 +872,9 @@ test.it(
       }
     )
     local absent = forwarded(loaded(absent_down), shape)
-    local absent_line = refused(absent.block(absent, {1, 1}, "blk.0."))
+    local absent_line = refused(
+      first(absent.block(absent, first_row({1, 1}, 0), "blk.0."))
+    )
     test.includes(absent_line, "ffn_down_exps.weight")
 
     local mistyped = replaced(
@@ -848,7 +894,7 @@ test.it(
     )
     local mistyped_feed = forwarded(loaded(mistyped), shape)
     local mistyped_line = refused(
-      mistyped_feed.block(mistyped_feed, {1, 1}, "blk.0.")
+      first(mistyped_feed.block(mistyped_feed, first_row({1, 1}, 0), "blk.0."))
     )
     test.includes(mistyped_line, "ffn_gate_inp")
     test.includes(mistyped_line, "f16")
@@ -863,7 +909,9 @@ test.it(
       ),
       shape
     )
-    local flat_only_line = refused(flat_only.block(flat_only, {1, 1}, "blk.0."))
+    local flat_only_line = refused(
+      first(flat_only.block(flat_only, first_row({1, 1}, 0), "blk.0."))
+    )
     test.includes(flat_only_line, "ffn_down_exps.weight")
 
     local shape_stack = stacked_geometry()

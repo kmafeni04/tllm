@@ -96,8 +96,9 @@ local record compute
 
   record LinearAttention
     block: function(
-      LinearAttention, {number}, string, integer
-    ): {number} | nil, string | nil
+      LinearAttention, {Row}, string
+    ): {{number}} | nil, string | nil
+    release: function(LinearAttention, string)
   end
 
   linear_attention: function(
@@ -122,10 +123,11 @@ end
   linear-attention handle, which reads the tensors of that weights handle by name at
   call time, and nil as its second value. Its tests give the geometry `cache_type`
   `f32`, so their numbers stand.
-- FR-002 (US-001) WHEN that handle's `block(hidden, prefix, position)` is called with
-  `hidden` holding one number per position of `<prefix>attn_norm.weight`, THE SYSTEM
-  SHALL return one number per position of `hidden`, being the numbers FR-003 to FR-008
-  describe, and nil as its second value.
+- FR-002 (US-001) WHEN that handle's `block(rows, prefix)` is called with a batch of
+  `compute.Row`s, each row's `hidden` holding one number per position of
+  `<prefix>attn_norm.weight`, THE SYSTEM SHALL return one contribution row per input row in
+  order, each holding one number per position of that row's `hidden`, being the numbers FR-003 to
+  FR-008 describe for that row, and nil as its second value.
 - FR-003 (US-001) WHEN a block call begins, THE SYSTEM SHALL normalise `hidden` with
   `<prefix>attn_norm.weight` by `11/FR-004`'s norm and the geometry's `eps`, take the
   projected numbers as one number per row of `<prefix>attn_qkv.weight` in row order, the
@@ -185,14 +187,15 @@ end
   Not testable: the fixtures' heads hold two numbers each, and over so few numbers any
   accumulation order returns the same numbers to within the tests' tolerance, so what
   proves this is a reader finding the ggml calls the block makes.
-- FR-010 (US-002) WHEN a block call is accepted, THE SYSTEM SHALL keep under `prefix`
-  the projected numbers in channel `c` at the positions
-  `position - linear_conv_kernel + 2` to `position` as that prefix's convolution
-  history, and the state numbers FR-007 gives as that prefix's state, one history and
-  one state for each prefix, each held as single precision numbers, so that a call at
-  the next position reads them and no other prefix's numbers. A prefix's history and
-  state start as zeros, and a refused block call stores nothing: every refusal of
-  FR-012 to FR-015 happens before those numbers are written.
+- FR-010 (US-002) WHEN a block call is accepted, THE SYSTEM SHALL keep under a sequence and
+  `prefix` the projected numbers in channel `c` at the positions
+  `position - linear_conv_kernel + 2` to `position` as that sequence and prefix's convolution
+  history, and the state numbers FR-007 gives as that sequence and prefix's state, one history
+  and one state for each sequence and prefix, each held as single precision numbers, so that a
+  call at the next position reads them and no other sequence's numbers. A sequence and prefix's
+  history and state start as zeros, and a refused block call stores nothing: every refusal of
+  FR-012 to FR-015 happens before those numbers are written. The history and state are kept under
+  a sequence and a prefix, and are freed with that sequence as `26/FR-005` says.
 - FR-011 (US-003) IF `compute.linear_attention` is given a backend that `compute.load`
   did not return, or a `geometry` missing any of the five numbers FR-001 names or
   holding `linear_key_heads`, `linear_key_length`, `linear_value_heads`,
@@ -211,7 +214,7 @@ end
   the first whose type is at fault together with that type's name: `attn_norm.weight`,
   `attn_qkv.weight`, `attn_gate.weight`, `ssm_beta.weight`, `ssm_alpha.weight`,
   `ssm_conv1d.weight`, `ssm_a`, `ssm_dt.bias`, `ssm_norm.weight`, `ssm_out.weight`.
-- FR-013 (US-003) IF a tensor's shape does not fit `hidden` or the other tensors, that is
+- FR-013 (US-003) IF a tensor's shape does not fit a row of `hidden` or the other tensors, that is
   if `attn_norm.weight` is not one-dimensional or does not hold one number per position
   of `hidden`; `attn_qkv.weight` is not two-dimensional, does not hold one number per
   position of `hidden` per row, or does not hold
@@ -228,10 +231,12 @@ end
   hold `linear_value_length` numbers; or `ssm_out.weight` is not two-dimensional, does
   not hold `linear_value_heads * linear_value_length` numbers per row, or does not hold
   one row per position of `hidden`, THEN THE SYSTEM SHALL return nil and one line naming
-  `block`, the tensor and the numbers at fault.
-- FR-014 (US-003) IF `position` is negative, or is not the number of positions that
-  prefix has already taken, a prefix that has taken no position taking zero next, THEN
-  THE SYSTEM SHALL return nil and one line naming `block`, the prefix and the position.
+  `block`, the tensor and the numbers at fault. The shape checks are made against each row of the
+  batch's hidden.
+- FR-014 (US-003) IF a row's `position` is negative, or is not the number of positions that
+  row's sequence and prefix have already taken, a sequence and prefix that have taken no position
+  taking zero next, THEN THE SYSTEM SHALL return nil and one line naming `block` and that row's
+  sequence and position.
 - FR-015 (US-003) IF the memory a prefix's history or state or a block call's graph
   needs cannot be allocated THEN THE SYSTEM SHALL return nil and one line naming
   `block`.

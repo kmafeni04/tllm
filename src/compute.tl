@@ -232,27 +232,45 @@ local record compute
     cache_type: CacheType
   end
 
+  record Row
+    sequence: string
+    hidden: {number}
+    position: integer
+  end
+
+  record Input
+    sequence: string
+    token: integer
+    position: integer
+  end
+
   record Attention
-    block: function(
-      Attention, {number}, string, integer
-    ): {number} | nil, string | nil
-    cache_bytes: function(Attention, string): integer | nil
+    block: function(Attention, {Row}, string): {{number}} | nil, string | nil
+    cache_bytes: function(Attention, string, string): integer | nil
+    reserve: function(Attention, string, integer, {string}): string | nil
+    release: function(Attention, string)
   end
 
   record FeedForward
-    block: function(FeedForward, {number}, string): {number} | nil, string | nil
-    scores: function(FeedForward, {number}): {number} | nil, string | nil
+    block: function(FeedForward, {Row}, string): {{number}} | nil, string | nil
+    scores: function(FeedForward, {{number}}): {{number}} | nil, string | nil
   end
 
   record LinearAttention
     block: function(
-      LinearAttention, {number}, string, integer
-    ): {number} | nil, string | nil
+      LinearAttention, {Row}, string
+    ): {{number}} | nil, string | nil
+    release: function(LinearAttention, string)
   end
 
   record Model
     positions: integer
+    sequences: integer
     forward: function(Model, integer, integer): {number} | nil, string | nil
+    reserve: function(Model, string, integer): string | nil
+    release: function(Model, string)
+    cache_bytes: function(Model, string, string): integer | nil
+    pass: function(Model, {Input}): {{number}} | nil, string | nil
   end
 
   load: function(path?: string, offload?: boolean): Backend | nil, string | nil
@@ -267,7 +285,7 @@ local record compute
     Backend, weights.Handle, Geometry
   ): LinearAttention | nil, string | nil
   model: function(
-    Backend, weights.Handle, integer | nil, CacheType | nil
+    Backend, weights.Handle, integer | nil, CacheType | nil, sequences?: integer
   ): Model | nil, string | nil
   top_token: function(
     Attention, FeedForward, {number}, {string}, integer
@@ -335,7 +353,8 @@ end
 local record AttentionState
   mapped: Mapped
   geometry: compute.Geometry
-  caches: {string: Cache}
+  caches: {string: {string: Cache}}
+  capacities: {string: integer}
   scratch: ffi.CData
 end
 
@@ -362,7 +381,7 @@ local record LinearState
   mapped: Mapped
   shape: LinearShape
   eps: number
-  prefixes: {string: LinearKept}
+  prefixes: {string: {string: LinearKept}}
 end
 
 local record ModelPlan
@@ -376,6 +395,11 @@ local record ModelPlan
   feed_forward: compute.FeedForward
 end
 
+local record SequenceState
+  capacity: integer
+  taken: integer
+end
+
 local record ModelState
   mapped: Mapped
   kinds: {boolean}
@@ -384,7 +408,11 @@ local record ModelState
   attention: compute.Attention | nil
   linear: compute.LinearAttention | nil
   feed_forward: compute.FeedForward
-  taken: integer
+  sequences: {string: SequenceState}
+  limit: integer
+  positions: integer
+  full_prefixes: {string}
+  linear_prefixes: {string}
 end
 
 local record BlockTensors
@@ -1183,6 +1211,99 @@ local function matrix_vector(
   )
 end
 
+-- several vectors written as the columns of one f32 tensor, so a weight
+-- matrix is read once for the whole batch
+local function matrix_of(
+  graph: Graph, rows: {{number}}, columns: integer
+): ffi.CData
+  local tensor = tensor_in(
+    graph.lib, graph.ctx, {columns, #rows}, GGML_TYPE_F32
+  )
+  local count = columns * #rows
+  local device = graph.device
+  if device is nil then
+    local cells = ffi.cast("float*", graph.lib.ggml_get_data(tensor)) as Floats
+    local at: integer = 0
+    for _, row in ipairs(rows) do
+      for position = 1, columns do
+        cells[at] = row[position]
+        at = at + 1
+      end
+    end
+  else
+    graph.pending[#graph.pending + 1] = function()
+      local cells = ffi.new("float[?]", count) as Floats
+      local at: integer = 0
+      for _, row in ipairs(rows) do
+        for position = 1, columns do
+          cells[at] = row[position]
+          at = at + 1
+        end
+      end
+      graph.lib.ggml_backend_tensor_set(
+        tensor, cells as ffi.CData, 0, count * F32_BYTES
+      )
+    end
+  end
+  return tensor
+end
+
+local function matrix_rows(
+  mapped: Mapped, name: string, rows: {{number}}
+): {{number}} | nil, string | nil
+  local tensor, refusal = looked_up(mapped, "matvec", name, WEIGHTS)
+  if not (tensor is Tensor) then
+    return nil, refusal
+  end
+  local dims = tensor.dims
+  if #dims ~= 2 then
+    return nil, "matvec: tensor " .. name .. " holds " .. #dims .. " dimensions"
+  end
+  local columns = dims[1]
+  local outputs = dims[2]
+  for _, row in ipairs(rows) do
+    if #row ~= columns then
+      return nil,
+        "matvec: vector holds "
+          .. #row
+          .. " numbers, tensor "
+          .. name
+          .. " holds "
+          .. columns
+    end
+  end
+
+  local lib = mapped.lib
+  local batch = #rows
+  local count = outputs * batch
+  local data_bytes = (count + columns * batch) * F32_BYTES
+  local planes, failure = gathered(
+    mapped,
+    "matvec",
+    4,
+    data_bytes,
+    function(graph: Graph): {Output}
+      local product = lib.ggml_mul_mat(
+        graph.ctx, mapped.descriptors[name], matrix_of(graph, rows, columns)
+      )
+      return {{tensor = product, count = count}}
+    end
+  )
+  if planes is nil then
+    return nil, failure
+  end
+  local flat = planes[1]
+  local result: {{number}} = {}
+  for index = 0, batch - 1 do
+    local row: {number} = {}
+    for position = 1, outputs do
+      row[position] = flat[index * outputs + position]
+    end
+    result[index + 1] = row
+  end
+  return result, nil
+end
+
 local function row(
   mapped: Mapped, name: string, id: integer
 ): {number} | nil, string | nil
@@ -1616,13 +1737,24 @@ local function read_tensors(
 end
 
 local function position_refusal(
-  prefix: string, position: integer, expected: integer, capacity: integer
+  sequence: string,
+  prefix: string,
+  position: integer,
+  expected: integer,
+  capacity: integer
 ): string | nil
   if position < 0 then
-    return "block: prefix " .. prefix .. " position " .. position
+    return "block: sequence "
+      .. sequence
+      .. " prefix "
+      .. prefix
+      .. " position "
+      .. position
   end
   if position >= capacity then
-    return "block: prefix "
+    return "block: sequence "
+      .. sequence
+      .. " prefix "
       .. prefix
       .. " position "
       .. position
@@ -1630,7 +1762,9 @@ local function position_refusal(
       .. capacity
   end
   if position ~= expected then
-    return "block: prefix "
+    return "block: sequence "
+      .. sequence
+      .. " prefix "
       .. prefix
       .. " position "
       .. position
@@ -1640,10 +1774,26 @@ local function position_refusal(
   return nil
 end
 
+local function caches_in(
+  state: AttentionState, sequence: string
+): {string: Cache}
+  local held = state.caches[sequence]
+  if held is nil then
+    held = {}
+    state.caches[sequence] = held
+  end
+  return held
+end
+
+local function cache_capacity(state: AttentionState, sequence: string): integer
+  return state.capacities[sequence] or state.geometry.positions
+end
+
 local function cache_of(
-  state: AttentionState, prefix: string
+  state: AttentionState, sequence: string, prefix: string
 ): Cache | nil, string | nil
-  local stored = state.caches[prefix]
+  local held = caches_in(state, sequence)
+  local stored = held[prefix]
   if not (stored is nil) then
     return stored
   end
@@ -1652,7 +1802,7 @@ local function cache_of(
   local lib = state.mapped.lib
   local kind = cache_kind_of(geometry.cache_type) as CacheKind
   local width = geometry.head_length
-  local rows = geometry.positions * geometry.kv_heads
+  local rows = cache_capacity(state, sequence) * geometry.kv_heads
   local size = rows * cache_row_size(kind, width)
   local keys_block = libc.aligned_alloc(
     ARENA_ALIGN, round_up(size, ARENA_ALIGN)
@@ -1661,6 +1811,12 @@ local function cache_of(
     ARENA_ALIGN, round_up(size, ARENA_ALIGN)
   )
   if keys_block is nil or values_block is nil then
+    if not (keys_block is nil) then
+      libc.free(keys_block)
+    end
+    if not (values_block is nil) then
+      libc.free(values_block)
+    end
     return nil, "block: no cache of " .. (size * 2) .. " bytes"
   end
   local keys = finalised(keys_block)
@@ -1669,6 +1825,8 @@ local function cache_of(
   local arena_size = arena_for(lib, 4, 0)
   local arena_block = libc.aligned_alloc(ARENA_ALIGN, arena_size)
   if arena_block is nil then
+    libc.free(keys_block)
+    libc.free(values_block)
     return nil, "block: no cache of " .. (size * 2) .. " bytes"
   end
   local arena = finalised(arena_block)
@@ -1692,26 +1850,50 @@ local function cache_of(
     bytes = size * 2,
     count = 0,
   } as Cache
-  state.caches[prefix] = cache
+  held[prefix] = cache
   return cache
 end
 
--- one cached row, quantised into the buffer the cache holds
-local function cache_row_write(
+local function cache_forget(state: AttentionState, cache: Cache)
+  local lib = state.mapped.lib
+  lib.ggml_free(cache.ctx)
+  local keys = ffi.gc(cache.keys, nil)
+  local values = ffi.gc(cache.values, nil)
+  local arena = ffi.gc(cache.arena, nil)
+  libc.free(keys)
+  libc.free(values)
+  libc.free(arena)
+end
+
+local function attention_release(state: AttentionState, sequence: string)
+  local held = state.caches[sequence]
+  if held is nil then
+    state.capacities[sequence] = nil
+    return
+  end
+  for prefix, cache in pairs(held) do
+    cache_forget(state, cache)
+    held[prefix] = nil
+  end
+  state.caches[sequence] = nil
+  state.capacities[sequence] = nil
+end
+
+local function attention_reserve(
   state: AttentionState,
-  kind: CacheKind,
-  destination: ffi.CData,
-  slot: integer,
-  fields: {number}
-)
-  local width = state.geometry.head_length
-  write_floats(state.scratch as Floats, fields)
-  local base = ffi.cast("intptr_t", destination) as integer
-  local at = ffi.cast("void *", base + slot * cache_row_size(kind, width))
-    as ffi.CData
-  state.mapped.lib.ggml_quantize_chunk(
-    kind.code, state.scratch, at, 0, 1, width, nil
-  )
+  sequence: string,
+  positions: integer,
+  prefixes: {string}
+): string | nil
+  state.capacities[sequence] = positions
+  for _, prefix in ipairs(prefixes) do
+    local made, failure = cache_of(state, sequence, prefix)
+    if made is nil then
+      attention_release(state, sequence)
+      return failure
+    end
+  end
+  return nil
 end
 
 -- every query head's weights over the positions zero to `position` and the
@@ -1810,73 +1992,43 @@ local function attended_heads(
   return planes, nil
 end
 
-local function attention_block(
-  state: AttentionState, hidden: {number}, prefix: string, position: integer
+-- one cached row, quantised into the buffer the cache holds
+local function cache_row_write(
+  state: AttentionState,
+  kind: CacheKind,
+  destination: ffi.CData,
+  slot: integer,
+  fields: {number}
+)
+  local width = state.geometry.head_length
+  write_floats(state.scratch as Floats, fields)
+  local base = ffi.cast("intptr_t", destination) as integer
+  local at = ffi.cast("void *", base + slot * cache_row_size(kind, width))
+    as ffi.CData
+  state.mapped.lib.ggml_quantize_chunk(
+    kind.code, state.scratch, at, 0, 1, width, nil
+  )
+end
+
+local function attention_heads_row(
+  state: AttentionState,
+  entry: compute.Row,
+  prefix: string,
+  queries: {number},
+  read_keys: {number},
+  read_values: {number}
 ): {number} | nil, string | nil
   local geometry = state.geometry
   local mapped = state.mapped
-  local tensors, refusal = read_tensors(mapped, prefix, #hidden, geometry)
-  if not (tensors is BlockTensors) then
-    return nil, refusal
-  end
   local kind = cache_kind_of(geometry.cache_type) as CacheKind
-  if geometry.head_length % kind.block_elements ~= 0 then
-    return nil,
-      "block: cache "
-        .. geometry.cache_type
-        .. " cannot hold a head of "
-        .. geometry.head_length
-        .. " numbers"
-  end
-
-  local cache = state.caches[prefix]
-  local expected = 0
-  if not (cache is nil) then
-    expected = cache.count
-  end
-  local bad_position = position_refusal(
-    prefix, position, expected, geometry.positions
-  )
-  if bad_position then
-    return nil, bad_position
-  end
-  if cache is nil then
-    local made, failure = cache_of(state, prefix)
-    if not (made is Cache) then
-      return nil, failure
-    end
-    cache = made
-  end
-
+  local position = entry.position
+  local sequence = entry.sequence
+  local held = state.caches[sequence]
+  local cache = held[prefix]
   local heads = geometry.heads
   local kv_heads = geometry.kv_heads
   local width = geometry.head_length
   local eps = geometry.eps
-
-  local normalised, norm_failure = normalise(
-    mapped, hidden, prefix .. "attn_norm.weight", eps
-  )
-  if normalised is nil then
-    return nil, block_failure(norm_failure as string)
-  end
-  local queries, query_failure = matrix_vector(
-    mapped, prefix .. "attn_q.weight", normalised
-  )
-  if queries is nil then
-    return nil, block_failure(query_failure as string)
-  end
-  local read_keys, key_failure = matrix_vector(
-    mapped, prefix .. "attn_k.weight", normalised
-  )
-  if read_keys is nil then
-    return nil, block_failure(key_failure as string)
-  end
-  local read_values, value_failure = matrix_vector(
-    mapped, prefix .. "attn_v.weight", normalised
-  )
-  if read_values is nil then
-    return nil, block_failure(value_failure as string)
-  end
 
   local query_norm_name = prefix .. "attn_q_norm.weight"
   local key_norm_name = prefix .. "attn_k_norm.weight"
@@ -1954,16 +2106,125 @@ local function attention_block(
       combined[#combined + 1] = gated[offset]
     end
   end
+  return combined, nil
+end
 
-  local result, output_failure = matrix_vector(
-    mapped, prefix .. "attn_output.weight", combined
-  )
-  if result is nil then
-    return nil, block_failure(output_failure as string)
+local function attention_block(
+  state: AttentionState, rows: {compute.Row}, prefix: string
+): {{number}} | nil, string | nil
+  local geometry = state.geometry
+  local mapped = state.mapped
+  local kind = cache_kind_of(geometry.cache_type) as CacheKind
+  local checked: {integer: boolean} = {}
+
+  for _, entry in ipairs(rows) do
+    if not checked[#entry.hidden] then
+      local tensors, refusal = read_tensors(
+        mapped, prefix, #entry.hidden, geometry
+      )
+      if not (tensors is BlockTensors) then
+        return nil, refusal
+      end
+      checked[#entry.hidden] = true
+      if geometry.head_length % kind.block_elements ~= 0 then
+        return nil,
+          "block: cache "
+            .. geometry.cache_type
+            .. " cannot hold a head of "
+            .. geometry.head_length
+            .. " numbers"
+      end
+    end
+    local cache: Cache | nil = nil
+    local held = state.caches[entry.sequence]
+    if not (held is nil) then
+      cache = held[prefix]
+    end
+    local expected = 0
+    if not (cache is nil) then
+      expected = cache.count
+    end
+    local bad_position = position_refusal(
+      entry.sequence,
+      prefix,
+      entry.position,
+      expected,
+      cache_capacity(state, entry.sequence)
+    )
+    if bad_position then
+      return nil, bad_position
+    end
   end
 
-  cache.count = position + 1
-  return result
+  for _, entry in ipairs(rows) do
+    local held = state.caches[entry.sequence]
+    local cache: Cache | nil = nil
+    if not (held is nil) then
+      cache = held[prefix]
+    end
+    if cache is nil then
+      local made, failure = cache_of(state, entry.sequence, prefix)
+      if not (made is Cache) then
+        return nil, failure
+      end
+    end
+  end
+
+  local eps = geometry.eps
+  local normalised: {{number}} = {}
+  for index, entry in ipairs(rows) do
+    local numbers, norm_line = normalise(
+      mapped, entry.hidden, prefix .. "attn_norm.weight", eps
+    )
+    if numbers is nil then
+      return nil, block_failure(norm_line as string)
+    end
+    normalised[index] = numbers
+  end
+
+  local queries, query_line = matrix_rows(
+    mapped, prefix .. "attn_q.weight", normalised
+  )
+  if queries is nil then
+    return nil, block_failure(query_line as string)
+  end
+  local read_keys, key_line = matrix_rows(
+    mapped, prefix .. "attn_k.weight", normalised
+  )
+  if read_keys is nil then
+    return nil, block_failure(key_line as string)
+  end
+  local read_values, value_line = matrix_rows(
+    mapped, prefix .. "attn_v.weight", normalised
+  )
+  if read_values is nil then
+    return nil, block_failure(value_line as string)
+  end
+
+  local combined: {{number}} = {}
+  for index, entry in ipairs(rows) do
+    local numbers, line = attention_heads_row(
+      state, entry, prefix, queries[index], read_keys[index], read_values[index]
+    )
+    if numbers is nil then
+      return nil, line
+    end
+    combined[index] = numbers
+  end
+
+  local outputs, output_line = matrix_rows(
+    mapped, prefix .. "attn_output.weight", combined
+  )
+  if outputs is nil then
+    return nil, block_failure(output_line as string)
+  end
+
+  for _, entry in ipairs(rows) do
+    local held = state.caches[entry.sequence] as {string: Cache}
+    local cache = held[prefix]
+    cache.count = entry.position + 1
+  end
+  return outputs, nil
 end
 
 local function first_fault(
@@ -2221,20 +2482,22 @@ local function shared_output(
   return down
 end
 
-local function feed_forward_block(
-  state: FeedForwardState, hidden: {number}, prefix: string
+local function feed_forward_row(
+  state: FeedForwardState, hidden: {number}, prefix: string, checked?: boolean
 ): {number} | nil, string | nil
   local mapped = state.mapped
-  local fault = first_fault(mapped, "block", prefix, BLOCK_NAMES, BLOCK_TYPES)
-  if fault then
-    return nil, fault
-  end
   local count = #hidden
-  fault = block_shape_refusal(
-    mapped, prefix, count, state.geometry.experts_used
-  )
-  if fault then
-    return nil, fault
+  if not checked then
+    local fault = first_fault(mapped, "block", prefix, BLOCK_NAMES, BLOCK_TYPES)
+    if fault then
+      return nil, fault
+    end
+    fault = block_shape_refusal(
+      mapped, prefix, count, state.geometry.experts_used
+    )
+    if fault then
+      return nil, fault
+    end
   end
 
   local normalised, norm_line = normalise(
@@ -2294,20 +2557,22 @@ local function feed_forward_block(
   return result
 end
 
-local function feed_forward_scores(
-  state: FeedForwardState, hidden: {number}
+local function feed_forward_row_scores(
+  state: FeedForwardState, hidden: {number}, checked?: boolean
 ): {number} | nil, string | nil
   local mapped = state.mapped
-  local fault = first_fault(mapped, "scores", "", SCORE_NAMES, SCORE_TYPES)
-  if fault then
-    return nil, fault
+  local count = #hidden
+  if not checked then
+    local fault = first_fault(mapped, "scores", "", SCORE_NAMES, SCORE_TYPES)
+    if fault then
+      return nil, fault
+    end
   end
 
   local norm_name = "output_norm.weight"
   local output_name = "output.weight"
   local norm = mapped.tensors[norm_name] as Tensor
   local output = mapped.tensors[output_name] as Tensor
-  local count = #hidden
   local function expected(
     name: string, got: integer, wanted: integer, unit: string
   ): string | nil
@@ -2317,18 +2582,22 @@ local function feed_forward_scores(
     return nil
   end
 
-  local refusal = expected(norm_name, #norm.dims, 1, "dimensions")
-    or expected(norm_name, (norm.dims[1] or 0) as integer, count, "numbers")
-  if refusal then
-    return nil, refusal
-  end
-  refusal = expected(output_name, #output.dims, 2, "dimensions")
-    or expected(output_name, (output.dims[1] or 0) as integer, count, "numbers")
-  if refusal then
-    return nil, refusal
-  end
-  if (output.dims[2] or 0) < 1 then
-    return nil, "scores: tensor " .. output_name .. " holds no rows"
+  if not checked then
+    local refusal = expected(norm_name, #norm.dims, 1, "dimensions")
+      or expected(norm_name, (norm.dims[1] or 0) as integer, count, "numbers")
+    if refusal then
+      return nil, refusal
+    end
+    refusal = expected(output_name, #output.dims, 2, "dimensions")
+      or expected(
+        output_name, (output.dims[1] or 0) as integer, count, "numbers"
+      )
+    if refusal then
+      return nil, refusal
+    end
+    if (output.dims[2] or 0) < 1 then
+      return nil, "scores: tensor " .. output_name .. " holds no rows"
+    end
   end
 
   local normalised, norm_line = normalise(
@@ -2342,6 +2611,40 @@ local function feed_forward_scores(
     return nil, named_failure("scores", values_line as string)
   end
   return values
+end
+
+local function feed_forward_block(
+  state: FeedForwardState, rows: {compute.Row}, prefix: string
+): {{number}} | nil, string | nil
+  local outputs: {{number}} = {}
+  local checked: {integer: boolean} = {}
+  for index, entry in ipairs(rows) do
+    local known = checked[#entry.hidden] == true
+    local numbers, line = feed_forward_row(state, entry.hidden, prefix, known)
+    checked[#entry.hidden] = true
+    if numbers is nil then
+      return nil, line
+    end
+    outputs[index] = numbers
+  end
+  return outputs, nil
+end
+
+local function feed_forward_scores(
+  state: FeedForwardState, hidden: {{number}}
+): {{number}} | nil, string | nil
+  local outputs: {{number}} = {}
+  local checked: {integer: boolean} = {}
+  for index, entry in ipairs(hidden) do
+    local known = checked[#entry] == true
+    local numbers, line = feed_forward_row_scores(state, entry, known)
+    checked[#entry] = true
+    if numbers is nil then
+      return nil, line
+    end
+    outputs[index] = numbers
+  end
+  return outputs, nil
 end
 
 local function linear_shape_of(
@@ -2519,8 +2822,19 @@ local function linear_shape_refusal(
   return nil
 end
 
+local function prefixes_in(
+  state: LinearState, sequence: string
+): {string: LinearKept}
+  local held = state.prefixes[sequence]
+  if held is nil then
+    held = {}
+    state.prefixes[sequence] = held
+  end
+  return held
+end
+
 local function linear_prefix_of(
-  state: LinearState, prefix: string
+  state: LinearState, sequence: string, prefix: string
 ): LinearKept | nil, string | nil
   local shape = state.shape
   local head_rows = shape.key_heads * shape.key_length
@@ -2547,12 +2861,29 @@ local function linear_prefix_of(
     state = buffer as ffi.CData,
     count = 0,
   } as LinearKept
-  state.prefixes[prefix] = kept
+  prefixes_in(state, sequence)[prefix] = kept
   return kept
 end
 
+local function linear_release(state: LinearState, sequence: string)
+  local held = state.prefixes[sequence]
+  if held is nil then
+    return
+  end
+  for prefix, kept in pairs(held) do
+    kept.history = nil as ffi.CData
+    kept.state = nil as ffi.CData
+    held[prefix] = nil
+  end
+  state.prefixes[sequence] = nil
+end
+
 local function linear_press(
-  state: LinearState, hidden: {number}, prefix: string, position: integer
+  state: LinearState,
+  sequence: string,
+  hidden: {number},
+  prefix: string,
+  position: integer
 ): {number} | nil, string | nil
   local mapped = state.mapped
   local shape = state.shape
@@ -2565,7 +2896,11 @@ local function linear_press(
     return nil, fault
   end
 
-  local kept = state.prefixes[prefix]
+  local held = state.prefixes[sequence]
+  local kept: LinearKept | nil = nil
+  if not (held is nil) then
+    kept = held[prefix]
+  end
   local expected = 0
   if not (kept is nil) then
     expected = kept.count
@@ -2583,12 +2918,13 @@ local function linear_press(
         .. expected
   end
   if kept is nil then
-    local made, failure = linear_prefix_of(state, prefix)
+    local made, failure = linear_prefix_of(state, sequence, prefix)
     if not (made is LinearKept) then
       return nil, failure
     end
     kept = made
   end
+  local active = kept as LinearKept
 
   local lib = mapped.lib
   local descriptors = mapped.descriptors
@@ -2658,7 +2994,7 @@ local function linear_press(
       session.graph,
       {kernel - 1, rows, 1},
       GGML_TYPE_F32,
-      kept.history,
+      active.history,
       (kernel - 1) * rows * F32_BYTES
     )
     window = lib.ggml_concat(ctx, past, current, 0)
@@ -2722,7 +3058,7 @@ local function linear_press(
     session.graph,
     {key_length, value_length, value_heads},
     GGML_TYPE_F32,
-    kept.state,
+    active.state,
     state_floats * F32_BYTES
   )
   local decayed = lib.ggml_mul(
@@ -2771,11 +3107,11 @@ local function linear_press(
   if failure is nil then
     numbers = read_floats(lib, output, count, device)
 
-    read_bytes(lib, updated, kept.state, state_floats * F32_BYTES, device)
+    read_bytes(lib, updated, active.state, state_floats * F32_BYTES, device)
     if kernel > 1 then
       -- the past tensor reads a channel's taps consecutively, oldest first
       local slots = kernel - 1
-      local history = ffi.cast("float*", kept.history) as Floats
+      local history = ffi.cast("float*", active.history) as Floats
       local fresh_bytes = ffi.new("float[?]", rows) as ffi.CData
       read_bytes(lib, projected, fresh_bytes, rows * F32_BYTES, device)
       local fresh = fresh_bytes as Floats
@@ -2786,7 +3122,7 @@ local function linear_press(
         history[channel * slots + slots - 1] = fresh[channel]
       end
     end
-    kept.count = position + 1
+    active.count = position + 1
   end
   closed(session)
 
@@ -2794,6 +3130,22 @@ local function linear_press(
     return nil, failure
   end
   return numbers
+end
+
+local function linear_block(
+  state: LinearState, rows: {compute.Row}, prefix: string
+): {{number}} | nil, string | nil
+  local outputs: {{number}} = {}
+  for index, entry in ipairs(rows) do
+    local numbers, line = linear_press(
+      state, entry.sequence, entry.hidden, prefix, entry.position
+    )
+    if numbers is nil then
+      return nil, line
+    end
+    outputs[index] = numbers
+  end
+  return outputs, nil
 end
 
 function compute.load(
@@ -2926,22 +3278,38 @@ function compute.attend(
     mapped = mapped,
     geometry = geometry,
     caches = {},
+    capacities = {},
     scratch = ffi.new("float[?]", geometry.head_length) as ffi.CData,
   }
   local attention = {} as compute.Attention
   attention.block = function(
-    _: compute.Attention, hidden: {number}, prefix: string, position: integer
-  ): {number} | nil, string | nil
-    return attention_block(state, hidden, prefix, position)
+    _: compute.Attention, rows: {compute.Row}, prefix: string
+  ): {{number}} | nil, string | nil
+    return attention_block(state, rows, prefix)
   end
   attention.cache_bytes = function(
-    _: compute.Attention, prefix: string
+    _: compute.Attention, sequence: string, prefix: string
   ): integer | nil
-    local cache = state.caches[prefix]
+    local held = state.caches[sequence]
+    if held is nil then
+      return nil
+    end
+    local cache = held[prefix]
     if cache is nil then
       return nil
     end
     return cache.bytes
+  end
+  attention.reserve = function(
+    _: compute.Attention,
+    sequence: string,
+    positions: integer,
+    prefixes: {string}
+  ): string | nil
+    return attention_reserve(state, sequence, positions, prefixes)
+  end
+  attention.release = function(_: compute.Attention, sequence: string)
+    attention_release(state, sequence)
   end
   return attention
 end
@@ -2971,13 +3339,13 @@ function compute.feed_forward(
   }
   local feed_forward = {} as compute.FeedForward
   feed_forward.block = function(
-    _: compute.FeedForward, hidden: {number}, prefix: string
-  ): {number} | nil, string | nil
-    return feed_forward_block(state, hidden, prefix)
+    _: compute.FeedForward, rows: {compute.Row}, prefix: string
+  ): {{number}} | nil, string | nil
+    return feed_forward_block(state, rows, prefix)
   end
   feed_forward.scores = function(
-    _: compute.FeedForward, hidden: {number}
-  ): {number} | nil, string | nil
+    _: compute.FeedForward, hidden: {{number}}
+  ): {{number}} | nil, string | nil
     return feed_forward_scores(state, hidden)
   end
   return feed_forward
@@ -3010,12 +3378,12 @@ function compute.linear_attention(
   }
   local linear = {} as compute.LinearAttention
   linear.block = function(
-    _: compute.LinearAttention,
-    hidden: {number},
-    prefix: string,
-    position: integer
-  ): {number} | nil, string | nil
-    return linear_press(state, hidden, prefix, position)
+    _: compute.LinearAttention, rows: {compute.Row}, prefix: string
+  ): {{number}} | nil, string | nil
+    return linear_block(state, rows, prefix)
+  end
+  linear.release = function(_: compute.LinearAttention, sequence: string)
+    linear_release(state, sequence)
   end
   return linear
 end
@@ -3488,19 +3856,182 @@ local function embedding_row(
   return values
 end
 
+local function sequence_count(state: ModelState): integer
+  local count = 0
+  for _ in pairs(state.sequences) do
+    count = count + 1
+  end
+  return count
+end
+
+local function sequence_reserve(
+  state: ModelState, sequence: string, positions: integer
+): string | nil
+  if state.sequences[sequence] ~= nil then
+    return "reserve: sequence " .. sequence .. " is already held"
+  end
+  if sequence_count(state) >= state.limit then
+    return "reserve: sequence "
+      .. sequence
+      .. ", "
+      .. state.limit
+      .. " sequences are held"
+  end
+  if positions < 1 or positions > state.positions then
+    return "reserve: positions " .. positions .. " for " .. sequence
+  end
+  local attention = state.attention
+  if not (attention is nil) and #state.full_prefixes > 0 then
+    local line = attention:reserve(sequence, positions, state.full_prefixes)
+    if not (line is nil) then
+      return named_failure("reserve", line)
+    end
+  end
+  state.sequences[sequence] = {capacity = positions, taken = 0}
+  return nil
+end
+
+local function sequence_release(state: ModelState, sequence: string)
+  if state.sequences[sequence] == nil then
+    return
+  end
+  local attention = state.attention
+  if not (attention is nil) then
+    attention:release(sequence)
+  end
+  local linear = state.linear
+  if not (linear is nil) then
+    linear:release(sequence)
+  end
+  state.sequences[sequence] = nil
+end
+
+local function model_pass(
+  state: ModelState, inputs: {compute.Input}
+): {{number}} | nil, string | nil
+  if #inputs == 0 then
+    return nil, "pass: no rows"
+  end
+
+  local seen: {string: boolean} = {}
+  for _, input in ipairs(inputs) do
+    local held = state.sequences[input.sequence]
+    if held is nil then
+      return nil, "pass: sequence " .. input.sequence .. " is not reserved"
+    end
+    if seen[input.sequence] then
+      return nil, "pass: sequence " .. input.sequence .. " appears twice"
+    end
+    seen[input.sequence] = true
+    if input.position < 0 or input.position ~= held.taken then
+      return nil,
+        "pass: sequence "
+          .. input.sequence
+          .. " position "
+          .. input.position
+          .. ", the next is "
+          .. held.taken
+    end
+  end
+
+  local rows: {compute.Row} = {}
+  for index, input in ipairs(inputs) do
+    local hidden, embed_line = embedding_row(
+      state.mapped, state.width, input.token
+    )
+    if hidden is nil then
+      return nil, embed_line
+    end
+    rows[index] = {
+      sequence = input.sequence,
+      hidden = hidden,
+      position = input.position,
+    }
+  end
+
+  for index = 0, state.count - 1 do
+    local prefix = "blk." .. index .. "."
+    local contributions: {{number}} | nil
+    local line: string | nil
+    if state.kinds[index + 1] then
+      local attention = state.attention as compute.Attention
+      contributions, line = attention:block(rows, prefix)
+    else
+      local linear = state.linear as compute.LinearAttention
+      contributions, line = linear:block(rows, prefix)
+    end
+    if contributions is nil then
+      return nil, line
+    end
+
+    local mixed: {compute.Row} = {}
+    for row_index, entry in ipairs(rows) do
+      mixed[row_index] = {
+        sequence = entry.sequence,
+        hidden = summed(entry.hidden, contributions[row_index]),
+        position = entry.position,
+      }
+    end
+    local blocked, block_line = state.feed_forward:block(mixed, prefix)
+    if blocked is nil then
+      return nil, block_line
+    end
+    local carried: {compute.Row} = {}
+    for row_index, entry in ipairs(mixed) do
+      carried[row_index] = {
+        sequence = entry.sequence,
+        hidden = blocked[row_index],
+        position = entry.position,
+      }
+    end
+    rows = carried
+  end
+
+  local hidden_rows: {{number}} = {}
+  for index, entry in ipairs(rows) do
+    hidden_rows[index] = entry.hidden
+  end
+  local scores, score_line = state.feed_forward:scores(hidden_rows)
+  if scores is nil then
+    return nil, score_line
+  end
+
+  for _, input in ipairs(inputs) do
+    local held = state.sequences[input.sequence] as SequenceState
+    held.taken = held.taken + 1
+  end
+  return scores, nil
+end
+
 function compute.model(
   backend: compute.Backend,
   handle: weights.Handle,
   positions: integer | nil,
-  cache_type: compute.CacheType | nil
+  cache_type: compute.CacheType | nil,
+  sequences?: integer
 ): compute.Model | nil, string | nil
   local loaded = LOADED[backend]
   if loaded is nil then
     return nil, "model: backend was not loaded by compute.load"
   end
+  local limit = sequences or 1
+  if limit < 1 then
+    return nil, "model: sequences is " .. limit
+  end
   local plan, plan_line = model_plan(backend, handle, positions, cache_type)
   if plan is nil then
     return nil, plan_line
+  end
+
+  local full_prefixes: {string} = {}
+  local linear_prefixes: {string} = {}
+  for index = 0, plan.count - 1 do
+    local prefix = "blk." .. index .. "."
+    if plan.kinds[index + 1] then
+      full_prefixes[#full_prefixes + 1] = prefix
+    else
+      linear_prefixes[#linear_prefixes + 1] = prefix
+    end
   end
 
   local state: ModelState = {
@@ -3511,55 +4042,62 @@ function compute.model(
     attention = plan.attention,
     linear = plan.linear,
     feed_forward = plan.feed_forward,
-    taken = 0,
+    sequences = {},
+    limit = limit,
+    positions = plan.positions,
+    full_prefixes = full_prefixes,
+    linear_prefixes = linear_prefixes,
   }
 
   local model = {} as compute.Model
   model.positions = plan.positions
+  model.sequences = limit
   model.forward = function(
     _: compute.Model, token_id: integer, position: integer
   ): {number} | nil, string | nil
-    if position < 0 or position ~= state.taken then
-      return nil,
-        "forward: position " .. position .. ", the next is " .. state.taken
-    end
-
-    local hidden, embed_line = embedding_row(
-      state.mapped, state.width, token_id
-    )
-    if hidden is nil then
-      return nil, embed_line
-    end
-
-    for index = 0, state.count - 1 do
-      local prefix = "blk." .. index .. "."
-      local contribution: {number} | nil
-      local line: string | nil
-      if state.kinds[index + 1] then
-        local attention = state.attention as compute.Attention
-        contribution, line = attention:block(hidden, prefix, position)
-      else
-        local linear = state.linear as compute.LinearAttention
-        contribution, line = linear:block(hidden, prefix, position)
-      end
-      if contribution is nil then
+    if state.sequences[""] == nil then
+      local line = sequence_reserve(state, "", state.positions)
+      if not (line is nil) then
         return nil, line
       end
-      local blocked, block_line = state.feed_forward:block(
-        summed(hidden, contribution), prefix
-      )
-      if blocked is nil then
-        return nil, block_line
-      end
-      hidden = blocked
     end
-
-    local scores, score_line = state.feed_forward:scores(hidden)
+    local held = state.sequences[""] as SequenceState
+    if position < 0 or position ~= held.taken then
+      return nil,
+        "forward: position " .. position .. ", the next is " .. held.taken
+    end
+    local scores, line = model_pass(
+      state, {{sequence = "", token = token_id, position = position}}
+    )
     if scores is nil then
-      return nil, score_line
+      return nil, line
     end
-    state.taken = state.taken + 1
-    return scores, nil
+    return scores[1], nil
+  end
+  model.reserve = function(
+    _: compute.Model, sequence: string, capacity: integer
+  ): string | nil
+    return sequence_reserve(state, sequence, capacity)
+  end
+  model.release = function(_: compute.Model, sequence: string)
+    sequence_release(state, sequence)
+  end
+  model.cache_bytes = function(
+    _: compute.Model, sequence: string, prefix: string
+  ): integer | nil
+    if state.sequences[sequence] == nil then
+      return nil
+    end
+    local attention = state.attention
+    if attention is nil then
+      return nil
+    end
+    return attention:cache_bytes(sequence, prefix)
+  end
+  model.pass = function(
+    _: compute.Model, inputs: {compute.Input}
+  ): {{number}} | nil, string | nil
+    return model_pass(state, inputs)
   end
   return model
 end
@@ -3577,23 +4115,33 @@ function compute.top_token(
 
   local running = hidden
   for _, prefix in ipairs(prefixes) do
-    local attended, attend_line = attention:block(running, prefix, position)
+    local attended, attend_line = attention:block(
+      {{sequence = "", hidden = running, position = position}}, prefix
+    )
     if attended is nil then
       return nil, attend_line
     end
     local blocked, block_line = feed_forward:block(
-      summed(running, attended), prefix
+      {
+        {
+          sequence = "",
+          hidden = summed(running, attended[1]),
+          position = position,
+        },
+      },
+      prefix
     )
     if blocked is nil then
       return nil, block_line
     end
-    running = blocked
+    running = blocked[1]
   end
 
-  local values, score_line = feed_forward:scores(running)
-  if values is nil then
+  local planes, score_line = feed_forward:scores({running})
+  if planes is nil then
     return nil, score_line
   end
+  local values = planes[1]
 
   local best = 0
   local largest = values[1]

@@ -15,15 +15,17 @@ local record generate
     done: boolean
     failure: string | nil
     produced: {integer}
-    step: function(Run): string | nil, string | nil
+    next: function(Run): compute.Input | nil
+    accept: function(Run, {number}): string | nil, string | nil
+    fail: function(Run, string)
   end
 
   open: function(
-    compute.Model, tokenizer.Tokenizer, string, Options
+    compute.Model, tokenizer.Tokenizer, string, Options, sequence?: string
   ): Run | nil, string | nil
 
   text: function(
-    compute.Model, tokenizer.Tokenizer, string, Options
+    compute.Model, tokenizer.Tokenizer, string, Options, sequence?: string
   ): string | nil, string | nil, integer | nil, {integer} | nil
 end
 
@@ -41,13 +43,14 @@ local record Progress
   model: compute.Model
   tokens: tokenizer.Tokenizer
   ids: {integer}
+  sequence: string
   end_id: integer | nil
   max_tokens: integer
   options: Options
   stream: Stream
   position: integer
   index: integer
-  scores: {number} | nil
+  pending: integer | nil
 end
 
 local function drawn(stream: Stream): number
@@ -146,11 +149,26 @@ local function faulted(options: Options): string | nil
   return nil
 end
 
+-- a name the model already holds is the one refusal a caller can safely ignore
+local function ensure_reserved(
+  model: compute.Model, sequence: string
+): string | nil
+  local line = model:reserve(sequence, model.positions)
+  if line is nil then
+    return nil
+  end
+  if line:find("is already held", 1, true) ~= nil then
+    return nil
+  end
+  return line
+end
+
 function generate.open(
   model: compute.Model,
   tokens: tokenizer.Tokenizer,
   prompt: string,
-  options: Options
+  options: Options,
+  sequence?: string
 ): generate.Run | nil, string | nil
   local fault = faulted(options)
   if not (fault is nil) then
@@ -184,38 +202,59 @@ function generate.open(
     model = model,
     tokens = tokens,
     ids = ids,
+    sequence = sequence or "",
     end_id = end_id,
     max_tokens = options.max_tokens,
     options = options,
     stream = {state = options.seed % STATE_MODULUS},
     position = start,
     index = start + 1,
-    scores = nil,
+    pending = nil,
   }
 
   local produced: {integer} = {}
 
-  local function step(self: generate.Run): string | nil, string | nil
+  local function next_input(self: generate.Run): compute.Input | nil
+    if self.done then
+      return nil
+    end
+    if progress.index <= #progress.ids then
+      return {
+        sequence = progress.sequence,
+        token = progress.ids[progress.index],
+        position = progress.position,
+      }
+    end
+    local token = progress.pending
+    if token is nil then
+      return nil
+    end
+    return {
+      sequence = progress.sequence,
+      token = token,
+      position = progress.position,
+    }
+  end
+
+  local function accept(
+    self: generate.Run, scores: {number}
+  ): string | nil, string | nil
     if self.done then
       return nil, nil
     end
 
-    if progress.index <= #progress.ids then
-      local scores, forward_line = progress.model:forward(
-        progress.ids[progress.index], progress.position
-      )
-      if scores is nil then
-        self.done = true
-        self.failure = forward_line
-        return nil, forward_line
-      end
-      progress.scores = scores
-      progress.position = progress.position + 1
+    local was_prompt = progress.index <= #progress.ids
+    progress.position = progress.position + 1
+    if was_prompt then
       progress.index = progress.index + 1
+    else
+      progress.pending = nil
+    end
+
+    if progress.index <= #progress.ids then
       return nil, nil
     end
 
-    local scores = progress.scores as {number}
     local token_id = chosen(scores, progress.options, progress.stream)
     if token_id == progress.end_id then
       self.done = true
@@ -233,25 +272,22 @@ function generate.open(
       self.done = true
       return piece, nil
     end
-
-    local scores_next, next_line = progress.model:forward(
-      token_id, progress.position
-    )
-    if scores_next is nil then
-      self.done = true
-      self.failure = next_line
-      return nil, next_line
-    end
-    progress.scores = scores_next
-    progress.position = progress.position + 1
+    progress.pending = token_id
     return piece, nil
+  end
+
+  local function fail(self: generate.Run, line: string)
+    self.done = true
+    self.failure = line
   end
 
   local run: generate.Run = {
     done = false,
     failure = nil,
     produced = produced,
-    step = step,
+    next = next_input,
+    accept = accept,
+    fail = fail,
   }
   return run, nil
 end
@@ -260,18 +296,40 @@ function generate.text(
   model: compute.Model,
   tokens: tokenizer.Tokenizer,
   prompt: string,
-  options: Options
+  options: Options,
+  sequence?: string
 ): string | nil, string | nil, integer | nil, {integer} | nil
-  local run, open_line = generate.open(model, tokens, prompt, options)
+  local run, open_line = generate.open(model, tokens, prompt, options, sequence)
   if run is nil then
     return nil, open_line
   end
 
+  local name = sequence or ""
+  local reserve_line = ensure_reserved(model, name)
+  if not (reserve_line is nil) then
+    return nil, reserve_line
+  end
+
   while not run.done do
-    local _, step_line = run.step(run)
-    if not (step_line is nil) then
-      return nil, step_line
+    local input = run.next(run)
+    if input is nil then
+      break
     end
+    local rows, pass_line = model:pass({input})
+    if rows is nil then
+      run.fail(run, pass_line as string)
+      break
+    end
+    local scores = rows as {{number}}
+    local _, accept_line = run.accept(run, scores[1])
+    if not (accept_line is nil) then
+      break
+    end
+  end
+
+  local failure = run.failure
+  if not (failure is nil) then
+    return nil, failure
   end
 
   local answer, decode_line = tokens:decode(run.produced)
