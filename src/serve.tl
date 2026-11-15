@@ -12,6 +12,7 @@ local record serve
     handle: weights.Handle
     tokenizer: tokenizer.Tokenizer
     backend: compute.Backend
+    kv_cache: compute.CacheType | nil
   end
 
   record Endpoint
@@ -20,6 +21,7 @@ local record serve
     name: string
     path: string
     sessions: integer
+    kv_cache: compute.CacheType | nil
   end
 
   record Session
@@ -306,7 +308,9 @@ local function prepared(
     return nil, failed(encode_line as string)
   end
 
-  local window, window_line = compute.model(model.backend, model.handle, nil)
+  local window, window_line = compute.model(
+    model.backend, model.handle, nil, model.kv_cache
+  )
   if window is nil then
     return nil, failed(window_line as string)
   end
@@ -348,7 +352,7 @@ local function prepared(
       end
     end
     local built, generation_line = compute.model(
-      model.backend, model.handle, taken
+      model.backend, model.handle, taken, model.kv_cache
     )
     if built is nil then
       return nil, failed(generation_line as string)
@@ -627,6 +631,7 @@ function serve.build(endpoint: serve.Endpoint): tltp.Server | nil, string | nil
     handle = handle,
     tokenizer = tokens,
     backend = backend,
+    kv_cache = endpoint.kv_cache,
   }
   stores[server] = {held = {}, order = {}, limit = endpoint.sessions}
   install(server, endpoint.name)

@@ -76,7 +76,7 @@ local record compute
   end
 
   model: function(
-    Backend, weights.Handle, integer | nil
+    Backend, weights.Handle, integer | nil, CacheType | nil
   ): Model | nil, string | nil
 end
 ```
@@ -91,7 +91,7 @@ end
 
 ## Functional requirements
 
-- FR-001 (US-001) WHEN `compute.model(backend, handle, positions)` is called with a backend that `compute.load` returned and a handle a GGUF file mapped, THE SYSTEM SHALL return a model whose `positions` is the number of positions it was built with, the `positions` argument when it is given and the file's `context_length` otherwise, and nil as its second value.
+- FR-001 (US-001) WHEN `compute.model(backend, handle, positions, cache_type)` is called with a backend that `compute.load` returned and a handle a GGUF file mapped, THE SYSTEM SHALL return a model whose `positions` is the number of positions it was built with, the `positions` argument when it is given and the file's `context_length` otherwise, and nil as its second value, and SHALL hand `cache_type` to every attention geometry it builds, `f16` when it is nil, and IF `cache_type` is given and is not one of `compute`'s `CacheType` values, `f32`, `f16`, `q8_0` and `q4_0`, THEN THE SYSTEM SHALL return nil and one line naming `model` and the type, that fault coming after FR-009's backend fault and before FR-014's read, and IF `cache_type` is `q8_0` or `q4_0` and the run holds a full-attention block whose `head_length` is not a multiple of 32, THEN THE SYSTEM SHALL return nil and one line naming the type and that `head_length`, reported once `head_length` is known and before the model is built. Its tests pass `f32`, so their numbers stand.
 - FR-002 (US-001) THE SYSTEM SHALL take the run as the blocks whose indices count from zero below the file's `block_count` minus its `nextn_predict_layers`, zero when the file does not hold that key, and read no tensor of a block at or above that count.
 - FR-003 (US-001) THE SYSTEM SHALL take a block of the run as a linear-attention block when `(index + 1)` modulo the file's `full_attention_interval`, four when the file does not hold it, is not zero, and as a full-attention block otherwise.
 - FR-004 (US-001) THE SYSTEM SHALL take the geometry from the metadata FR-014 reads as: `embedding_length` as the width; `expert_used_count` as `experts_used`; `attention.layer_norm_rms_epsilon` as `eps`; `positions` as the argument when it is given and `context_length` otherwise; when the run holds a full-attention block, `attention.head_count` as `heads`, the row count of that block's `attn_q.weight` divided by twice `heads` as `head_length`, the row count of its `attn_k.weight` divided by `head_length` as `kv_heads`, `rope.dimension_count` as `rope_dimensions` and `rope.freq_base` as `rope_base`; and, when the run holds a linear block, `ssm.group_count` as `linear_key_heads`, `ssm.state_size` as `linear_key_length`, `ssm.time_step_rank` as `linear_value_heads`, `ssm.inner_size` divided by `linear_value_heads` as `linear_value_length` and `ssm.conv_kernel` as `linear_conv_kernel`.

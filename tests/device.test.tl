@@ -284,6 +284,7 @@ local GEOMETRY: compute.Geometry = {
   linear_value_heads = 8,
   linear_value_length = 8,
   linear_conv_kernel = 4,
+  cache_type = "f32",
 }
 
 -- 4096 by 8192 f32 tensors hold 128 MiB
@@ -394,7 +395,7 @@ local function pressed(
 end
 
 local function passed(b: compute.Backend, h: weights.Handle): compute.Model
-  local model, line = compute.model(b, h, 2)
+  local model, line = compute.model(b, h, 2, "f32")
   test.equal(line, nil)
   test.truthy(model)
   return model as compute.Model

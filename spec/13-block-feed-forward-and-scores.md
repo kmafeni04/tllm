@@ -81,7 +81,8 @@ end
 
 - FR-001 (US-001) WHEN `compute.feed_forward(backend, handle, geometry)` is called with a
   `backend` that `compute.load` returned and a `geometry` whose `experts_used` is one or more
-  and whose `eps` is zero or more, THE SYSTEM SHALL return a feed-forward handle and nil.
+  and whose `eps` is zero or more, THE SYSTEM SHALL return a feed-forward handle and nil. Its
+  tests give the geometry `cache_type` `f32`, so their numbers stand.
 - FR-002 (US-001) WHEN that handle's `block(hidden, prefix)` is called with `hidden` holding
   one number per position of `<prefix>post_attention_norm.weight`, THE SYSTEM SHALL return
   one number per position of `hidden`, being the sum of `hidden`, the weighted expert output

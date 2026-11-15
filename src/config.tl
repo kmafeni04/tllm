@@ -1,4 +1,5 @@
 local fs = require("fs")
+local compute = require("tllm.compute")
 local tltp = require("tltp")
 
 local config = {}
@@ -16,7 +17,15 @@ local record Settings
   port: integer | nil
   models: {string: string}
   sessions: integer | nil
+  kv_cache: compute.CacheType | nil
 end
+
+local CACHE_TYPES: {string: compute.CacheType} = {
+  f32 = "f32",
+  f16 = "f16",
+  q8_0 = "q8_0",
+  q4_0 = "q4_0",
+}
 
 local function one_line(text: string): string
   return text .. "\n"
@@ -76,6 +85,7 @@ local function unknown_key(fields: Fields): string | nil
     port = true,
     models = true,
     sessions = true,
+    kv_cache = true,
   }
   local keys: {string} = {}
   for key in pairs(fields) do
@@ -114,7 +124,7 @@ local function parse(
   end
 
   local settings: Settings = {
-    host = nil, port = nil, models = {}, sessions = nil
+    host = nil, port = nil, models = {}, sessions = nil, kv_cache = nil
   }
 
   local host = fields.host
@@ -219,6 +229,25 @@ local function parse(
     return nil
   end
 
+  local kv_cache = fields.kv_cache
+  if kv_cache is string then
+    local held = CACHE_TYPES[kv_cache]
+    if held is nil then
+      refuse(
+        write_err,
+        "config " .. file_path .. ": kv_cache must be f32, f16, q8_0 or q4_0"
+      )
+      return nil
+    end
+    settings.kv_cache = held
+  elseif not (kv_cache is nil) then
+    refuse(
+      write_err,
+      "config " .. file_path .. ": kv_cache must be f32, f16, q8_0 or q4_0"
+    )
+    return nil
+  end
+
   local names: {string} = {}
   for name in pairs(settings.models) do
     names[#names + 1] = name
@@ -256,15 +285,16 @@ end
 
 local function loaded(
   settings: Settings | nil
-): boolean, string | nil, integer | nil, {string: string}, integer | nil
+): boolean, string | nil, integer | nil, {string: string}, integer | nil, compute.CacheType | nil
   if settings is Settings then
     return true,
       settings.host,
       settings.port,
       settings.models,
-      settings.sessions
+      settings.sessions,
+      settings.kv_cache
   end
-  return false, nil, nil, {}, nil
+  return false, nil, nil, {}, nil, nil
 end
 
 function config.load(
@@ -272,7 +302,7 @@ function config.load(
   explicit: string | nil,
   path_word: boolean,
   write_err: function(string)
-): boolean, string | nil, integer | nil, {string: string}, integer | nil
+): boolean, string | nil, integer | nil, {string: string}, integer | nil, compute.CacheType | nil
   if explicit is string then
     local text = read_file(explicit)
     if text is nil then
@@ -301,7 +331,7 @@ function config.load(
   end
 
   if path_word then
-    return true, nil, nil, {}
+    return true, nil, nil, {}, nil, nil
   end
 
   if #paths == 0 then

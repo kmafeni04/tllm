@@ -222,6 +222,7 @@ local function geometry(): compute.Geometry
     linear_value_heads = 2,
     linear_value_length = 2,
     linear_conv_kernel = 2,
+    cache_type = "f32",
   }
 end
 
@@ -240,6 +241,7 @@ local function copied(base: compute.Geometry): compute.Geometry
     linear_value_heads = base.linear_value_heads,
     linear_value_length = base.linear_value_length,
     linear_conv_kernel = base.linear_conv_kernel,
+    cache_type = base.cache_type,
   }
 end
 

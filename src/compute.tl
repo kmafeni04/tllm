@@ -54,6 +54,15 @@ ggml_tensor *ggml_exp(ggml_context *ctx, ggml_tensor *a);
 ggml_tensor *ggml_ssm_conv(ggml_context *ctx, ggml_tensor *sx, ggml_tensor *c);
 ggml_tensor *ggml_mul_mat(ggml_context *ctx, ggml_tensor *a, ggml_tensor *b);
 ggml_tensor *ggml_get_rows(ggml_context *ctx, ggml_tensor *a, ggml_tensor *b);
+ggml_tensor *ggml_transpose(ggml_context *ctx, ggml_tensor *a);
+ggml_tensor *ggml_cast(ggml_context *ctx, ggml_tensor *a, int type);
+ggml_tensor *ggml_cont(ggml_context *ctx, ggml_tensor *a);
+ggml_tensor *ggml_soft_max_ext(
+  ggml_context *ctx, ggml_tensor *a, ggml_tensor *mask, float scale,
+  float max_bias);
+size_t ggml_quantize_chunk(
+  int type, const float *src, void *dst, int64_t start, int64_t nrows,
+  int64_t n_per_row, const float *imatrix);
 ggml_tensor *ggml_rms_norm(ggml_context *ctx, ggml_tensor *a, float eps);
 ggml_tensor *ggml_mul(ggml_context *ctx, ggml_tensor *a, ggml_tensor *b);
 ggml_tensor *ggml_rope_ext(
@@ -118,6 +127,15 @@ local record Library
   ggml_ssm_conv: function(ffi.CData, ffi.CData, ffi.CData): ffi.CData
   ggml_mul_mat: function(ffi.CData, ffi.CData, ffi.CData): ffi.CData
   ggml_get_rows: function(ffi.CData, ffi.CData, ffi.CData): ffi.CData
+  ggml_transpose: function(ffi.CData, ffi.CData): ffi.CData
+  ggml_cast: function(ffi.CData, ffi.CData, integer): ffi.CData
+  ggml_cont: function(ffi.CData, ffi.CData): ffi.CData
+  ggml_soft_max_ext: function(
+    ffi.CData, ffi.CData, ffi.CData | nil, number, number
+  ): ffi.CData
+  ggml_quantize_chunk: function(
+    integer, ffi.CData, ffi.CData, integer, integer, integer, ffi.CData | nil
+  ): integer
   ggml_rms_norm: function(ffi.CData, ffi.CData, number): ffi.CData
   ggml_mul: function(ffi.CData, ffi.CData, ffi.CData): ffi.CData
   ggml_rope_ext: function(
@@ -161,6 +179,13 @@ local record Libc
 end
 
 local record compute
+  enum CacheType
+    "f32"
+    "f16"
+    "q8_0"
+    "q4_0"
+  end
+
   record Backend
     path: string
     version: string
@@ -204,12 +229,14 @@ local record compute
     linear_value_heads: integer | nil
     linear_value_length: integer | nil
     linear_conv_kernel: integer | nil
+    cache_type: CacheType
   end
 
   record Attention
     block: function(
       Attention, {number}, string, integer
     ): {number} | nil, string | nil
+    cache_bytes: function(Attention, string): integer | nil
   end
 
   record FeedForward
@@ -240,7 +267,7 @@ local record compute
     Backend, weights.Handle, Geometry
   ): LinearAttention | nil, string | nil
   model: function(
-    Backend, weights.Handle, integer | nil
+    Backend, weights.Handle, integer | nil, CacheType | nil
   ): Model | nil, string | nil
   top_token: function(
     Attention, FeedForward, {number}, {string}, integer
@@ -251,6 +278,12 @@ local type Tensor = weights.Tensor
 
 local record TensorView
   data: ffi.CData
+end
+
+-- a tensor a graph answers with and the numbers it holds
+local record Output
+  tensor: ffi.CData
+  count: integer
 end
 
 -- the device copy of one model's weights: one buffer, its descriptors and the
@@ -286,9 +319,16 @@ local record Mapped
   device: Copy | nil
 end
 
+-- one prefix's keys and values: two buffers of the geometry's cache type in
+-- host memory, the arena the descriptors of both live in, and a graph's way in
 local record Cache
   keys: ffi.CData
   values: ffi.CData
+  arena: ffi.CData
+  ctx: ffi.CData
+  keys_tensor: ffi.CData
+  values_tensor: ffi.CData
+  bytes: integer
   count: integer
 end
 
@@ -296,6 +336,7 @@ local record AttentionState
   mapped: Mapped
   geometry: compute.Geometry
   caches: {string: Cache}
+  scratch: ffi.CData
 end
 
 local record FeedForwardState
@@ -365,12 +406,30 @@ local ARENA_ALIGN: integer = 16
 -- room for the context and graph objects ggml aligns past the tensors
 local ARENA_SLACK: integer = 8192
 local GGML_TYPE_F32: integer = 0
+local GGML_TYPE_F16: integer = 1
+local GGML_TYPE_Q4_0: integer = 2
+local GGML_TYPE_Q8_0: integer = 8
 local GGML_TYPE_I32: integer = 26
 local GGML_STATUS_SUCCESS: integer = 0
 local GGML_ROPE_TYPE_NEOX: integer = 2
 -- GGML_BACKEND_DEVICE_TYPE_CPU and _GPU in the pinned ggml source
 local GGML_DEVICE_CPU: integer = 0
 local GGML_DEVICE_GPU: integer = 1
+
+-- what a cached number costs in each type the cache may hold: the bytes of
+-- one block and how many numbers a block carries
+local record CacheKind
+  code: integer
+  block_elements: integer
+  block_bytes: integer
+end
+
+local CACHE_KINDS: {string: CacheKind} = {
+  f32 = {code = GGML_TYPE_F32, block_elements = 1, block_bytes = 4},
+  f16 = {code = GGML_TYPE_F16, block_elements = 1, block_bytes = 2},
+  q8_0 = {code = GGML_TYPE_Q8_0, block_elements = 32, block_bytes = 34},
+  q4_0 = {code = GGML_TYPE_Q4_0, block_elements = 32, block_bytes = 18},
+}
 
 local WEIGHTS: {string: boolean} = {
   f32 = true,
@@ -481,6 +540,12 @@ local function arena_params(size: integer): Params
   local params = ffi.new("struct ggml_init_params") as Params
   params.mem_size = size
   return params
+end
+
+-- a block the collector cannot reach on its own, given back with the cache
+-- that holds it
+local function finalised(block: ffi.CData): ffi.CData
+  return ffi.gc(block, function(held: ffi.CData) libc.free(held) end)
 end
 
 -- the backends are modules loaded from the directory the library sits in, so a
@@ -809,6 +874,42 @@ local function closed(session: Session)
   libc.free(session.arena)
 end
 
+local function gathered(
+  mapped: Mapped,
+  operation: string,
+  tensors: integer,
+  data_bytes: integer,
+  build: function(Graph): {Output}
+): {{number}} | nil, string | nil
+  local session, open_line = opened(mapped, tensors, data_bytes)
+  if session is nil then
+    return nil, operation .. ": " .. (open_line as string)
+  end
+
+  local outputs = build(session.graph)
+  local cgraph = session.lib.ggml_new_graph(session.ctx)
+  for _, output in ipairs(outputs) do
+    session.lib.ggml_build_forward_expand(cgraph, output.tensor)
+  end
+
+  local failure = computed(session, operation, cgraph)
+  local planes: {{number}} = {}
+  if failure is nil then
+    local device = device_of_copy(session.copy)
+    for index, output in ipairs(outputs) do
+      planes[index] = read_floats(
+        session.lib, output.tensor, output.count, device
+      )
+    end
+  end
+  closed(session)
+
+  if failure then
+    return nil, failure
+  end
+  return planes
+end
+
 local function run(
   mapped: Mapped,
   operation: string,
@@ -817,28 +918,19 @@ local function run(
   count: integer,
   build: function(Graph): ffi.CData
 ): {number} | nil, string | nil
-  local session, open_line = opened(mapped, tensors, data_bytes)
-  if session is nil then
-    return nil, operation .. ": " .. (open_line as string)
-  end
-
-  local result = build(session.graph)
-  local cgraph = session.lib.ggml_new_graph(session.ctx)
-  session.lib.ggml_build_forward_expand(cgraph, result)
-
-  local failure = computed(session, operation, cgraph)
-  local numbers: {number} = {}
-  if failure is nil then
-    numbers = read_floats(
-      session.lib, result, count, device_of_copy(session.copy)
-    )
-  end
-  closed(session)
-
-  if failure then
+  local planes, failure = gathered(
+    mapped,
+    operation,
+    tensors,
+    data_bytes,
+    function(graph: Graph): {Output}
+      return {{tensor = build(graph), count = count}}
+    end
+  )
+  if planes is nil then
     return nil, failure
   end
-  return numbers
+  return planes[1], nil
 end
 
 local function free_copy(copy: Copy)
@@ -1309,7 +1401,20 @@ local function sigmoid_gate(
   )
 end
 
+local function cache_kind_of(name: string): CacheKind | nil
+  return CACHE_KINDS[name]
+end
+
+-- the bytes one cached row of this type costs
+local function cache_row_size(kind: CacheKind, width: integer): integer
+  return math.floor(width / kind.block_elements) * kind.block_bytes
+end
+
 local function geometry_refusal(geometry: compute.Geometry): string | nil
+  local kind = cache_kind_of(geometry.cache_type)
+  if kind is nil then
+    return "attend: cache_type " .. tostring(geometry.cache_type)
+  end
   if geometry.heads < 1 then
     return "attend: heads " .. geometry.heads
   end
@@ -1544,20 +1649,165 @@ local function cache_of(
   end
 
   local geometry = state.geometry
-  local count = geometry.positions * geometry.kv_heads * geometry.head_length
-  local made_keys, keys = pcall(ffi.new, "float[?]", count)
-  local made_values, values = pcall(ffi.new, "float[?]", count)
-  if not (made_keys and made_values) then
-    return nil, "block: no cache of " .. (count * F32_BYTES * 2) .. " bytes"
+  local lib = state.mapped.lib
+  local kind = cache_kind_of(geometry.cache_type) as CacheKind
+  local width = geometry.head_length
+  local rows = geometry.positions * geometry.kv_heads
+  local size = rows * cache_row_size(kind, width)
+  local keys_block = libc.aligned_alloc(
+    ARENA_ALIGN, round_up(size, ARENA_ALIGN)
+  )
+  local values_block = libc.aligned_alloc(
+    ARENA_ALIGN, round_up(size, ARENA_ALIGN)
+  )
+  if keys_block is nil or values_block is nil then
+    return nil, "block: no cache of " .. (size * 2) .. " bytes"
   end
+  local keys = finalised(keys_block)
+  local values = finalised(values_block)
+
+  local arena_size = arena_for(lib, 4, 0)
+  local arena_block = libc.aligned_alloc(ARENA_ALIGN, arena_size)
+  if arena_block is nil then
+    return nil, "block: no cache of " .. (size * 2) .. " bytes"
+  end
+  local arena = finalised(arena_block)
+  local params = arena_params(arena_size)
+  params.mem_buffer = arena
+  params.no_alloc = true
+  local ctx = lib.ggml_init(params)
+
+  local keys_tensor = tensor_in(lib, ctx, {width, rows}, kind.code)
+  (keys_tensor as TensorView).data = keys
+  local values_tensor = tensor_in(lib, ctx, {width, rows}, kind.code)
+  (values_tensor as TensorView).data = values
 
   local cache = {
-    keys = keys as ffi.CData,
-    values = values as ffi.CData,
+    keys = keys,
+    values = values,
+    arena = arena,
+    ctx = ctx,
+    keys_tensor = keys_tensor,
+    values_tensor = values_tensor,
+    bytes = size * 2,
     count = 0,
   } as Cache
   state.caches[prefix] = cache
   return cache
+end
+
+-- one cached row, quantised into the buffer the cache holds
+local function cache_row_write(
+  state: AttentionState,
+  kind: CacheKind,
+  destination: ffi.CData,
+  slot: integer,
+  fields: {number}
+)
+  local width = state.geometry.head_length
+  write_floats(state.scratch as Floats, fields)
+  local base = ffi.cast("intptr_t", destination) as integer
+  local at = ffi.cast("void *", base + slot * cache_row_size(kind, width))
+    as ffi.CData
+  state.mapped.lib.ggml_quantize_chunk(
+    kind.code, state.scratch, at, 0, 1, width, nil
+  )
+end
+
+-- every query head's weights over the positions zero to `position` and the
+-- attention numbers they give, computed by ggml over the prefix's cache
+local function attended_heads(
+  state: AttentionState, cache: Cache, queries: {{number}}, position: integer
+): {{number}} | nil, string | nil
+  local geometry = state.geometry
+  local mapped = state.mapped
+  local lib = mapped.lib
+  local kind = cache_kind_of(geometry.cache_type) as CacheKind
+  local heads = geometry.heads
+  local kv_heads = geometry.kv_heads
+  local width = geometry.head_length
+  local group = heads / kv_heads
+  local past = position + 1
+  local row_bytes = cache_row_size(kind, width)
+  local rows = past * kv_heads
+  local filled = rows * row_bytes
+  local copied = 2
+  if kind.block_elements > 1 then
+    copied = 3
+  end
+  local data_bytes = (
+    2 * heads * width + 2 * heads * past + kv_heads * past * width * copied
+  ) * F32_BYTES
+  local count = 12 + heads * 6 + kv_heads * 5
+
+  local planes, failure = gathered(
+    mapped,
+    "block",
+    count,
+    data_bytes,
+    function(graph: Graph): {Output}
+      local keys = cache.keys_tensor
+      local values = cache.values_tensor
+      local on_device = graph.device
+      if not (on_device is nil) then
+        keys = host_tensor(graph, {width, rows}, kind.code, cache.keys, filled)
+        values = host_tensor(
+          graph, {width, rows}, kind.code, cache.values, filled
+        )
+      end
+
+      local held: {ffi.CData} = {}
+      local function values_over(kv_head: integer): ffi.CData
+        local kept = held[kv_head + 1]
+        if not (kept is nil) then
+          return kept
+        end
+        local view = lib.ggml_view_2d(
+          graph.ctx,
+          values,
+          width,
+          past,
+          kv_heads * row_bytes,
+          kv_head * row_bytes
+        )
+        local numbers = view
+        if kind.block_elements > 1 then
+          numbers = lib.ggml_cast(graph.ctx, view, GGML_TYPE_F32)
+        end
+        local turned = lib.ggml_cont(
+          graph.ctx, lib.ggml_transpose(graph.ctx, numbers)
+        )
+        held[kv_head + 1] = turned
+        return turned
+      end
+
+      local scale = 1 / math.sqrt(width)
+      local outputs: {Output} = {}
+      for head = 0, heads - 1 do
+        local kv_head = math.floor(head / group)
+        local query = vector_of(graph, queries[head + 1])
+        local keys_over = lib.ggml_view_2d(
+          graph.ctx,
+          keys,
+          width,
+          past,
+          kv_heads * row_bytes,
+          kv_head * row_bytes
+        )
+        local scores = lib.ggml_mul_mat(graph.ctx, keys_over, query)
+        local probs = lib.ggml_soft_max_ext(graph.ctx, scores, nil, scale, 0)
+        local attended = lib.ggml_mul_mat(
+          graph.ctx, values_over(kv_head), probs
+        )
+        outputs[#outputs + 1] = {tensor = attended, count = width}
+      end
+      return outputs
+    end
+  )
+  if planes is nil then
+    return nil, block_failure(failure as string)
+  end
+  return planes, nil
 end
 
 local function attention_block(
@@ -1568,6 +1818,15 @@ local function attention_block(
   local tensors, refusal = read_tensors(mapped, prefix, #hidden, geometry)
   if not (tensors is BlockTensors) then
     return nil, refusal
+  end
+  local kind = cache_kind_of(geometry.cache_type) as CacheKind
+  if geometry.head_length % kind.block_elements ~= 0 then
+    return nil,
+      "block: cache "
+        .. geometry.cache_type
+        .. " cannot hold a head of "
+        .. geometry.head_length
+        .. " numbers"
   end
 
   local cache = state.caches[prefix]
@@ -1659,51 +1918,35 @@ local function attention_block(
     value_heads[head + 1] = slice(read_values, offset, width)
   end
 
-  local key_cells = ffi.cast("float*", cache.keys) as Floats
-  local value_cells = ffi.cast("float*", cache.values) as Floats
-  local scale = 1 / math.sqrt(width)
-  local group = heads / kv_heads
+  for head = 0, kv_heads - 1 do
+    cache_row_write(
+      state,
+      kind,
+      cache.keys,
+      position * kv_heads + head,
+      rotated_keys[head + 1]
+    )
+    cache_row_write(
+      state,
+      kind,
+      cache.values,
+      position * kv_heads + head,
+      value_heads[head + 1]
+    )
+  end
+
+  local attended, attend_failure = attended_heads(
+    state, cache, rotated_queries, position
+  )
+  if attended is nil then
+    return nil, attend_failure
+  end
+
   local combined: {number} = {}
-
   for head = 0, heads - 1 do
-    local kv_head = math.floor(head / group)
-    local query = rotated_queries[head + 1]
-    local scores: {number} = {}
-    for past = 0, position - 1 do
-      local total: number = 0
-      for offset = 0, width - 1 do
-        total = total + query[offset + 1] * key_cells[(
-          past * kv_heads + kv_head
-        ) * width + offset]
-      end
-      scores[past + 1] = total * scale
-    end
-    local current: number = 0
-    local current_keys = rotated_keys[kv_head + 1]
-    for offset = 0, width - 1 do
-      current = current + query[offset + 1] * current_keys[offset + 1]
-    end
-    scores[position + 1] = current * scale
-
-    local attention_weights, soft_line = softmax(mapped, scores)
-    if attention_weights is nil then
-      return nil, block_failure(soft_line as string)
-    end
-
-    local attended: {number} = {}
-    local value_numbers = value_heads[kv_head + 1]
-    for offset = 0, width - 1 do
-      local total: number = 0
-      for past = 0, position - 1 do
-        total = total + attention_weights[past + 1] * value_cells[(
-          past * kv_heads + kv_head
-        ) * width + offset]
-      end
-      total = total + attention_weights[position + 1] * value_numbers[offset + 1]
-      attended[offset + 1] = total
-    end
-
-    local gated, gate_line = sigmoid_gate(mapped, gates[head + 1], attended)
+    local gated, gate_line = sigmoid_gate(
+      mapped, gates[head + 1], attended[head + 1]
+    )
     if gated is nil then
       return nil, block_failure(gate_line as string)
     end
@@ -1719,13 +1962,6 @@ local function attention_block(
     return nil, block_failure(output_failure as string)
   end
 
-  for head = 0, kv_heads - 1 do
-    for offset = 0, width - 1 do
-      local index = (position * kv_heads + head) * width + offset
-      key_cells[index] = rotated_keys[head + 1][offset + 1]
-      value_cells[index] = value_heads[head + 1][offset + 1]
-    end
-  end
   cache.count = position + 1
   return result
 end
@@ -2672,13 +2908,13 @@ end
 function compute.attend(
   backend: compute.Backend, handle: weights.Handle, geometry: compute.Geometry
 ): compute.Attention | nil, string | nil
-  local loaded = LOADED[backend]
-  if loaded is nil then
-    return nil, "attend: backend was not loaded by compute.load"
-  end
   local refusal = geometry_refusal(geometry)
   if refusal then
     return nil, refusal
+  end
+  local loaded = LOADED[backend]
+  if loaded is nil then
+    return nil, "attend: backend was not loaded by compute.load"
   end
 
   local mapped, map_failure = mapped_of(backend, loaded, handle, "attend")
@@ -2690,12 +2926,22 @@ function compute.attend(
     mapped = mapped,
     geometry = geometry,
     caches = {},
+    scratch = ffi.new("float[?]", geometry.head_length) as ffi.CData,
   }
   local attention = {} as compute.Attention
   attention.block = function(
     _: compute.Attention, hidden: {number}, prefix: string, position: integer
   ): {number} | nil, string | nil
     return attention_block(state, hidden, prefix, position)
+  end
+  attention.cache_bytes = function(
+    _: compute.Attention, prefix: string
+  ): integer | nil
+    local cache = state.caches[prefix]
+    if cache is nil then
+      return nil
+    end
+    return cache.bytes
   end
   return attention
 end
@@ -2832,11 +3078,19 @@ local function architecture_of(info: gguf.Info): string | nil, string | nil
 end
 
 local function model_plan(
-  backend: compute.Backend, handle: weights.Handle, positions: integer | nil
+  backend: compute.Backend,
+  handle: weights.Handle,
+  positions: integer | nil,
+  cache_type: compute.CacheType | nil
 ): ModelPlan | nil, string | nil
   local loaded = LOADED[backend]
   if loaded is nil then
     return nil, "model: backend was not loaded by compute.load"
+  end
+  local cached: compute.CacheType = cache_type or "f16"
+  local kind = cache_kind_of(cached)
+  if kind is nil then
+    return nil, "model: cache_type " .. cached
   end
   local info, read_line = gguf.read(handle.path)
   if info is nil then
@@ -3091,6 +3345,15 @@ local function model_plan(
           .. " of "
           .. head_length
     end
+    local held = cache_kind_of(cached) as CacheKind
+    if head_length % held.block_elements ~= 0 then
+      return nil,
+        "model: cache "
+          .. cached
+          .. " cannot hold a head of "
+          .. head_length
+          .. " numbers"
+    end
   end
 
   local linear_key_heads: integer = 1
@@ -3145,6 +3408,7 @@ local function model_plan(
     linear_value_heads = linear_value_heads,
     linear_value_length = linear_value_length,
     linear_conv_kernel = linear_conv_kernel,
+    cache_type = cached,
   }
 
   local feed_forward, feed_line = compute.feed_forward(
@@ -3225,13 +3489,16 @@ local function embedding_row(
 end
 
 function compute.model(
-  backend: compute.Backend, handle: weights.Handle, positions: integer | nil
+  backend: compute.Backend,
+  handle: weights.Handle,
+  positions: integer | nil,
+  cache_type: compute.CacheType | nil
 ): compute.Model | nil, string | nil
   local loaded = LOADED[backend]
   if loaded is nil then
     return nil, "model: backend was not loaded by compute.load"
   end
-  local plan, plan_line = model_plan(backend, handle, positions)
+  local plan, plan_line = model_plan(backend, handle, positions, cache_type)
   if plan is nil then
     return nil, plan_line
   end

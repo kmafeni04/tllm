@@ -1,0 +1,544 @@
+local ffi = require("ffi")
+local fs = require("fs")
+local test = require("lde-test")
+local compute = require("tllm.compute")
+local generate = require("tllm.generate")
+local tokenizer = require("tllm.tokenizer")
+local weights = require("tllm.weights")
+
+ffi.cdef(
+  [[
+struct tllm_wall { long seconds; long nanos; };
+int clock_gettime(int clock_id, struct tllm_wall *at);
+]]
+)
+
+local record Wall
+  seconds: integer
+  nanos: integer
+end
+
+local record Clocks
+  clock_gettime: function(integer, ffi.CData): integer
+end
+
+local clocks = ffi.C as Clocks
+
+-- seconds on the monotonic clock, the wall time FR-007 counts
+local function now(): number
+  local at = ffi.new("struct tllm_wall") as Wall
+  clocks.clock_gettime(1, at as ffi.CData)
+  return tonumber(at.seconds) + tonumber(at.nanos) / 1e9
+end
+
+local ROOT = os.tmpname()
+os.remove(ROOT)
+fs.mkdirAll(ROOT)
+
+test.afterAll(function() fs.rmdir(ROOT) end)
+
+local function u32(value: integer): string
+  return string.char(
+    value % 256,
+    math.floor(value / 256) % 256,
+    math.floor(value / 65536) % 256,
+    math.floor(value / 16777216) % 256
+  )
+end
+
+local function u64(value: integer): string
+  local parts: {string} = {}
+  local rest = value
+  for _ = 1, 8 do
+    parts[#parts + 1] = string.char(rest % 256)
+    rest = math.floor(rest / 256)
+  end
+  return table.concat(parts)
+end
+
+local function text(bytes: string): string
+  return u64(#bytes) .. bytes
+end
+
+local type Floats = {integer: number}
+
+local FLOAT_BYTES: integer = 4
+
+local function floats(values: {number}): string
+  local parts: {string} = {}
+  local cell = ffi.new("float[1]") as Floats
+  for _, value in ipairs(values) do
+    cell[0] = value
+    parts[#parts + 1] = ffi.string(cell as ffi.CData, FLOAT_BYTES)
+  end
+  return table.concat(parts)
+end
+
+local record Entry
+  name: string
+  dims: {integer}
+  code: integer
+  bytes: string
+end
+
+local record Meta
+  name: string
+  code: integer
+  bytes: string
+end
+
+local record Cost
+  kind: compute.CacheType
+  bytes: integer
+end
+
+local record Slack
+  kind: compute.CacheType
+  slack: number
+end
+
+local function padded(prefix: string, alignment: integer): string
+  if #prefix % alignment == 0 then
+    return prefix
+  end
+  return prefix .. string.rep("\0", alignment - #prefix % alignment)
+end
+
+local written = 0
+
+local function fixture(meta: {Meta}, entries: {Entry}): string
+  local head = "GGUF" .. u32(3) .. u64(#entries) .. u64(#meta)
+  for _, entry in ipairs(meta) do
+    head = head .. text(entry.name) .. u32(entry.code) .. entry.bytes
+  end
+  local body: {string} = {}
+  local offset = 0
+  for _, entry in ipairs(entries) do
+    local dims: {string} = {}
+    for _, dimension in ipairs(entry.dims) do
+      dims[#dims + 1] = u64(dimension)
+    end
+    head = head
+      .. text(entry.name)
+      .. u32(#entry.dims)
+      .. table.concat(dims)
+      .. u32(entry.code)
+      .. u64(offset)
+    body[#body + 1] = padded(entry.bytes, 32)
+    offset = offset + #body[#body]
+  end
+  written = written + 1
+  local location = ROOT .. "/cache" .. written .. ".gguf"
+  fs.write(location, padded(head, 32) .. table.concat(body))
+  return location
+end
+
+local function zeros(count: integer): {number}
+  local result: {number} = {}
+  for position = 1, count do
+    result[position] = 0
+  end
+  return result
+end
+
+local function ones(count: integer): {number}
+  local result: {number} = {}
+  for position = 1, count do
+    result[position] = 1
+  end
+  return result
+end
+
+local function f32(name: string, dims: {integer}, values: {number}): Entry
+  return {name = name, dims = dims, code = 0, bytes = floats(values)}
+end
+
+local function mint(name: string, value: integer): Meta
+  return {name = name, code = 4, bytes = u32(value)}
+end
+
+local function mfloat(name: string, value: number): Meta
+  return {name = name, code = 6, bytes = floats({value})}
+end
+
+local function mtext(name: string, value: string): Meta
+  return {name = name, code = 8, bytes = text(value)}
+end
+
+local function array(item_code: integer, items: {string}): string
+  return u32(item_code) .. u64(#items) .. table.concat(items)
+end
+
+local function mstrings(name: string, values: {string}): Meta
+  local items: {string} = {}
+  for _, value in ipairs(values) do
+    items[#items + 1] = text(value)
+  end
+  return {name = name, code = 9, bytes = array(8, items)}
+end
+
+local function mint_array(name: string, values: {integer}): Meta
+  local items: {string} = {}
+  for _, value in ipairs(values) do
+    items[#items + 1] = u32(value)
+  end
+  return {name = name, code = 9, bytes = array(5, items)}
+end
+
+-- 32 numbers a row: one query number per head, one key and value head, and
+-- every gate number the same as its query number
+local function wide(prefix: string): {Entry}
+  local queries: {number} = {}
+  for row = 1, 128 do
+    for column = 1, 32 do
+      if row <= 96 and column == (row - 1) % 32 + 1 then
+        queries[#queries + 1] = 1
+      else
+        queries[#queries + 1] = 0
+      end
+    end
+  end
+  local keyed: {number} = {}
+  for row = 1, 32 do
+    for column = 1, 32 do
+      if column == 1 then
+        keyed[#keyed + 1] = row / 32
+      else
+        keyed[#keyed + 1] = 0
+      end
+    end
+  end
+  local output: {number} = {}
+  for row = 1, 32 do
+    for column = 1, 64 do
+      if column == (row - 1) % 32 + 1 then
+        output[#output + 1] = 1
+      else
+        output[#output + 1] = 0
+      end
+    end
+  end
+  return {
+    f32(prefix .. "attn_norm.weight", {32}, ones(32)),
+    f32(prefix .. "attn_q.weight", {32, 128}, queries),
+    f32(prefix .. "attn_k.weight", {32, 32}, keyed),
+    f32(prefix .. "attn_v.weight", {32, 32}, keyed),
+    f32(prefix .. "attn_q_norm.weight", {32}, ones(32)),
+    f32(prefix .. "attn_k_norm.weight", {32}, ones(32)),
+    f32(prefix .. "attn_output.weight", {64, 32}, output),
+  }
+end
+
+local function both(first: {Entry}, second: {Entry}): {Entry}
+  local result: {Entry} = {}
+  for _, entry in ipairs(first) do
+    result[#result + 1] = entry
+  end
+  for _, entry in ipairs(second) do
+    result[#result + 1] = entry
+  end
+  return result
+end
+
+-- a block of two-number heads, and the metadata a whole model reads it under
+local function narrow(prefix: string): {Entry}
+  return {
+    f32(prefix .. "attn_norm.weight", {2}, ones(2)),
+    f32(prefix .. "attn_q.weight", {2, 4}, {1, 0, 0, 1, 0, 0, 0, 0}),
+    f32(prefix .. "attn_k.weight", {2, 2}, {1, 0, 0, 1}),
+    f32(prefix .. "attn_v.weight", {2, 2}, {1, 0, 0, 1}),
+    f32(prefix .. "attn_q_norm.weight", {2}, ones(2)),
+    f32(prefix .. "attn_k_norm.weight", {2}, ones(2)),
+    f32(prefix .. "attn_output.weight", {2, 2}, zeros(4)),
+  }
+end
+
+local function model_meta(width: integer): {Meta}
+  return {
+    mtext("general.architecture", "qwen35moe"),
+    mint("qwen35moe.block_count", 1),
+    mint("qwen35moe.embedding_length", width),
+    mint("qwen35moe.attention.head_count", 1),
+    mint("qwen35moe.rope.dimension_count", 2),
+    mint("qwen35moe.rope.freq_base", 10000),
+    mfloat("qwen35moe.attention.layer_norm_rms_epsilon", 0),
+    mint("qwen35moe.context_length", 4),
+    mint("qwen35moe.expert_used_count", 1),
+    mint("qwen35moe.full_attention_interval", 1),
+  }
+end
+
+local function loaded(meta: {Meta}, entries: {Entry}): weights.Handle
+  local handle, failure = weights.load(fixture(meta, entries))
+  test.equal(failure, nil)
+  return handle as weights.Handle
+end
+
+local function geometry(
+  positions: integer, cache_type: compute.CacheType
+): compute.Geometry
+  return {
+    heads = 2,
+    kv_heads = 1,
+    head_length = 32,
+    rope_dimensions = 2,
+    rope_base = 10000,
+    eps = 0,
+    positions = positions,
+    experts_used = 2,
+    cache_type = cache_type,
+  }
+end
+
+-- the numbers below are the CPU backend's, so these stay on the CPU
+local backend = compute.load(nil, false) as compute.Backend
+
+local function attended(
+  handle: weights.Handle, shape: compute.Geometry
+): compute.Attention
+  local attention, failure = compute.attend(backend, handle, shape)
+  test.equal(failure, nil)
+  return attention as compute.Attention
+end
+
+local function blocked(
+  attention: compute.Attention,
+  hidden: {number},
+  prefix: string,
+  position: integer
+): {number}
+  local numbers, line = attention.block(attention, hidden, prefix, position)
+  test.equal(line, nil)
+  return numbers as {number}
+end
+
+test.it(
+  "a cache reports what its type costs",
+  function()
+    local handle = loaded({}, both(wide("blk.0."), wide("blk.1.")))
+    local costs: {Cost} = {
+      {kind = "f32", bytes = 1024},
+      {kind = "f16", bytes = 512},
+      {kind = "q8_0", bytes = 272},
+      {kind = "q4_0", bytes = 144},
+    }
+    for _, cost in ipairs(costs) do
+      local attention = attended(handle, geometry(4, cost.kind))
+      test.equal(attention.cache_bytes(attention, "blk.0."), nil)
+      blocked(attention, ones(32), "blk.0.", 0)
+      test.equal(attention.cache_bytes(attention, "blk.0."), cost.bytes)
+      test.equal(attention.cache_bytes(attention, "blk.2."), nil)
+    end
+  end
+)
+
+test.it(
+  "a type the model cannot hold is refused",
+  function()
+    local handle = loaded(model_meta(2), narrow("blk.0."))
+
+    local packed, packed_line = compute.model(backend, handle, 4, "q8_0")
+    test.equal(packed, nil)
+    test.includes(packed_line as string, "q8_0")
+    test.includes(packed_line as string, "2")
+
+    local nibbled, nibbled_line = compute.model(backend, handle, 4, "q4_0")
+    test.equal(nibbled, nil)
+    test.includes(nibbled_line as string, "q4_0")
+    test.includes(nibbled_line as string, "2")
+
+    local unknown, unknown_line = compute.model(
+      backend, handle, 4, "q4_0x" as compute.CacheType
+    )
+    test.equal(unknown, nil)
+    test.includes(unknown_line as string, "model")
+    test.includes(unknown_line as string, "q4_0x")
+
+    local half, half_line = compute.model(backend, handle, 4, "f16")
+    test.truthy(half)
+    test.equal(half_line, nil)
+    local single, single_line = compute.model(backend, handle, 4, "f32")
+    test.truthy(single)
+    test.equal(single_line, nil)
+  end
+)
+
+test.it(
+  "a thousand cached positions cost a token under ten short ones",
+  function()
+    local handle = loaded({}, wide("blk.0."))
+    local shape = geometry(1025, "f16")
+
+    local discard = attended(handle, shape)
+    blocked(discard, ones(32), "blk.0.", 0)
+    blocked(discard, ones(32), "blk.0.", 1)
+
+    local shortest = math.huge
+    for _ = 1, 5 do
+      local short = attended(handle, shape)
+      blocked(short, ones(32), "blk.0.", 0)
+      local started = now()
+      blocked(short, ones(32), "blk.0.", 1)
+      local taken = now() - started
+      if taken < shortest then
+        shortest = taken
+      end
+    end
+
+    local long = attended(handle, shape)
+    for position = 0, 1023 do
+      blocked(long, ones(32), "blk.0.", position)
+    end
+    local started = now()
+    blocked(long, ones(32), "blk.0.", 1024)
+    local taken = now() - started
+
+    test.less(taken, 10 * shortest)
+  end
+)
+
+test.it(
+  "each type's numbers stay inside their tolerance",
+  function()
+    local handle = loaded({}, wide("blk.0."))
+    local busy: {number} = {2}
+    for _ = 2, 32 do
+      busy[#busy + 1] = 1
+    end
+
+    local reference = attended(handle, geometry(4, "f32"))
+    blocked(reference, ones(32), "blk.0.", 0)
+    local wanted = blocked(reference, busy, "blk.0.", 1)
+    local largest: number = 0
+    for _, value in ipairs(wanted) do
+      if math.abs(value) > largest then
+        largest = math.abs(value)
+      end
+    end
+
+    local slacks: {Slack} = {
+      {kind = "f16", slack = 1e-3},
+      {kind = "q8_0", slack = 1e-2},
+      {kind = "q4_0", slack = 1e-1},
+    }
+    for _, held in ipairs(slacks) do
+      local attention = attended(handle, geometry(4, held.kind))
+      blocked(attention, ones(32), "blk.0.", 0)
+      local got = blocked(attention, busy, "blk.0.", 1)
+      local apart = false
+      for index, value in ipairs(wanted) do
+        local gap = math.abs(got[index] - value)
+        test.less(gap, held.slack * largest)
+        if gap > 1e-5 then
+          apart = true
+        end
+      end
+      test.truthy(apart)
+    end
+  end
+)
+
+-- the numbers 16/FR-006's generator gives from seed 0, folded between -1 and 1
+local function drawn(): function(integer): {number}
+  local state: integer = 0
+  return function(count: integer): {number}
+    local values: {number} = {}
+    for index = 1, count do
+      state = (1664525 * state + 1013904223) % 4294967296
+      values[index] = 2 * (state / 4294967296) - 1
+    end
+    return values
+  end
+end
+
+local function speakable_meta(): {Meta}
+  local meta = model_meta(32)
+  meta[#meta + 1] = mtext("tokenizer.ggml.model", "gpt2")
+  meta[#meta + 1] = mtext("tokenizer.ggml.pre", "gpt2")
+  meta[#meta + 1] = mstrings("tokenizer.ggml.tokens", {"a", "b", "c"})
+  meta[#meta + 1] = mint_array("tokenizer.ggml.token_type", {1, 1, 1})
+  meta[#meta + 1] = mstrings("tokenizer.ggml.merges", {})
+  meta[#meta + 1] = mint("tokenizer.ggml.eos_token_id", 1)
+  return meta
+end
+
+local function speakable_entries(): {Entry}
+  local next_numbers = drawn()
+  local entries: {Entry} = {}
+  local function take(name: string, dims: {integer})
+    local count = 1
+    for _, dimension in ipairs(dims) do
+      count = count * dimension
+    end
+    entries[#entries + 1] = f32(name, dims, next_numbers(count))
+  end
+  take("blk.0.attn_norm.weight", {32})
+  take("blk.0.attn_q.weight", {32, 64})
+  take("blk.0.attn_k.weight", {32, 32})
+  take("blk.0.attn_v.weight", {32, 32})
+  take("blk.0.attn_q_norm.weight", {32})
+  take("blk.0.attn_k_norm.weight", {32})
+  take("blk.0.attn_output.weight", {32, 32})
+  take("blk.0.post_attention_norm.weight", {32})
+  take("blk.0.ffn_gate_inp.weight", {32, 32})
+  take("blk.0.ffn_gate_exps.weight", {32, 32, 32})
+  take("blk.0.ffn_up_exps.weight", {32, 32, 32})
+  take("blk.0.ffn_down_exps.weight", {32, 32, 32})
+  take("blk.0.ffn_gate_inp_shexp.weight", {32})
+  take("blk.0.ffn_up_shexp.weight", {32, 32})
+  take("blk.0.ffn_gate_shexp.weight", {32, 32})
+  take("blk.0.ffn_down_shexp.weight", {32, 32})
+
+  local projected: {number} = {}
+  for row = 1, 3 do
+    for column = 1, 32 do
+      if column == 1 then
+        projected[#projected + 1] = 1 / 2 ^ (row - 1)
+      else
+        projected[#projected + 1] = 0
+      end
+    end
+  end
+  local embedded: {number} = {}
+  for row = 1, 3 do
+    for _ = 1, 32 do
+      embedded[#embedded + 1] = (row % 2) * 2 - 1
+    end
+  end
+  entries[#entries + 1] = f32("output.weight", {32, 3}, projected)
+  entries[#entries + 1] = f32("output_norm.weight", {32}, ones(32))
+  entries[#entries + 1] = f32("token_embd.weight", {32, 3}, embedded)
+  return entries
+end
+
+test.it(
+  "every type gives the reply the float cache gave",
+  function()
+    local location = fixture(speakable_meta(), speakable_entries())
+    local handle, handle_line = weights.load(location)
+    test.equal(handle_line, nil)
+    local mapped = handle as weights.Handle
+    local pieces, pieces_line = tokenizer.load(location)
+    test.equal(pieces_line, nil)
+    local spoken = pieces as tokenizer.Tokenizer
+
+    local function reply(cache_type: compute.CacheType): string
+      local model, failure = compute.model(backend, mapped, 4, cache_type)
+      test.equal(failure, nil)
+      local output, line = generate.text(
+        model as compute.Model,
+        spoken,
+        "a",
+        {max_tokens = 2, seed = 0, end_id = 3}
+      )
+      test.equal(line, nil)
+      return output as string
+    end
+
+    local single = reply("f32")
+    test.equal(#single, 2)
+    for _, kind in ipairs({"f16", "q8_0", "q4_0"}) do
+      test.equal(reply(kind as compute.CacheType), single)
+    end
+  end
+)

@@ -34,9 +34,10 @@ of the graph in device memory, the writes those helpers collected go in with
 The linear-attention history and state are plain `ffi` float arrays that `compute` hands to the
 graph as leaf tensors, so for a graph computed on the card they are copied into device memory with
 the other inputs and read back with `ggml_backend_tensor_get` like any other result. The attention
-cache is a different thing: a plain `ffi` float array that `attention_block` reads and writes in Lua
-and never hands to a graph, because it builds its own scores from it, so it is untouched by this
-spec.
+cache is a different thing: `attention_block` keeps each prefix's keys and values in host memory as
+ggml tensors of the geometry's `cache_type`, and its graph reads them out of that memory, so on a
+device backend that cache is copied into device memory for the length of a call and never kept
+there.
 
 `mapped_of` is called by five entry points, `attach`, `attend`, `feed_forward`, `linear_attention`
 and `model`, each for the same handle. A device copy per call would be five copies of one model and
@@ -106,7 +107,7 @@ next to a CPU result.
 
 - FR-001 (US-001) WHEN lde builds the package, THE SYSTEM SHALL place `libggml-cuda`, the backend module the build produces, in the package's target directory beside `libggml`, `libggml-base` and the CPU backend modules.
 - FR-002 (US-001) WHEN an entry point is built from a model handle, and the backend it is built on found a CUDA device, and that backend was not asked to stay on the CPU, THE SYSTEM SHALL copy every tensor of that handle into device memory and SHALL reuse that copy for every later entry point built from the same handle on the same backend.
-- FR-003 (US-001) WHEN an operation of FR-004's set is computed on a backend whose weights are in device memory, THE SYSTEM SHALL compute that operation's graph on the CUDA backend, and no tensor of that graph SHALL carry a host data pointer while it is computed.
+- FR-003 (US-001) WHEN an operation of FR-004's set is computed on a backend whose weights are in device memory, THE SYSTEM SHALL compute that operation's graph on the CUDA backend, and no tensor of that graph SHALL carry a host data pointer while it is computed. The attention cache stays in host memory, so an attention block's graph copies it into device memory for the length of a call, and its tests call `compute.model(backend, handle, 2, "f32")` so the numbers they pin stand.
   Not testable: the library reports the devices it found, not which backend ran a graph, and the
   returned numbers are the same either way; a reader confirms the backend the graph is computed with
   and the buffer every tensor of the graph is bound to.

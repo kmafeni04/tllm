@@ -268,7 +268,7 @@ end
 local function fresh(
   handle: weights.Handle, positions: integer | nil
 ): compute.Model
-  local model, failure = compute.model(backend, handle, positions)
+  local model, failure = compute.model(backend, handle, positions, "f32")
   test.equal(failure, nil)
   return model as compute.Model
 end

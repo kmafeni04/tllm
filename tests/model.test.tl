@@ -365,7 +365,7 @@ end
 local function model_of(
   handle: weights.Handle, positions: integer | nil
 ): compute.Model
-  local model, failure = compute.model(backend, handle, positions)
+  local model, failure = compute.model(backend, handle, positions, "f32")
   test.equal(failure, nil)
   return model as compute.Model
 end
@@ -693,7 +693,7 @@ test.it(
 
     for _, bad in ipairs(cases) do
       local handle = loaded(bad.meta, bad.entries)
-      local model, line = compute.model(backend, handle, bad.positions)
+      local model, line = compute.model(backend, handle, bad.positions, "f32")
       test.equal(model, nil)
       local message = refused(nil, line)
       test.includes(message, "model")
@@ -713,7 +713,7 @@ test.it(
       end,
     } as compute.Backend
     local forged_model, forged_line = compute.model(
-      forged, loaded(t001_meta(), t001_entries()), nil
+      forged, loaded(t001_meta(), t001_entries()), nil, "f32"
     )
     test.equal(forged_model, nil)
     test.includes(refused(nil, forged_line), "model")
@@ -723,7 +723,7 @@ test.it(
     test.equal(gone_failure, nil)
     os.remove(gone)
     local gone_model, gone_line = compute.model(
-      backend, gone_handle as weights.Handle, nil
+      backend, gone_handle as weights.Handle, nil, "f32"
     )
     test.equal(gone_model, nil)
     test.includes(refused(nil, gone_line), "model")

@@ -67,6 +67,7 @@ non-goals that nothing is streamed. The record `serve` builds from the body is u
 
 - FR-001 (US-001) WHEN a POST for `/v1/chat/completions` arrives, THE SYSTEM SHALL answer the
   response `serve.stream(server, the raw request body)` gives, which is `18/FR-002` as it now reads.
+  Its tests' endpoints set `kv_cache` `f32`, so the streamed text they record stands.
 - FR-002 (US-001) WHEN `serve.stream` is given a body whose `stream` member is `true`, THE SYSTEM
   SHALL answer the response `server:sse` gives for its producer, whose status is `OK`, whose
   content type is `text/event-stream`, and whose producer is not nil.

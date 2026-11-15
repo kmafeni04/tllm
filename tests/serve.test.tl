@@ -2,6 +2,7 @@ local ffi = require("ffi")
 local fs = require("fs")
 local test = require("lde-test")
 local cli = require("tllm.cli")
+local compute = require("tllm.compute")
 local serve = require("tllm.serve")
 local tokenizer = require("tllm.tokenizer")
 local tltp = require("tltp")
@@ -358,7 +359,7 @@ local function rejected(server: tltp.Server, body: string): ErrorBody
 end
 
 local function build(
-  file_path: string, name: string, sessions?: integer
+  file_path: string, name: string, sessions?: integer, cache?: compute.CacheType
 ): tltp.Server
   local server, failure = serve.build(
     {
@@ -367,6 +368,7 @@ local function build(
       name = name,
       path = file_path,
       sessions = sessions or 4,
+      kv_cache = cache or "f32",
     }
   )
   test.equal(failure, nil, file_path)
@@ -444,6 +446,7 @@ test.it(
         name = "m",
         path = not_gguf,
         sessions = 4,
+        kv_cache = "f32",
       }
     )
     test.equal(bad, nil)
@@ -457,6 +460,7 @@ test.it(
         name = "m",
         path = missing,
         sessions = 4,
+        kv_cache = "f32",
       }
     )
     test.equal(absent, nil)
@@ -586,6 +590,7 @@ test.it(
         name = "m",
         path = file_path,
         sessions = 4,
+        kv_cache = "f32",
       },
       function(line: string) lines[#lines + 1] = line end
     )
@@ -800,6 +805,7 @@ test.it(
         name = "m",
         path = no_tokens,
         sessions = 4,
+        kv_cache = "f32",
       }
     )
     test.equal(refused_build, nil)
@@ -1230,5 +1236,22 @@ test.it(
       server, (SECOND_TURN:gsub("}$", ',"stream":false}'))
     )
     test.equal(resumed.usage.prompt_tokens_details.cached_tokens, 2)
+  end
+)
+
+test.it(
+  "the configured type reaches the model the server builds",
+  function()
+    local file_path = meta_file(t001_meta(), t001_entries())
+
+    local broken = refused(build(file_path, "m", 4, "q8_0"), A_BODY)
+    test.includes(broken.error.message, "q8_0")
+    test.includes(broken.error.message, "2")
+
+    local float = serve.answer(build(file_path, "m", 4, "f32"), A_BODY)
+    test.equal(float.status, "OK")
+    local half = serve.answer(build(file_path, "m", 4, "f16"), A_BODY)
+    test.equal(half.status, "OK")
+    test.equal(half.body, float.body)
   end
 )

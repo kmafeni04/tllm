@@ -19,8 +19,8 @@ call at the next position attends over every token that came before it. One call
 one block, and a stack of blocks is a loop the caller writes. The cache size is the caller's:
 `geometry.positions` is the number of positions a prefix's cache holds, and the local file's
 262144 available positions, at 2 by 256 numbers for keys and as many for values, would cost
-1.07 GB for each of its 10 attention blocks, so a caller that has not been asked for a long
-context should say so. `attend` belongs in the core because it composes `11`'s operations over the
+537 MB for each of its 10 attention blocks at `f16` and 285 MB at `q8_0`, so a caller that has
+not been asked for a long context should say so. `attend` belongs in the core because it composes `11`'s operations over the
 same ggml context and a plugin has no way to reach that context, so a plugin could not carry it
 without a core contract it would have to ship first.
 
@@ -61,12 +61,14 @@ local record compute
     eps: number
     positions: integer
     experts_used: integer
+    cache_type: CacheType
   end
 
   record Attention
     block: function(
       Attention, {number}, string, integer
     ): {number} | nil, string | nil
+    cache_bytes: function(Attention, string): integer | nil
   end
 
   attend: function(
@@ -87,8 +89,10 @@ end
   `compute.load` returned and `geometry` holding a `heads` of one or more, a `kv_heads` of one or
   more that divides `heads`, a `head_length` of one or more, an even `rope_dimensions` of at least
   two and at most `head_length`, a positive `rope_base`, an `eps` of zero or more, a `positions`
-  of one or more and an `experts_used` counting the experts one token uses, which a block does not
-  read, THE SYSTEM SHALL return an attention handle and nil.
+  of one or more, an `experts_used` counting the experts one token uses, which a block does not
+  read, and a `cache_type` that is one of `compute`'s `CacheType` values, `f32`, `f16`, `q8_0` and
+  `q4_0`, THE SYSTEM SHALL return an attention handle and nil, and IF `cache_type` is not one of
+  those four, THEN THE SYSTEM SHALL return nil and one line naming `attend` and the type.
 - FR-002 (US-001) WHEN that handle's `block(hidden, prefix, position)` is called with `hidden`
   holding one number per position of `<prefix>attn_norm.weight`, THE SYSTEM SHALL return one number
   per position of `hidden`, being the gated attention numbers FR-003 to FR-007 describe, and nil
@@ -105,9 +109,11 @@ end
   `rope_dimensions` and `rope_base`.
 - FR-005 (US-002) WHEN a block call's keys and values are ready, THE SYSTEM SHALL keep the rotated
   key numbers and the value numbers under `prefix` at `position`, in a cache of
-  `geometry.positions` positions, one cache for each prefix, each held as a single precision
-  number, so that a call for a prefix attends over the positions zero to `position` and over no
-  other prefix's positions. A refused block call stores nothing: every refusal of FR-009 to FR-012
+  `geometry.positions` positions, one cache for each prefix, each held in a ggml tensor of the
+  geometry's `cache_type` in host memory, at 4 bytes per number for `f32`, 2 for `f16`, `34/32`
+  for `q8_0` and `18/32` for `q4_0`, so that a call for a prefix attends over the positions zero
+  to `position` and over no other prefix's positions, and SHALL report those bytes as
+  `cache_bytes(prefix)` once the cache exists and nil before. A refused block call stores nothing: every refusal of FR-009 to FR-012
   happens before those numbers are written, so a prefix's next position is the same after a refused
   call as before it.
 - FR-006 (US-001) WHEN the cached positions of a prefix are known, THE SYSTEM SHALL take a query
@@ -143,7 +149,9 @@ end
   branch returns nil and one line, which a reader confirms by inspection.
 - FR-013 (US-003) IF more than one refusal applies to a block call, THEN THE SYSTEM SHALL report a
   missing tensor before a tensor of a type `block` does not read, a type fault before a shape that
-  does not fit, and a shape fault before a position that does not fit.
+  does not fit, a shape fault before a position that does not fit, and a cache type of `q8_0` or
+  `q4_0` whose 32-number blocks cannot hold the geometry's `head_length` alongside the shape
+  faults, after the type faults and before the position faults.
 
 ## Non-goals
 
@@ -157,6 +165,8 @@ end
   freeing or reassigning them is a later spec's concern.
 
 ## Tests
+
+Every case's geometry sets `cache_type` `f32`, so the numbers below stand as recorded.
 
 - T-001 (FR-001, FR-002, FR-003, FR-007): `one block at position zero gives its output`, proves
   with a fixture holding, under `blk.0.` and `blk.1.`, the same f32 tensors: `attn_norm.weight` 4
@@ -192,7 +202,8 @@ end
   does not fit is refused with one line`, proves on T-001's fixture that a backend built by hand is
   refused with one line holding `attend`, that a geometry of 0 heads, of 0 key/value heads, of 3
   key/value heads under 2 heads, of 0 head length, of 0, 3, 4 or 5 rope dimensions under 2-number
-  heads, of base 0, of `eps` -1 and of 0 positions is each refused with one line holding `attend`,
+  heads, of base 0, of `eps` -1, of 0 positions and of a `cache_type` of `q5_1` is each refused
+  with one line holding `attend`,
   that `block({1,1,1,1}, "blk.9.", 0)` is refused with one line holding `blk.9.attn_norm.weight`,
   that each of `blk.0.`'s seven tensors removed in turn is refused with one line holding its name,
   that an f16 `attn_k.weight` is refused with one line holding `attn_k` and `f16`, that

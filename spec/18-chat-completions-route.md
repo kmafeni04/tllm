@@ -58,6 +58,7 @@ local record serve
     handle: weights.Handle
     tokenizer: tokenizer.Tokenizer
     backend: compute.Backend
+    kv_cache: compute.CacheType | nil
   end
 
   record Endpoint
@@ -66,6 +67,7 @@ local record serve
     name: string
     path: string
     sessions: integer
+    kv_cache: compute.CacheType | nil
   end
 
   record Reply
@@ -127,10 +129,11 @@ end
   fault in the order this requirement names them: `body`; `messages` and, for an entry, its position
   counting from one; the member at fault.
 - FR-009 (US-004) WHEN `chat.render` and `tokenizer:encode` have answered, THE SYSTEM SHALL build a
-  model over the file's window and, IF the prompt's ids plus the budget minus one are more than the
+  model over the file's window, taking the endpoint's `kv_cache` as the cache type of every model
+  it builds, nil meaning `f16`, and, IF the prompt's ids plus the budget minus one are more than the
   `positions` that model was built with, THEN THE SYSTEM SHALL answer `BadRequest` as FR-008
   describes it, the message naming `messages`, `max_tokens`, the prompt's id count, the budget and
-  that `positions`.
+  that `positions`. Its tests set `f32` wherever they pin a reply.
 - FR-010 (US-005) WHEN `build` is called, THE SYSTEM SHALL load the file's tokenizer with
   `tokenizer.load` and hold it on the model it keeps, returning nil and that loader's line as its
   second value when it refuses.

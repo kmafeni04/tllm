@@ -443,6 +443,7 @@ local function geometry(): compute.Geometry
     eps = 0,
     positions = 1,
     experts_used = 2,
+    cache_type = "f32",
   }
 end
 
@@ -456,6 +457,7 @@ local function stacked_geometry(): compute.Geometry
     eps = 0,
     positions = 4,
     experts_used = 1,
+    cache_type = "f32",
   }
 end
 

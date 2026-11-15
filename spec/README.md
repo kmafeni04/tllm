@@ -19,3 +19,4 @@ These rules bind every spec in this folder.
 - Source is Teal only, run on LuaJIT through lde, except the lde build script at the package root, which lde runs only when it is named `build.lua`.
 - The core stays small: a feature a plugin can carry does not belong in the core.
 - Every `.tl` file typechecks and is formatted.
+- The project must be memory safe, no memory leaks, memory corruption bugs, use after frees, etc.

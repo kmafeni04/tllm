@@ -385,3 +385,35 @@ test.it(
     cleanup({xdg})
   end
 )
+
+test.it(
+  "the configured type reaches the server, and one it does not name is refused",
+  function()
+    local xdg = temp_dir()
+    local model = model_file(xdg)
+    local config = write_config(
+      xdg, '{"host":"127.0.0.1","port":8080,"kv_cache":"q8_0","models":{}}'
+    )
+    local environment = {XDG_CONFIG_HOME = xdg}
+
+    local named = run({"serve", model}, environment)
+    test.equal(named.code, 0)
+    test.equal((named.endpoint as serve.Endpoint).kv_cache, "q8_0")
+
+    fs.write(config, '{"host":"127.0.0.1","port":8080,"models":{}}')
+    local unset = run({"serve", model}, environment)
+    test.equal(unset.code, 0)
+    test.equal((unset.endpoint as serve.Endpoint).kv_cache, "f16")
+
+    fs.write(
+      config, '{"host":"127.0.0.1","port":8080,"kv_cache":"q8_0x","models":{}}'
+    )
+    local refused = run({"serve", model}, environment)
+    test.equal(refused.code, 1)
+    test.equal(#refused.err, 1)
+    test.includes(refused.err[1], "kv_cache")
+    test.equal(refused.starts, 0)
+
+    cleanup({xdg})
+  end
+)

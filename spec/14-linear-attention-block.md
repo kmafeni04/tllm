@@ -120,7 +120,8 @@ end
   `linear_conv_kernel` each of one or more, a `linear_value_heads` that is a multiple of
   `linear_key_heads`, and an `eps` of zero or more, THE SYSTEM SHALL return a
   linear-attention handle, which reads the tensors of that weights handle by name at
-  call time, and nil as its second value.
+  call time, and nil as its second value. Its tests give the geometry `cache_type`
+  `f32`, so their numbers stand.
 - FR-002 (US-001) WHEN that handle's `block(hidden, prefix, position)` is called with
   `hidden` holding one number per position of `<prefix>attn_norm.weight`, THE SYSTEM
   SHALL return one number per position of `hidden`, being the numbers FR-003 to FR-008

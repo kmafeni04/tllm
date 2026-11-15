@@ -26,11 +26,11 @@ gains the cap, which is why `08`'s own calls and the ones in `tests/serve.test.t
 `12` allocates a prefix's cache when a block first runs over it, so a kept model holds only the
 positions its own conversation reached, not the file's window: a conversation at 200 prompt ids and
 a 256-token budget keeps 910 positions in each of its 10 attention blocks, and `12` prices 262144
-positions at 1.07 GB in each of those blocks, so that conversation costs about 37 MB, which is 40 KB
-per position across the ten. Four conversations is about 150 MB, which is why the cap exists and why
-the default is four. `12` holds each prefix's keys and values in two host float arrays and computes
-the attention scores and values in a Lua loop per head, so that cache is where both memory and speed
-are won next.
+positions at 537 MB in each of those blocks at `f16`, so that conversation costs about 18.6 MB,
+which is 20 KB per position across the ten. Four conversations is about 75 MB, which is why the cap
+exists and why the default is four. `24` holds each prefix's keys and values in ggml tensors of the
+endpoint's `kv_cache` type, `f16` unless the file says otherwise, so that cache is where memory and
+speed were won.
 
 Several conversations in one process is the next step, and it is not this spec. A coroutine switches
 only where Lua yields, and nothing on a token's path yields, so a session is stepped one token at a
@@ -97,7 +97,8 @@ start: integer | nil
 - FR-004 (US-001) WHEN the server builds a conversation's model, THE SYSTEM SHALL give it twice the
   turn's need, or the file window's positions when that is fewer, the turn's need being the prompt's
   ids plus the budget minus one, and `18/FR-009` still refuses a turn whose need is past the file
-  window.
+  window. Its tests' endpoints set `kv_cache` `f32`, so their recorded replies and `cached_tokens`
+  stand.
 - FR-005 (US-001) IF a turn's need is more than the positions the conversation's model holds, THEN
   THE SYSTEM SHALL replace that model, read the whole prompt from position zero, and take
   `cached_tokens` as 0 when the reply is not streamed.

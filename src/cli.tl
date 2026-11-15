@@ -1,4 +1,5 @@
 local targs = require("targs")
+local compute = require("tllm.compute")
 local config = require("tllm.config")
 local serve = require("tllm.serve")
 
@@ -219,7 +220,7 @@ local function serve_code(
     config_path = explicit
   end
 
-  local ok, file_host, file_port, models, file_sessions = config.load(
+  local ok, file_host, file_port, models, file_sessions, file_cache = config.load(
     environment, config_path, path_word, write_err
   )
   if not ok then
@@ -228,6 +229,11 @@ local function serve_code(
 
   local bind_host = given_host or file_host or "127.0.0.1"
   local bind_port = given_port or file_port or 8080
+
+  local cache_type: compute.CacheType = "f16"
+  if file_cache is compute.CacheType then
+    cache_type = file_cache
+  end
 
   local chosen = chosen_model(models, word, path_word, write_err)
   if chosen is nil then
@@ -241,6 +247,7 @@ local function serve_code(
       name = chosen.name,
       path = chosen.path,
       sessions = file_sessions or 4,
+      kv_cache = cache_type,
     },
     write_err
   )

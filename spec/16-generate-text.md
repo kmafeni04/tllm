@@ -70,7 +70,7 @@ a sample takes are worked out by hand from `15/T-001`'s scores.
 
 ## Functional requirements
 
-- FR-001 (US-001) WHEN `generate.text(model, tokenizer, prompt, options)` is called with options FR-009 accepts, THE SYSTEM SHALL return the ids it sampled decoded by `tokenizer:decode` as the first value, nil as the second, the number of ids it sampled as the third, and the ids it sampled in the order it appended them as the fourth, nil when it returns nil, holding no part of the prompt, and report each token to `on_token` as it is appended when the options carry one.
+- FR-001 (US-001) WHEN `generate.text(model, tokenizer, prompt, options)` is called with options FR-009 accepts, THE SYSTEM SHALL return the ids it sampled decoded by `tokenizer:decode` as the first value, nil as the second, the number of ids it sampled as the third, and the ids it sampled in the order it appended them as the fourth, nil when it returns nil, holding no part of the prompt, and report each token to `on_token` as it is appended when the options carry one. Its tests build their models with `f32`, so the numbers and reply they record stand.
 - FR-002 (US-002) WHEN a call begins, THE SYSTEM SHALL take the prompt's ids from `tokenizer:encode(prompt)`, call `model:forward` with each id from the options' `start` on and its index as the position, in list order, and take the first sampled token from the scores the last of those calls returns, `start` absent being 0, so a call may begin at a position the model has already reached.
 - FR-003 (US-002) WHEN a token is sampled that is neither the end id nor the last `max_tokens` allows, THE SYSTEM SHALL call `model:forward` with it at the next position and sample the next token from the scores that call returns.
 - FR-004 (US-003) WHEN `temperature` is absent or zero, THE SYSTEM SHALL take the sampled token as the id of the highest score, the lowest id among equal highest scores.
@@ -99,7 +99,7 @@ a sample takes are worked out by hand from `15/T-001`'s scores.
   `tokenizer.ggml.token_type` of three 1s, `tokenizer.ggml.merges` an empty array and
   `tokenizer.ggml.eos_token_id` 1, and holding `15/T-001`'s tensors unchanged under `blk.0.` and
   at the root, except that `token_embd.weight` holds 2 numbers per row over 3 rows, `{1,0}`,
-  `{3,4}` and `{1,0}`, that `compute.model(backend, handle, 4)` and `tokenizer.load(path)` each
+  `{3,4}` and `{1,0}`, that `compute.model(backend, handle, 4, "f32")` and `tokenizer.load(path)` each
   return their record and nil, that `generate.text(model, tokenizer, "a", {max_tokens = 2, seed =
   0})` returns `aa` and nil, the prefill giving `15/T-001`'s `{1.4142136, 0, 1.4142136}` and the
   greedy pick being id 0 there and after the second forward, so the prompt's own `a` is not in the

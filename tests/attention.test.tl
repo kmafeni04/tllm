@@ -217,6 +217,7 @@ local function geometry(): compute.Geometry
     eps = 0,
     positions = 4,
     experts_used = 2,
+    cache_type = "f32",
   }
 end
 
@@ -230,6 +231,7 @@ local function copied(base: compute.Geometry): compute.Geometry
     eps = base.eps,
     positions = base.positions,
     experts_used = base.experts_used,
+    cache_type = base.cache_type,
   }
 end
 
@@ -396,6 +398,11 @@ test.it(
       function(): compute.Geometry
         local taken = copied(shape)
         taken.positions = 0
+        return taken
+      end,
+      function(): compute.Geometry
+        local taken = copied(shape)
+        taken.cache_type = "q5_1" as compute.CacheType
         return taken
       end,
     }
