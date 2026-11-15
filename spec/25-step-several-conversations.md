@@ -1,6 +1,6 @@
 # 25: Several conversations step in one process
 
-**Status**: pending   **Depends on**: 16, 19, 23
+**Status**: done   **Depends on**: 16, 19, 23
 
 ## Problem & context
 
@@ -129,8 +129,11 @@ end
   failure; a step of a run that is done SHALL return no text and make no forward.
 - FR-005 (US-004) WHEN the producer of a streamed turn is first resumed, THE SYSTEM SHALL write the
   opening event `19/FR-003` names, record the emit it is given, register that turn with the
-  scheduler, write no other event, and yield; WHEN it is resumed after that turn has ended, THE
-  SYSTEM SHALL write no event and return.
+  scheduler, write no other event, and yield; IF that event cannot be encoded, THEN THE SYSTEM
+  SHALL register no turn, discard the conversation and return; WHEN it is resumed while that turn
+  is still live, THE SYSTEM SHALL write no event and yield again, so a turn slower than tltp's
+  one-second resume keeps its connection; WHEN it is resumed after that turn has ended, THE SYSTEM
+  SHALL write no event and return.
 - FR-006 (US-004) WHEN the scheduler writes an event for a turn, THE SYSTEM SHALL write it through
   the emit that turn's producer was given and through no other turn's emit.
 - FR-007 (US-003) WHEN `serve.step(server)` is called, THE SYSTEM SHALL step each turn that is still
@@ -273,30 +276,4 @@ end
 
 ## Amendments
 
-- `16/FR-001`: the field `on_token` and the sentence that reports each token to it go, since the
-  scheduler emits from a step's return and nothing in the engine passes a callback; `16`'s
-  problem statement and `Options` snippet lose the field with them.
-- `19/FR-002`: a body asking for a stream answers `server:sse` with a non-nil producer unless
-  `generate.open` gives nil for the prepared turn, which answers `InternalServerError` as
-  `application/json` with no producer and writes no event, FR-013's case; `19/T-001`'s last block,
-  which reads `server._routes` and the response's `_stream_fn`, goes, since tltp 0.4.1 publishes
-  neither.
-- `19/FR-004`: the token event is written by `serve.step` when it appends a token, through that
-  turn's own emit, and not by the producer during its generation; the event's shape stands, and
-  `19/T-001` resumes a producer once and then steps the scheduler.
-- `19/FR-005`: the finish event and `[DONE]` are written by `serve.step` when the turn ends, and the
-  producer writes nothing after its opening event, so it returns on a later resume and the
-  connection closes up to a second after the last event; `19/T-001` drives the scheduler for those
-  payloads.
-- `19/FR-008`: the requirement goes with `on_token`, which `16/FR-001` drops: no caller passes a
-  callback to `generate.text` once the scheduler emits from a step's return. `19`'s problem
-  statement and its `Options` snippet lose the field with it.
-- `19/FR-009`: a turn whose step fails and a turn whose event cannot be encoded are ended by
-  `serve.step` with no finish event and no `[DONE]`, and `19/T-004` proves it through the scheduler.
-- `23/FR-001`: a conversation whose model a turn holds is not reused; a stored conversation is in
-  flight from the moment `prepared` hands its model to a turn until that turn stores it, discards
-  it, or is refused by FR-013, and a turn naming it during that time is prepared as `23/FR-003`
-  does.
-- `23/FR-002`: a turn's ids are stored when its run ends without a failure line, its streamed case
-  being driven by `serve.step`, and `23/T-005` follows `19/T-001`. This retires `23`'s third
-  non-goal, that no two turns run at once, since two turns now interleave one forward at a time.
+- None.

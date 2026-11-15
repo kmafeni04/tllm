@@ -41,6 +41,8 @@ local record serve
   answer: function(tltp.Server, string): Reply
   stream: function(tltp.Server, string): tltp.Response, tltp.StreamFn | nil
   session_of: function(tltp.Server, string): Session | nil
+  step: function(tltp.Server): integer
+  round: function(tltp.Server): string | nil
 end
 
 local record LooseObject
@@ -71,6 +73,7 @@ local record Store
 end
 
 local record Prepared
+  server: tltp.Server
   model: serve.Model
   request: Request
   prompt: string
@@ -90,11 +93,20 @@ local record Event
   choices: {EventChoice}
 end
 
+local record Turn
+  ready: Prepared
+  run: generate.Run
+  emit: tltp.EmitFn
+  live: boolean
+end
+
 local DEFAULT_BUDGET: integer = 256
 local CHAT_PATH = "/v1/chat/completions"
 
 local models: {tltp.Server: serve.Model} = {}
 local stores: {tltp.Server: Store} = {}
+local turns: {tltp.Server: {Turn}} = {}
+local in_flight: {tltp.Server: {string: boolean}} = {}
 
 function serve.model_of(server: tltp.Server): serve.Model | nil
   return models[server]
@@ -276,6 +288,19 @@ local function budget_fault(
   )
 end
 
+local function marked(server: tltp.Server, id: string): boolean
+  local marks = in_flight[server]
+  return marks ~= nil and marks[id] == true
+end
+
+local function unmark(server: tltp.Server, id: string)
+  local marks = in_flight[server]
+  if marks is nil then
+    return
+  end
+  marks[id] = nil
+end
+
 local function begins_with(ids: {integer}, prefix: {integer}): boolean
   for index = 1, #prefix do
     if ids[index] ~= prefix[index] then
@@ -335,6 +360,7 @@ local function prepared(
           held.session.length < #ids
           and needed <= held.session.generation.positions
           and begins_with(ids, held.ids)
+          and not marked(server, id)
         then
           generation = held.session.generation
           cached = held.session.length
@@ -360,7 +386,17 @@ local function prepared(
     generation = built
   end
 
+  if id is string then
+    local marks = in_flight[server]
+    if marks is nil then
+      marks = {}
+      in_flight[server] = marks
+    end
+    marks[id] = true
+  end
+
   return {
+    server = server,
     model = model,
     request = request,
     prompt = prompt,
@@ -371,9 +407,7 @@ local function prepared(
   }, nil
 end
 
-local function options_of(
-  ready: Prepared, on_token: function(string) | nil
-): generate.Options
+local function options_of(ready: Prepared): generate.Options
   local request = ready.request
   return {
     max_tokens = request.max_tokens,
@@ -381,7 +415,6 @@ local function options_of(
     temperature = request.temperature,
     top_k = request.top_k,
     start = ready.cached,
-    on_token = on_token,
   }
 end
 
@@ -418,48 +451,52 @@ local function used(store: Store, id: string)
   store.order[#store.order + 1] = id
 end
 
+local function released(ready: Prepared)
+  local id = ready.request.session_id
+  if id is string then
+    unmark(ready.server, id)
+  end
+end
+
 local function kept(ready: Prepared, sampled: {integer})
   local store = ready.store
   local id = ready.request.session_id
-  if store is nil or not (id is string) then
-    return
-  end
-  local held = store.held[id]
-  if held is nil then
-    if #store.order >= store.limit then
-      forgotten(store, store.order[1])
+  if id is string and store is Store then
+    local held = store.held[id]
+    if held is nil then
+      if #store.order >= store.limit then
+        forgotten(store, store.order[1])
+      end
+      held = {
+        ids = {},
+        session = {
+          id = id,
+          length = 0,
+          generation = ready.generation,
+        },
+      }
+      store.held[id] = held
     end
-    held = {
-      ids = {},
-      session = {
-        id = id,
-        length = 0,
-        generation = ready.generation,
-      },
-    }
-    store.held[id] = held
+    held.ids = forwarded(ready, sampled)
+    held.session.length = #held.ids
+    held.session.generation = ready.generation
+    used(store, id)
   end
-  held.ids = forwarded(ready, sampled)
-  held.session.length = #held.ids
-  held.session.generation = ready.generation
-  used(store, id)
+  released(ready)
 end
 
 local function lost(ready: Prepared)
   local store = ready.store
   local id = ready.request.session_id
-  if store is nil or not (id is string) then
-    return
+  if id is string and store is Store then
+    forgotten(store, id)
   end
-  forgotten(store, id)
+  released(ready)
 end
 
 local function finished(ready: Prepared): serve.Reply
   local text, text_line, completion, sampled = generate.text(
-    ready.generation,
-    ready.model.tokenizer,
-    ready.prompt,
-    options_of(ready, nil)
+    ready.generation, ready.model.tokenizer, ready.prompt, options_of(ready)
   )
   if text is nil then
     lost(ready)
@@ -490,55 +527,120 @@ local function event_data(choice: EventChoice): string | nil
   return data
 end
 
-local function producer(ready: Prepared): tltp.StreamFn
+local function registered(server: tltp.Server): {Turn}
+  local list = turns[server]
+  if list is nil then
+    list = {}
+    turns[server] = list
+  end
+  return list
+end
+
+local function dropped(server: tltp.Server, turn: Turn)
+  turn.live = false
+  local list = turns[server]
+  if list is nil then
+    return
+  end
+  for index = #list, 1, -1 do
+    if list[index] == turn then
+      table.remove(list, index)
+    end
+  end
+end
+
+local function producer(
+  server: tltp.Server, ready: Prepared, run: generate.Run
+): tltp.StreamFn
   return function(emit: tltp.EmitFn): boolean | nil
     local opening = event_data({index = 0, delta = {role = "assistant"}})
     if opening is nil then
-      return
+      lost(ready)
+      return true
     end
     emit(opening)
 
-    local broken = false
-    local text, _, count, sampled = generate.text(
-      ready.generation,
-      ready.model.tokenizer,
-      ready.prompt,
-      options_of(
-        ready,
-        function(piece: string)
-          if broken then
-            return
-          end
-          local data = event_data({index = 0, delta = {content = piece}})
-          if data is nil then
-            broken = true
-            return
-          end
-          emit(data)
-        end
-      )
-    )
-    if text is nil then
-      lost(ready)
-      return
-    end
-    kept(ready, sampled as {integer})
-    if broken then
-      return
-    end
+    local turn: Turn = {ready = ready, run = run, emit = emit, live = true}
+    local list = registered(server)
+    list[#list + 1] = turn
 
-    local reason = "stop"
-    if (count as integer) >= ready.request.max_tokens then
-      reason = "length"
+    coroutine.yield()
+    while turn.live do
+      coroutine.yield()
     end
-    local ending = event_data({index = 0, finish_reason = reason})
-    if ending is nil then
-      return
-    end
-    emit(ending)
-    emit("[DONE]")
     return true
   end
+end
+
+local function advance(server: tltp.Server, turn: Turn)
+  local run = turn.run
+  local piece, line = run.step(run)
+  if not (line is nil) then
+    lost(turn.ready)
+    dropped(server, turn)
+    return
+  end
+
+  if not (piece is nil) then
+    local data = event_data({index = 0, delta = {content = piece}})
+    if data is nil then
+      lost(turn.ready)
+      dropped(server, turn)
+      return
+    end
+    turn.emit(data)
+  end
+
+  if not run.done then
+    return
+  end
+
+  local reason = "stop"
+  if #run.produced >= turn.ready.request.max_tokens then
+    reason = "length"
+  end
+  local ending = event_data({index = 0, finish_reason = reason})
+  if ending is nil then
+    lost(turn.ready)
+    dropped(server, turn)
+    return
+  end
+  turn.emit(ending)
+  turn.emit("[DONE]")
+  kept(turn.ready, run.produced)
+  dropped(server, turn)
+end
+
+function serve.step(server: tltp.Server): integer
+  local list = turns[server]
+  if list is nil then
+    return 0
+  end
+  local order: {Turn} = {}
+  for index = 1, #list do
+    order[index] = list[index]
+  end
+  local live = 0
+  for _, turn in ipairs(order) do
+    if turn.live then
+      advance(server, turn)
+    end
+    if turn.live then
+      live = live + 1
+    end
+  end
+  return live
+end
+
+function serve.round(server: tltp.Server): string | nil
+  local list = turns[server]
+  local timeout = -1
+  if not (list is nil) and #list > 0 then
+    timeout = 0
+  end
+  local _, line = server:poll(timeout)
+  serve.step(server)
+  return line
 end
 
 function serve.answer(server: tltp.Server, body: string): serve.Reply
@@ -563,8 +665,17 @@ function serve.stream(
     return server:json(reply.status, reply.body), nil
   end
 
-  local run = producer(ready)
-  return server:sse(run), run
+  local run, open_line = generate.open(
+    ready.generation, ready.model.tokenizer, ready.prompt, options_of(ready)
+  )
+  if run is nil then
+    released(ready)
+    local fault = failed(open_line as string)
+    return server:json(fault.status, fault.body), nil
+  end
+
+  local stream_fn = producer(server, ready, run)
+  return server:sse(stream_fn), stream_fn
 end
 
 local function one_line(text: string): string
@@ -648,15 +759,28 @@ function serve.start(
   end
 
   local raised: string | nil
-  local ok = xpcall(
-    function() server:serve() end,
-    function(reason: string) raised = tostring(reason) end
+  local ok, code = xpcall(
+    function(): integer
+      local result = 0
+      while result == 0 do
+        local line = serve.round(server as tltp.Server)
+        if not (line is nil) then
+          write_err(one_line(line))
+          result = 1
+        end
+      end
+      return result
+    end,
+    function(reason: string): string
+      raised = tostring(reason)
+      return raised
+    end
   )
   if not ok then
     write_err(one_line(raised or "server failed"))
     return 1
   end
-  return 0
+  return code as integer
 end
 
 return serve

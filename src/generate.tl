@@ -9,8 +9,18 @@ local record generate
     top_k: integer | nil
     end_id: integer | nil
     start: integer | nil
-    on_token: function(string) | nil
   end
+
+  record Run
+    done: boolean
+    failure: string | nil
+    produced: {integer}
+    step: function(Run): string | nil, string | nil
+  end
+
+  open: function(
+    compute.Model, tokenizer.Tokenizer, string, Options
+  ): Run | nil, string | nil
 
   text: function(
     compute.Model, tokenizer.Tokenizer, string, Options
@@ -25,6 +35,19 @@ local STATE_INCREMENT = 1013904223
 
 local record Stream
   state: number
+end
+
+local record Progress
+  model: compute.Model
+  tokens: tokenizer.Tokenizer
+  ids: {integer}
+  end_id: integer | nil
+  max_tokens: integer
+  options: Options
+  stream: Stream
+  position: integer
+  index: integer
+  scores: {number} | nil
 end
 
 local function drawn(stream: Stream): number
@@ -123,12 +146,12 @@ local function faulted(options: Options): string | nil
   return nil
 end
 
-function generate.text(
+function generate.open(
   model: compute.Model,
   tokens: tokenizer.Tokenizer,
   prompt: string,
   options: Options
-): string | nil, string | nil, integer | nil, {integer} | nil
+): generate.Run | nil, string | nil
   local fault = faulted(options)
   if not (fault is nil) then
     return nil, fault
@@ -157,47 +180,105 @@ function generate.text(
     end_id = tokens.end_id
   end
 
-  local scores: {number} | nil = nil
-  local line: string | nil = nil
-  for index = start + 1, #ids do
-    scores, line = model:forward(ids[index], index - 1)
-    if scores is nil then
-      return nil, line
-    end
-  end
+  local progress: Progress = {
+    model = model,
+    tokens = tokens,
+    ids = ids,
+    end_id = end_id,
+    max_tokens = options.max_tokens,
+    options = options,
+    stream = {state = options.seed % STATE_MODULUS},
+    position = start,
+    index = start + 1,
+    scores = nil,
+  }
 
-  local stream: Stream = {state = options.seed % STATE_MODULUS}
   local produced: {integer} = {}
-  local position = #ids
-  while #produced < options.max_tokens do
-    local token_id = chosen(scores as {number}, options, stream)
-    if token_id == end_id then
-      break
+
+  local function step(self: generate.Run): string | nil, string | nil
+    if self.done then
+      return nil, nil
     end
+
+    if progress.index <= #progress.ids then
+      local scores, forward_line = progress.model:forward(
+        progress.ids[progress.index], progress.position
+      )
+      if scores is nil then
+        self.done = true
+        self.failure = forward_line
+        return nil, forward_line
+      end
+      progress.scores = scores
+      progress.position = progress.position + 1
+      progress.index = progress.index + 1
+      return nil, nil
+    end
+
+    local scores = progress.scores as {number}
+    local token_id = chosen(scores, progress.options, progress.stream)
+    if token_id == progress.end_id then
+      self.done = true
+      return nil, nil
+    end
+
     produced[#produced + 1] = token_id
-    local piece, piece_line = tokens:decode({token_id})
+    local piece, piece_line = progress.tokens:decode({token_id})
     if piece is nil then
+      self.done = true
+      self.failure = piece_line
       return nil, piece_line
     end
-    local on_token = options.on_token
-    if not (on_token is nil) then
-      on_token(piece)
+    if #produced >= progress.max_tokens then
+      self.done = true
+      return piece, nil
     end
-    if #produced >= options.max_tokens then
-      break
+
+    local scores_next, next_line = progress.model:forward(
+      token_id, progress.position
+    )
+    if scores_next is nil then
+      self.done = true
+      self.failure = next_line
+      return nil, next_line
     end
-    scores, line = model:forward(token_id, position)
-    if scores is nil then
-      return nil, line
-    end
-    position = position + 1
+    progress.scores = scores_next
+    progress.position = progress.position + 1
+    return piece, nil
   end
 
-  local answer, decode_line = tokens:decode(produced)
+  local run: generate.Run = {
+    done = false,
+    failure = nil,
+    produced = produced,
+    step = step,
+  }
+  return run, nil
+end
+
+function generate.text(
+  model: compute.Model,
+  tokens: tokenizer.Tokenizer,
+  prompt: string,
+  options: Options
+): string | nil, string | nil, integer | nil, {integer} | nil
+  local run, open_line = generate.open(model, tokens, prompt, options)
+  if run is nil then
+    return nil, open_line
+  end
+
+  while not run.done do
+    local _, step_line = run.step(run)
+    if not (step_line is nil) then
+      return nil, step_line
+    end
+  end
+
+  local answer, decode_line = tokens:decode(run.produced)
   if answer is nil then
     return nil, decode_line
   end
-  return answer, nil, #produced, produced
+  return answer, nil, #run.produced, run.produced
 end
 
 return generate

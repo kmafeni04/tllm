@@ -10,8 +10,8 @@ prompt and get an answer back, so nothing in the project can be shown to anyone,
 of the next spec has nothing to call. The sampler, too, does not exist anywhere: `compute` only
 has `top_token`, which reads the highest score and is not exported from the model.
 
-This spec adds one module, `tllm.generate`, with one operation: `text(model, tokenizer, prompt,
-options)` encodes the prompt, forwards every prompt id at its own position, samples the next token
+This spec adds one module, `tllm.generate`, whose first operation, `text(model, tokenizer, prompt,
+options)`, encodes the prompt, forwards every prompt id at its own position, samples the next token
 from the scores the last forward returned, forwards that token at the next position and samples
 again, until the token count is reached or an end-of-text id is sampled, and decodes the sampled
 ids into the string it returns. The prompt text is never part of that string: the caller already
@@ -41,7 +41,6 @@ local record generate
     top_k: integer | nil
     end_id: integer | nil
     start: integer | nil
-    on_token: function(string) | nil
   end
 
   text: function(
@@ -70,7 +69,7 @@ a sample takes are worked out by hand from `15/T-001`'s scores.
 
 ## Functional requirements
 
-- FR-001 (US-001) WHEN `generate.text(model, tokenizer, prompt, options)` is called with options FR-009 accepts, THE SYSTEM SHALL return the ids it sampled decoded by `tokenizer:decode` as the first value, nil as the second, the number of ids it sampled as the third, and the ids it sampled in the order it appended them as the fourth, nil when it returns nil, holding no part of the prompt, and report each token to `on_token` as it is appended when the options carry one. Its tests build their models with `f32`, so the numbers and reply they record stand.
+- FR-001 (US-001) WHEN `generate.text(model, tokenizer, prompt, options)` is called with options FR-009 accepts, THE SYSTEM SHALL return the ids it sampled decoded by `tokenizer:decode` as the first value, nil as the second, the number of ids it sampled as the third, and the ids it sampled in the order it appended them as the fourth, nil when it returns nil, holding no part of the prompt. Its tests build their models with `f32`, so the numbers and reply they record stand.
 - FR-002 (US-002) WHEN a call begins, THE SYSTEM SHALL take the prompt's ids from `tokenizer:encode(prompt)`, call `model:forward` with each id from the options' `start` on and its index as the position, in list order, and take the first sampled token from the scores the last of those calls returns, `start` absent being 0, so a call may begin at a position the model has already reached.
 - FR-003 (US-002) WHEN a token is sampled that is neither the end id nor the last `max_tokens` allows, THE SYSTEM SHALL call `model:forward` with it at the next position and sample the next token from the scores that call returns.
 - FR-004 (US-003) WHEN `temperature` is absent or zero, THE SYSTEM SHALL take the sampled token as the id of the highest score, the lowest id among equal highest scores.

@@ -83,14 +83,18 @@ start: integer | nil
 ## Functional requirements
 
 - FR-001 (US-001) WHEN a body's `session_id` is a string and the server holds a conversation under
-  that name whose stored ids are the prompt's first ids and fewer than all of them, THE SYSTEM SHALL
-  forward only the prompt's ids past that length, each at its own position, and, when the reply is
-  not streamed, take `usage`'s `prompt_tokens_details.cached_tokens` as that length.
-- FR-002 (US-001) WHEN a turn carrying a `session_id` completes with a generation that returned
-  text, the empty string included, streamed or not, THE SYSTEM SHALL store under that name the
-  prompt's ids followed by every sampled id the call forwarded, the last sampled id of a turn
-  stopped by the budget not being stored because no forward took its position, and report that
-  conversation through `serve.session_of` with a `length` counting those ids.
+  that name whose stored ids are the prompt's first ids, fewer than all of them, and which no live
+  turn holds, THE SYSTEM SHALL forward only the prompt's ids past that length, each at its own
+  position, and, when the reply is not streamed, take `usage`'s
+  `prompt_tokens_details.cached_tokens` as that length. A stored conversation is in flight from
+  the moment `prepared` hands its model to a turn until that turn stores it, discards it, or is
+  refused by `25/FR-013`, and a turn naming it during that time is prepared as FR-003 does.
+- FR-002 (US-001) WHEN a turn carrying a `session_id` completes with a run that ended without a
+  failure line, streamed or not, THE SYSTEM SHALL store under that name the prompt's ids followed
+  by every sampled id the run forwarded, the last sampled id of a turn stopped by the budget not
+  being stored because no forward took its position, and report that conversation through
+  `serve.session_of` with a `length` counting those ids; a streamed turn stores when `serve.step`
+  ends it, `25/FR-009`'s case.
 - FR-003 (US-001) WHEN a turn asks for a `session_id` the server holds no conversation under, THE
   SYSTEM SHALL build that conversation a model and read the whole prompt from position zero, taking
   `cached_tokens` as 0 when the reply is not streamed.
@@ -123,8 +127,6 @@ start: integer | nil
 
 - No disk: a conversation lives in the server's memory and is gone when the process ends, which is
   `27`.
-- No two turns at once: requests are answered one at a time as today, and a second client waits, which
-  is `25`, where a scheduler steps stored conversations in turn, one token each.
 - No rewind and no partial reuse: a conversation is used whole or discarded whole, and a model is
   never cut back to an earlier position.
 
@@ -186,9 +188,10 @@ start: integer | nil
   that second body with `"stream":true` added gives a producer that writes only the `role` payload
   and leaves `session_of(server, "s")` nil.
 - T-005 (FR-002): `a streamed turn stores its context too`, proves on `18/T-001`'s fixture that
-  `serve.stream` on T-001's first body with `"stream":true` added answers a producer, that driving
-  it to completion leaves `session_of(server, "s").length` at 2, and that T-001's second body,
-  naming `s` and carrying `"stream":false`, then reports `cached_tokens` 2.
+  `serve.stream` on T-001's first body with `"stream":true` added answers a producer, that resuming
+  that producer once and then driving `serve.step` to no live turns leaves
+  `session_of(server, "s").length` at 2, and that T-001's second body, naming `s` and carrying
+  `"stream":false`, then reports `cached_tokens` 2.
 
 ## Open questions
 

@@ -66,9 +66,9 @@
 		},
 		"tltp": {
 			"branch": "main",
-			"commit": "ecd39e4171937b488a92a173589d9fe407449366",
+			"commit": "308e1a7d31207bd7308899fb89c16aa7a40a48bd",
 			"git": "https://codeberg.org/kmafeni04/tltp.git",
-			"sha256": "f6f2ff5db6f274863bef0c91f17ef89abf19f63f44edc6f60aeed8c6f6e9549a"
+			"sha256": "1d7aadeb40f3b0c15737c208c5a55f434f430b3b50cba06efc65376880b61d23"
 		},
 		"utf8": {
 			"branch": "master",
@@ -90,6 +90,6 @@
 			"sha256": "7816c24519cf959658d29cb9625777febb812422e6fd312884d131a44025630a"
 		}
 	},
-	"manifestHash": "d199d4da90927c65",
+	"manifestHash": "50fdb0631628f561",
 	"version": "1"
 }
