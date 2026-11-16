@@ -136,10 +136,13 @@ end
   `f32` wherever they pin a reply.
 - FR-010 (US-005) WHEN `build` is called, THE SYSTEM SHALL load the file's tokenizer with
   `tokenizer.load` and hold it on the model it keeps, returning nil and that loader's line as its
-  second value when it refuses.
+  second value when it refuses; for an endpoint whose `workers` is more than one, `build` loads no
+  tokenizer into that process and holds none on the server it returns.
 - FR-011 (US-005) WHEN `build` is called, THE SYSTEM SHALL load the compute backend with
   `compute.load` and hold it on the model it keeps, returning nil and that loader's line when it
-  refuses.
+  refuses; for an endpoint whose `workers` is more than one, `build` loads no compute backend into
+  that process and holds none on the server it returns, except the one `28/FR-011` reads `memory`
+  from, which it drops before returning.
   Not testable: `build` calls `compute.load` with no argument, so whether it refuses depends on the
   host's libraries; the field it fills is proven by every case that generates.
 - FR-012 (US-005) IF `tokenizer:encode` for the rendered prompt, `chat.render`, a reservation

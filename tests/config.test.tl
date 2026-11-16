@@ -500,3 +500,39 @@ test.it(
     cleanup({xdg})
   end
 )
+
+test.it(
+  "the worker count comes from config",
+  function()
+    local dir = temp_dir()
+    local model_path = model_file(dir)
+    local with_three = dir .. "/three.json"
+    fs.write(
+      with_three, '{"workers":3,"models":{"m":{"path":"' .. model_path .. '"}}}'
+    )
+    local three = run({"serve", "m", "--config", with_three}, {})
+    test.equal(three.code, 0)
+    test.equal(three.starts, 1)
+    test.equal((three.endpoint as serve.Endpoint).workers, 3)
+
+    local without = dir .. "/without.json"
+    fs.write(without, config_text(model_path, ""))
+    local one = run({"serve", "m", "--config", without}, {})
+    test.equal(one.code, 0)
+    test.equal(one.starts, 1)
+    test.equal((one.endpoint as serve.Endpoint).workers, 1)
+
+    local bad_path = dir .. "/bad-workers.json"
+    local bad: {string} = {"0", "-1", "1.5", '"2"', "true"}
+    for _, value in ipairs(bad) do
+      fs.write(bad_path, config_text(model_path, '"workers":' .. value))
+      local refused = run({"serve", "m", "--config", bad_path}, {})
+      test.equal(refused.code, 1, value)
+      test.equal(#refused.err, 1, value)
+      test.includes(refused.err[1], "workers", value)
+      test.equal(refused.starts, 0, value)
+    end
+
+    cleanup({dir})
+  end
+)

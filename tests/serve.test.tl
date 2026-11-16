@@ -1,11 +1,26 @@
 local ffi = require("ffi")
 local fs = require("fs")
 local test = require("lde-test")
+local process = require("process")
 local cli = require("tllm.cli")
 local compute = require("tllm.compute")
+local ggml = require("tllm.ggml")
+local gguf = require("tllm.gguf")
 local serve = require("tllm.serve")
 local tokenizer = require("tllm.tokenizer")
 local tltp = require("tltp")
+
+local record LibC
+  usleep: function(integer): integer
+  kill: function(integer, integer): integer
+end
+
+ffi.cdef(
+  [[
+int usleep(unsigned int usec);
+int kill(int pid, int sig);
+]]
+)
 
 local record HealthBody
   status: string
@@ -350,7 +365,8 @@ local function build(
   sessions?: integer,
   cache?: compute.CacheType,
   context_path?: string,
-  context_bytes?: integer
+  context_bytes?: integer,
+  workers?: integer
 ): tltp.Server
   local server, failure = serve.build(
     {
@@ -362,6 +378,7 @@ local function build(
       kv_cache = cache or "f32",
       context_path = context_path,
       context_bytes = context_bytes,
+      workers = workers,
     }
   )
   test.equal(failure, nil, file_path)
@@ -2028,5 +2045,572 @@ test.it(
       local reply = answered(again, extended_with(id))
       test.equal(reply.usage.prompt_tokens_details.cached_tokens, 2, id)
     end
+  end
+)
+
+--- pools of worker processes
+
+local C = ffi.C as LibC
+
+local POOL_BUDGET = 1048576
+
+local QUICK_BODY = '{"messages":[{"role":"user","content":"a"}],"max_tokens":2}'
+
+local SESSION_S = '{"messages":[{"role":"user","content":"a"}],"max_tokens":2,"stream":true,"session_id":"s"}'
+local SESSION_T = '{"messages":[{"role":"user","content":"a"}],"max_tokens":2,"stream":true,"session_id":"t"}'
+local SESSION_U = '{"messages":[{"role":"user","content":"a"}],"max_tokens":2,"stream":true,"session_id":"u"}'
+local PLAIN_S = '{"messages":[{"role":"user","content":"a"}],"max_tokens":2,"session_id":"s"}'
+local THREE_S = '{"messages":[{"role":"user","content":"a"},{"role":"assistant","content":"a"},{"role":"user","content":"a"}],"max_tokens":2,"stream":true,"session_id":"s"}'
+local THREE_PLAIN_S = '{"messages":[{"role":"user","content":"a"},{"role":"assistant","content":"a"},{"role":"user","content":"a"}],"max_tokens":2,"session_id":"s"}'
+local FREE_STREAM = '{"messages":[{"role":"user","content":"a"}],"max_tokens":2,"stream":true}'
+
+local function pause()
+  C.usleep(2000)
+end
+
+local function pool_build(file_path: string, context: string): tltp.Server
+  return build(file_path, "m", 4, "f32", context, POOL_BUDGET, 2)
+end
+
+local function workers_of(server: tltp.Server): {serve.Worker}
+  return (serve.pool_of(server) as serve.Pool).workers
+end
+
+local function holder(server: tltp.Server, id: string): serve.Worker | nil
+  for _, worker in ipairs(workers_of(server)) do
+    for _, held_id in ipairs(worker.sessions) do
+      if held_id == id then
+        return worker
+      end
+    end
+  end
+  return nil
+end
+
+local function driven_pool(server: tltp.Server)
+  local tries = 0
+  while serve.step(server) > 0 do
+    tries = tries + 1
+    if tries > 5000 then
+      test.equal(tries, 0, "the pool still held live turns")
+      return
+    end
+    pause()
+  end
+end
+
+local function streamed_on(server: tltp.Server, body: string): {string}
+  local _, stream_fn = serve.stream(server, body)
+  local watcher = begun(stream_fn as tltp.StreamFn, nil, "X")
+  while serve.step(server) > 0 do
+  end
+  return watcher.payloads
+end
+
+local function in_process_payloads(bytes: string, body: string): {string}
+  return streamed_on(build(fixture(bytes), "m"), body)
+end
+
+local function finished_watch(watch: Watcher): boolean
+  return #watch.payloads > 0 and watch.payloads[#watch.payloads] == "[DONE]"
+end
+
+-- the same events, however the encoder ordered the keys of each one
+local function same_payloads(got: {string}, expected: {string})
+  test.equal(#got, #expected)
+  test.deepEqual(events_of(got), events_of(expected))
+  test.equal(got[#got], expected[#expected])
+end
+
+local function gone(pid: integer): boolean
+  local line = fs.read("/proc/" .. tostring(pid) .. "/stat")
+  if line is nil then
+    return true
+  end
+  return line:match("%) (%a)") == "Z"
+end
+
+local function killed(pid: integer)
+  local tries = 0
+  while not gone(pid) do
+    tries = tries + 1
+    if tries > 5000 then
+      test.equal(tries, 0, "the process did not die")
+      return
+    end
+    pause()
+  end
+end
+
+test.it(
+  "two workers answer at once and the parent holds no model",
+  function()
+    local bytes = meta_bytes(t001_meta(), t001_entries())
+    local single = fixture(bytes)
+    local plain = build(single, "m")
+    test.equal(serve.pool_of(plain), nil)
+    local model = serve.model_of(plain) as serve.Model
+    test.equal(model.path, single)
+    local answer = serve.answer(plain, QUICK_BODY)
+    test.equal(answer.status, "OK")
+    test.equal(
+      (tltp.json_decode(answer.body) as ChatReply).choices[1].message.content,
+      "aa"
+    )
+    test.equal(serve.pool_of(plain), nil)
+
+    local copy = fixture(bytes)
+    local server = pool_build(copy, temp_dir())
+    test.equal(serve.model_of(server), nil)
+    test.equal(serve.session_of(server, "s"), nil)
+    local pool = serve.pool_of(server) as serve.Pool
+    test.equal(#pool.workers, 2)
+    test.notEqual(pool.workers[1].slot, pool.workers[2].slot)
+    test.notEqual(pool.workers[1].pid, pool.workers[2].pid)
+    test.equal(#pool.workers[1].sessions, 0)
+    test.equal(#pool.workers[2].sessions, 0)
+    local maps = fs.read("/proc/self/maps") as string
+    test.equal(maps:find(copy, 1, true), nil)
+
+    local reference = build(fixture(bytes), "m")
+    local s_expected = streamed_on(reference, SESSION_S)
+    local t_expected = streamed_on(reference, SESSION_T)
+
+    local _, s_fn = serve.stream(server, SESSION_S)
+    local s_watch = begun(s_fn as tltp.StreamFn, nil, "S")
+    local _, t_fn = serve.stream(server, SESSION_T)
+    local t_watch = begun(t_fn as tltp.StreamFn, nil, "T")
+    driven_pool(server)
+    same_payloads(s_watch.payloads, s_expected)
+    same_payloads(t_watch.payloads, t_expected)
+    for _, worker in ipairs(workers_of(server)) do
+      test.equal(#worker.sessions, 1)
+      test.truthy(worker.sessions[1] == "s" or worker.sessions[1] == "t")
+    end
+
+    local expected = serve.answer(reference, PLAIN_S)
+    local got = serve.answer(server, PLAIN_S)
+    test.equal(got.status, expected.status)
+    test.deepEqual(
+      tltp.json_decode(got.body) as ChatReply,
+      tltp.json_decode(expected.body) as ChatReply
+    )
+
+    local _, live_fn = serve.stream(server, FREE_STREAM)
+    begun(live_fn as tltp.StreamFn, nil, "L")
+    local health = server:mock_request("/health")
+    test.equal(health.status, "OK")
+    test.deepEqual(
+      tltp.json_decode(health.body) as HealthBody, {status = "ok", model = "m"}
+    )
+    local missing = server:mock_request("/other")
+    test.equal(missing.status, "NotFound")
+    test.deepEqual(
+      tltp.json_decode(missing.body) as ErrorBody,
+      {error = {message = "not found", type = "not_found"}}
+    )
+    driven_pool(server)
+    serve.stop(server)
+  end
+)
+
+test.it(
+  "a session goes back to the worker that served it",
+  function()
+    local bytes = meta_bytes(t001_meta(), t001_entries())
+    local server = pool_build(fixture(bytes), temp_dir())
+
+    local _, first_fn = serve.stream(server, SESSION_S)
+    begun(first_fn as tltp.StreamFn, nil, "S")
+    driven_pool(server)
+    local recorded = holder(server, "s")
+    test.truthy(recorded)
+    local pid = (recorded as serve.Worker).pid
+
+    local _, second_fn = serve.stream(server, SESSION_T)
+    begun(second_fn as tltp.StreamFn, nil, "T")
+    driven_pool(server)
+    local still = holder(server, "s")
+    test.truthy(still)
+    test.equal((still as serve.Worker).pid, pid)
+
+    local reference = build(fixture(bytes), "m")
+    streamed_on(reference, SESSION_S)
+    local expected = streamed_on(reference, THREE_S)
+
+    local _, again_fn = serve.stream(server, SESSION_S)
+    local again = begun(again_fn as tltp.StreamFn, nil, "A")
+    local _, three_fn = serve.stream(server, THREE_S)
+    local three_watch = begun(three_fn as tltp.StreamFn, nil, "B")
+    test.equal(serve.step(server), 2)
+    test.equal(#three_watch.payloads, 0)
+    local tries = 0
+    while not finished_watch(again) do
+      serve.step(server)
+      test.equal(
+        #three_watch.payloads, 0, "a session waited for its own worker"
+      )
+      tries = tries + 1
+      if tries > 5000 then
+        test.equal(tries, 0, "the first turn did not end")
+        break
+      end
+      pause()
+    end
+    driven_pool(server)
+    same_payloads(three_watch.payloads, expected)
+    local served_by = holder(server, "s")
+    test.truthy(served_by)
+    test.equal((served_by as serve.Worker).pid, pid)
+
+    local _, free_fn = serve.stream(server, FREE_STREAM)
+    begun(free_fn as tltp.StreamFn, nil, "F")
+    driven_pool(server)
+    local kept = holder(server, "s")
+    test.truthy(kept)
+    test.equal((kept as serve.Worker).pid, pid)
+
+    local many = build(
+      fixture(bytes), "m", 2, "f32", temp_dir(), POOL_BUDGET, 2
+    )
+    for _, id in ipairs({"a", "b", "c", "d", "e", "f"}) do
+      local body = '{"messages":[{"role":"user","content":"a"}],"max_tokens":2,'
+        .. '"stream":true,"session_id":"'
+        .. id
+        .. '"}'
+      local _, fn = serve.stream(many, body)
+      begun(fn as tltp.StreamFn, nil, id)
+    end
+    driven_pool(many)
+    for _, worker in ipairs(workers_of(many)) do
+      test.truthy(#worker.sessions <= 2)
+    end
+    serve.stop(many)
+    serve.stop(server)
+  end
+)
+
+test.it(
+  "a third request waits for a free worker",
+  function()
+    local bytes = meta_bytes(t001_meta(), t001_entries())
+    local server = pool_build(fixture(bytes), temp_dir())
+
+    local _, s_fn = serve.stream(server, SESSION_S)
+    local s_watch = begun(s_fn as tltp.StreamFn, nil, "S")
+    local _, t_fn = serve.stream(server, SESSION_T)
+    local t_watch = begun(t_fn as tltp.StreamFn, nil, "T")
+    local _, u_fn = serve.stream(server, SESSION_U)
+    local u_watch = begun(u_fn as tltp.StreamFn, nil, "U")
+
+    local tries = 0
+    while not (finished_watch(s_watch) or finished_watch(t_watch)) do
+      serve.step(server)
+      test.equal(#u_watch.payloads, 0, "the third request emitted while held")
+      tries = tries + 1
+      if tries > 5000 then
+        test.equal(tries, 0, "the first two turns did not end")
+        break
+      end
+      pause()
+    end
+    driven_pool(server)
+    same_payloads(u_watch.payloads, in_process_payloads(bytes, SESSION_U))
+    serve.stop(server)
+  end
+)
+
+test.it(
+  "a worker that dies loses one turn and keeps the session",
+  function()
+    local bytes = meta_bytes(t001_meta(), t001_entries())
+    local context = temp_dir()
+    local server = pool_build(fixture(bytes), context)
+
+    local _, s_fn = serve.stream(server, SESSION_S)
+    begun(s_fn as tltp.StreamFn, nil, "S")
+    driven_pool(server)
+
+    local _, three_fn = serve.stream(server, THREE_S)
+    local watch = begun(three_fn as tltp.StreamFn, nil, "T")
+    local tries = 0
+    while #watch.payloads < 2 do
+      serve.step(server)
+      tries = tries + 1
+      if tries > 5000 then
+        test.equal(tries, 0, "the turn never started")
+        break
+      end
+      pause()
+    end
+    test.truthy(#watch.payloads >= 2)
+
+    local victim = holder(server, "s")
+    test.truthy(victim)
+    local killed_pid = (victim as serve.Worker).pid
+    C.kill(killed_pid, 9)
+    killed(killed_pid)
+    local before = #watch.payloads
+    driven_pool(server)
+    test.equal(#watch.payloads, before)
+
+    local after = workers_of(server)
+    test.equal(#after, 2)
+    for _, worker in ipairs(after) do
+      test.notEqual(worker.pid, killed_pid)
+    end
+    test.equal(holder(server, "s"), nil)
+
+    local recovered = serve.answer(server, THREE_PLAIN_S)
+    test.equal(recovered.status, "OK")
+    local decoded = tltp.json_decode(recovered.body) as ChatReply
+    test.equal(decoded.usage.prompt_tokens_details.cached_tokens, 2)
+    local expected = serve.answer(build(fixture(bytes), "m"), THREE_PLAIN_S)
+    test.equal(
+      decoded.choices[1].message.content,
+      (tltp.json_decode(expected.body) as ChatReply).choices[1].message.content
+    )
+
+    local copy = fixture(bytes)
+    local second = pool_build(copy, temp_dir())
+    local doomed = workers_of(second)[1].pid
+    fs.write(copy, "this is not a gguf file")
+    C.kill(doomed, 9)
+    killed(doomed)
+    tries = 0
+    while #workers_of(second) > 1 do
+      serve.step(second)
+      tries = tries + 1
+      if tries > 5000 then
+        test.equal(tries, 0, "the replacement never failed")
+        break
+      end
+      pause()
+    end
+    test.equal(#workers_of(second), 1)
+    local surviving = workers_of(second)[1].pid
+    for _ = 1, 100 do
+      serve.step(second)
+      pause()
+    end
+    test.equal(#workers_of(second), 1)
+    test.equal(workers_of(second)[1].pid, surviving)
+
+    serve.stop(second)
+    serve.stop(server)
+  end
+)
+
+test.it(
+  "a stop and a loop that ends leave nothing behind",
+  function()
+    local bytes = meta_bytes(t001_meta(), t001_entries())
+    local server = pool_build(fixture(bytes), temp_dir())
+    local pool = serve.pool_of(server) as serve.Pool
+    test.truthy(fs.isdir(pool.dir))
+    local pids: {integer} = {}
+    for _, worker in ipairs(pool.workers) do
+      pids[#pids + 1] = worker.pid
+    end
+    serve.stop(server)
+    test.equal(fs.isdir(pool.dir), false)
+    for _, pid in ipairs(pids) do
+      test.equal(fs.exists("/proc/" .. tostring(pid)), false)
+    end
+    test.equal(serve.pool_of(server), nil)
+
+    local lines: {string} = {}
+    local recorded: {integer} = {}
+    local dirs: {string} = {}
+    local function watching(
+      name: string, args: {string} | nil, opts: process.Options | nil
+    ): process.Child | nil, string | nil
+      local child, failure = process.spawn(name, args, opts)
+      if child is nil then
+        return nil, failure
+      end
+      recorded[#recorded + 1] = child.pid
+      dirs[#dirs + 1] = (args as {string})[3]
+      return child, nil
+    end
+    local code = serve.start(
+      {
+        host = "192.0.2.1",
+        port = 9599,
+        name = "m",
+        path = fixture(bytes),
+        sessions = 4,
+        kv_cache = "f32",
+        context_path = temp_dir(),
+        context_bytes = POOL_BUDGET,
+        workers = 2,
+      },
+      function(line: string) lines[#lines + 1] = line end,
+      watching
+    )
+    test.equal(code, 1)
+    test.equal(#lines, 1)
+    test.includes(lines[1], "BIND")
+    test.equal(#recorded, 2)
+    for _, pid in ipairs(recorded) do
+      test.equal(fs.exists("/proc/" .. tostring(pid)), false)
+    end
+    test.equal(fs.isdir(dirs[1]), false)
+  end
+)
+
+test.it(
+  "a pool that cannot start leaves nothing behind",
+  function()
+    local bytes = meta_bytes(t001_meta(), t001_entries())
+
+    local calls = 0
+    local function unused(
+      _name: string, _args: {string} | nil, _opts: process.Options | nil
+    ): process.Child | nil, string | nil
+      calls = calls + 1
+      return nil, "unused"
+    end
+    local built, line = serve.build(
+      {
+        host = "127.0.0.1",
+        port = 9090,
+        name = "m",
+        path = fixture(bytes),
+        sessions = 4,
+        kv_cache = "f32",
+        workers = 2,
+      },
+      unused
+    )
+    test.equal(built, nil)
+    test.includes(line as string, "workers")
+    test.includes(line as string, "context")
+    test.equal(calls, 0)
+
+    local no_width = meta_bytes(
+      without_meta(t001_meta(), "qwen35moe.embedding_length"), t001_entries()
+    )
+    local pids: {integer} = {}
+    local function recording(
+      name: string, args: {string} | nil, opts: process.Options | nil
+    ): process.Child | nil, string | nil
+      local child, failure = process.spawn(name, args, opts)
+      if not (child is nil) then
+        pids[#pids + 1] = child.pid
+      end
+      return child, failure
+    end
+    local refused_build, reason = serve.build(
+      {
+        host = "127.0.0.1",
+        port = 9090,
+        name = "m",
+        path = fixture(no_width),
+        sessions = 4,
+        kv_cache = "f32",
+        context_path = temp_dir(),
+        context_bytes = POOL_BUDGET,
+        workers = 2,
+      },
+      recording
+    )
+    test.equal(refused_build, nil)
+    test.includes(reason as string, "slot 0")
+    test.includes(reason as string, "build")
+    test.truthy(#pids > 0)
+    for _, pid in ipairs(pids) do
+      test.equal(fs.exists("/proc/" .. tostring(pid)), false)
+    end
+
+    local function refusing(
+      _name: string, _args: {string} | nil, _opts: process.Options | nil
+    ): process.Child | nil, string | nil
+      return nil, "no process today"
+    end
+    local missing, why = serve.build(
+      {
+        host = "127.0.0.1",
+        port = 9090,
+        name = "m",
+        path = fixture(bytes),
+        sessions = 4,
+        kv_cache = "f32",
+        context_path = temp_dir(),
+        context_bytes = POOL_BUDGET,
+        workers = 2,
+      },
+      refusing
+    )
+    test.equal(missing, nil)
+    test.includes(why as string, "slot 0")
+    test.includes(why as string, "no process today")
+  end
+)
+
+local memory_backend = compute.load() as compute.Backend
+local device_free = memory_backend:memory()
+
+local function on_device(name: string, body: function())
+  if device_free is nil then
+    test.skip(name .. " (no CUDA device)", function() end)
+  else
+    test.it(name, body)
+  end
+end
+
+on_device(
+  "a pool the card cannot hold is refused at start",
+  function()
+    local bytes = meta_bytes(t001_meta(), t001_entries())
+    local copy = fixture(bytes)
+    local info = gguf.read(copy) as gguf.Info
+    local each = 0
+    for _, tensor in ipairs(info.tensors) do
+      local kind = ggml.type_of(tensor.type_code) as ggml.Type
+      local first = 1
+      if #tensor.dims > 0 then
+        first = tensor.dims[1]
+      end
+      local rest = 1
+      for index = 2, #tensor.dims do
+        rest = rest * tensor.dims[index]
+      end
+      each = each + math.floor(
+        first / kind.block_elements
+      ) * kind.block_bytes * rest
+    end
+    test.truthy(each > 0)
+    local free = device_free as integer
+    local count = math.floor(free / each) + 1
+
+    local calls = 0
+    local function unused(
+      _name: string, _args: {string} | nil, _opts: process.Options | nil
+    ): process.Child | nil, string | nil
+      calls = calls + 1
+      return nil, "unused"
+    end
+    local refused_build, line = serve.build(
+      {
+        host = "127.0.0.1",
+        port = 9090,
+        name = "m",
+        path = copy,
+        sessions = 4,
+        kv_cache = "f32",
+        context_path = temp_dir(),
+        context_bytes = POOL_BUDGET,
+        workers = count,
+      },
+      unused
+    )
+    test.equal(refused_build, nil)
+    local why = line as string
+    test.includes(why, tostring(count))
+    local shown = tonumber(why:match("(%d+) free"))
+    test.truthy(shown, why)
+    test.truthy((shown as number) <= free)
+    test.equal(calls, 0)
   end
 )

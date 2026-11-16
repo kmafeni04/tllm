@@ -1,7 +1,10 @@
 local fs = require("fs")
+local process = require("process")
 local chat = require("tllm.chat")
 local compute = require("tllm.compute")
 local generate = require("tllm.generate")
+local ggml = require("tllm.ggml")
+local gguf = require("tllm.gguf")
 local tokenizer = require("tllm.tokenizer")
 local weights = require("tllm.weights")
 local tltp = require("tltp")
@@ -28,6 +31,18 @@ local record serve
     kv_cache: compute.CacheType | nil
     context_path: string | nil
     context_bytes: integer | nil
+    workers: integer | nil
+  end
+
+  record Worker
+    slot: integer
+    pid: integer
+    sessions: {string}
+  end
+
+  record Pool
+    dir: string
+    workers: {Worker}
   end
 
   record Session
@@ -43,11 +58,17 @@ local record serve
   end
 
   model_of: function(tltp.Server): Model | nil
-  build: function(Endpoint): tltp.Server | nil, string | nil
-  start: function(Endpoint, function(string)): integer
+  build: function(
+    endpoint: Endpoint, spawn?: process.Spawn
+  ): tltp.Server | nil, string | nil
+  start: function(
+    endpoint: Endpoint, write_err: function(string), spawn?: process.Spawn
+  ): integer
   answer: function(tltp.Server, string): Reply
   stream: function(tltp.Server, string): tltp.Response, tltp.StreamFn | nil
   session_of: function(tltp.Server, string): Session | nil
+  pool_of: function(tltp.Server): Pool | nil
+  stop: function(tltp.Server)
   step: function(tltp.Server): integer
   round: function(tltp.Server): string | nil
 end
@@ -111,6 +132,57 @@ local record Turn
   waiting: boolean
 end
 
+local record PoolTurn
+  body: string
+  session_id: string | nil
+  emit: tltp.EmitFn | nil
+  live: boolean
+  assigned: boolean
+end
+
+local record PoolWorker
+  slot: integer
+  pid: integer
+  sessions: {string}
+  limit: integer
+  dir: string
+  child: process.Child
+  ready: boolean
+  replacement: boolean
+  turn: PoolTurn | nil
+  job: string | nil
+  kind: string | nil
+  offset: integer
+end
+
+local record PoolState
+  dir: string
+  workers: {PoolWorker}
+  turns: {PoolTurn}
+  next_turn: integer
+  watcher: fs.Watcher | nil
+  spawn: process.Spawn
+  endpoint_json: string
+  limit: integer
+end
+
+local record PoolHeader
+  kind: string
+  status: tltp.Status | nil
+  body: string | nil
+end
+
+local record EndpointFields
+  host: string
+  port: integer
+  name: string
+  path: string
+  sessions: integer
+  kv_cache: compute.CacheType | nil
+  context_path: string | nil
+  context_bytes: integer | nil
+end
+
 local DEFAULT_BUDGET: integer = 256
 local CHAT_PATH = "/v1/chat/completions"
 local CONTEXT_SUFFIX = ".context"
@@ -142,6 +214,7 @@ local stores: {tltp.Server: Store} = {}
 local turns: {tltp.Server: {Turn}} = {}
 local reservations: {tltp.Server: {string: boolean}} = {}
 local held: {tltp.Server: {string: boolean}} = {}
+local pools: {tltp.Server: PoolState} = {}
 
 function serve.model_of(server: tltp.Server): serve.Model | nil
   return models[server]
@@ -999,7 +1072,477 @@ local function admit(server: tltp.Server, turn: Turn): boolean
   return true
 end
 
+-- a wait that ends even when a dying worker writes no file
+local function pool_pause(state: PoolState)
+  local watcher = state.watcher
+  if not (watcher is nil) then
+    watcher:poll()
+  end
+  local until_time = os.clock() + 0.002
+  while os.clock() < until_time do
+  end
+end
+
+local function clear_files(dir: string)
+  local next_entry = fs.readdir(dir)
+  if next_entry is nil then
+    return
+  end
+  while true do
+    local found = next_entry()
+    if found is nil then
+      break
+    end
+    local entry = found as fs.DirEntry
+    if entry.type ~= "dir" then
+      fs.delete(dir .. "/" .. entry.name)
+    end
+  end
+end
+
+-- process.Child:poll gives nil for a live child and for one a signal ended,
+-- so the pid's own state is the other half of the answer
+local function ended(worker: PoolWorker): boolean
+  local code = worker.child:poll()
+  if not (code is nil) then
+    return true
+  end
+  local text = fs.read("/proc/" .. tostring(worker.pid) .. "/stat")
+  if text is nil then
+    return process.platform == "linux"
+  end
+  return text:match("%) (%a)") == "Z"
+end
+
+local function failed_line(worker: PoolWorker): string | nil
+  local path = worker.dir .. "/failed"
+  if not fs.isfile(path) then
+    return nil
+  end
+  local text = fs.read(path)
+  if text is nil then
+    return "the worker gave no line"
+  end
+  return (text:gsub("%s+$", ""))
+end
+
+local function worker_holds(worker: PoolWorker, id: string): boolean
+  for _, held_id in ipairs(worker.sessions) do
+    if held_id == id then
+      return true
+    end
+  end
+  return false
+end
+
+local function served_by(worker: PoolWorker, id: string)
+  for index = #worker.sessions, 1, -1 do
+    if worker.sessions[index] == id then
+      table.remove(worker.sessions, index)
+    end
+  end
+  worker.sessions[#worker.sessions + 1] = id
+  while #worker.sessions > worker.limit do
+    table.remove(worker.sessions, 1)
+  end
+end
+
+local function pool_spawn(
+  state: PoolState, slot: integer, replacement: boolean
+): string | nil
+  local dir = state.dir .. "/w" .. tostring(slot)
+  fs.mkdirAll(dir)
+  clear_files(dir)
+  local child, failure = state.spawn(
+    "lde",
+    {"run", "src/worker.tl", state.dir, tostring(slot)},
+    {stdin = state.endpoint_json, stdout = "pipe", stderr = "pipe"}
+  )
+  if child is nil then
+    return failure or "cannot be started"
+  end
+  state.workers[#state.workers + 1] = {
+    slot = slot,
+    pid = child.pid,
+    sessions = {},
+    limit = state.limit,
+    dir = dir,
+    child = child,
+    ready = false,
+    replacement = replacement,
+    turn = nil,
+    job = nil,
+    kind = nil,
+    offset = 0,
+  }
+  return nil
+end
+
+local function pool_built(state: PoolState): string | nil
+  for _, worker in ipairs(state.workers) do
+    while not worker.ready do
+      if fs.isfile(worker.dir .. "/ready") then
+        worker.ready = true
+        break
+      end
+      local line = failed_line(worker)
+      if line is string then
+        return "slot " .. tostring(worker.slot) .. ": " .. line
+      end
+      if ended(worker) then
+        return "slot " .. tostring(worker.slot) .. ": worker exited"
+      end
+      pool_pause(state)
+    end
+  end
+  return nil
+end
+
+local function choose_worker(
+  state: PoolState, id: string | nil
+): PoolWorker | nil
+  if id is string then
+    for _, worker in ipairs(state.workers) do
+      if worker_holds(worker, id) then
+        if worker.ready and worker.turn == nil then
+          return worker
+        end
+        return nil
+      end
+    end
+  end
+  local best: PoolWorker | nil = nil
+  local best_count = math.huge
+  for _, worker in ipairs(state.workers) do
+    if worker.ready and worker.turn == nil then
+      local count = #worker.sessions
+      local better = best is nil
+      if not better then
+        local other = best as PoolWorker
+        better = count < best_count
+          or (count == best_count and worker.slot < other.slot)
+      end
+      if better then
+        best = worker
+        best_count = count
+      end
+    end
+  end
+  return best
+end
+
+local function dropped_turn(state: PoolState, turn: PoolTurn)
+  turn.live = false
+  for index = #state.turns, 1, -1 do
+    if state.turns[index] == turn then
+      table.remove(state.turns, index)
+    end
+  end
+end
+
+local function released_worker(worker: PoolWorker)
+  local job = worker.job
+  if job is string then
+    local target = worker.dir .. "/" .. job
+    fs.delete(target .. ".in")
+    fs.delete(target .. ".out")
+    fs.delete(target .. ".done")
+    fs.delete(target .. ".go")
+  end
+  worker.turn = nil
+  worker.job = nil
+  worker.kind = nil
+  worker.offset = 0
+end
+
+local function dispatched(state: PoolState, worker: PoolWorker, turn: PoolTurn)
+  state.next_turn = state.next_turn + 1
+  local name = "turn" .. tostring(state.next_turn)
+  local target = worker.dir .. "/" .. name
+  fs.write(target .. ".tmp", turn.body)
+  fs.move(target .. ".tmp", target .. ".in")
+  worker.job = name
+  worker.kind = nil
+  worker.offset = 0
+  worker.turn = turn
+  turn.assigned = true
+  local id = turn.session_id
+  if id is string then
+    served_by(worker, id)
+  end
+end
+
+-- one frame off the worker's output file, leaving the rest for later steps
+local function next_frame(worker: PoolWorker): string | nil
+  local job = worker.job
+  if job is nil then
+    return nil
+  end
+  local text = fs.read(worker.dir .. "/" .. job .. ".out")
+  if text is nil then
+    return nil
+  end
+  local rest = text:sub(worker.offset + 1)
+  local colon = rest:find(":", 1, true)
+  if colon is nil then
+    return nil
+  end
+  local count = tonumber(rest:sub(1, colon - 1)) as integer | nil
+  if count is nil then
+    return nil
+  end
+  local start = colon + 1
+  if start + count - 1 > #rest then
+    return nil
+  end
+  local part = rest:sub(start, start + count - 1)
+  worker.offset = worker.offset + start + count - 1
+  return part
+end
+
+local function absorbed(worker: PoolWorker): {string}
+  local parts: {string} = {}
+  while true do
+    local part = next_frame(worker)
+    if part is nil then
+      break
+    end
+    parts[#parts + 1] = part
+  end
+  return parts
+end
+
+local function drained(worker: PoolWorker): boolean
+  local job = worker.job
+  if job is nil then
+    return true
+  end
+  local text = fs.read(worker.dir .. "/" .. job .. ".out")
+  if text is nil then
+    return true
+  end
+  return worker.offset >= #text
+end
+
+local function pool_advance(state: PoolState, worker: PoolWorker)
+  local turn = worker.turn
+  if turn is nil then
+    return
+  end
+  if worker.kind == nil then
+    local opening = next_frame(worker)
+    if opening is nil then
+      return
+    end
+    local header = tltp.json_decode(opening) as PoolHeader | nil
+    if header is nil then
+      worker.kind = "json"
+    elseif header.kind == "json" then
+      local send = turn.emit
+      if not (send is nil) then
+        send(header.body or "")
+      end
+      worker.kind = "json"
+    else
+      worker.kind = "stream"
+    end
+  end
+
+  local parts = absorbed(worker)
+  for _, part in ipairs(parts) do
+    local send = turn.emit
+    if not (send is nil) then
+      send(part)
+    end
+  end
+
+  local job = worker.job
+  if job is nil then
+    return
+  end
+  if fs.isfile(worker.dir .. "/" .. job .. ".done") and drained(worker) then
+    dropped_turn(state, turn)
+    released_worker(worker)
+    return
+  end
+  -- the worker takes one step for every tick, and a tick is only written
+  -- once the payloads of the last one have been read
+  if worker.kind ~= "json" and #parts == 0 then
+    local tick = worker.dir .. "/" .. job .. ".go"
+    if not fs.exists(tick) then
+      fs.write(tick, "")
+    end
+  end
+end
+
+local function pool_reap(state: PoolState)
+  local index = 1
+  while index <= #state.workers do
+    local worker = state.workers[index]
+    if ended(worker) then
+      worker.child:wait()
+      local turn = worker.turn
+      if not (turn is nil) then
+        dropped_turn(state, turn)
+      end
+      table.remove(state.workers, index)
+      if not worker.replacement then
+        pool_spawn(state, worker.slot, true)
+      end
+    else
+      index = index + 1
+    end
+  end
+end
+
+local function pool_dispatch(state: PoolState)
+  for _, turn in ipairs(state.turns) do
+    if turn.live and not turn.assigned then
+      local worker = choose_worker(state, turn.session_id)
+      if not (worker is nil) then
+        dispatched(state, worker, turn)
+      end
+    end
+  end
+end
+
+local function pool_ready(state: PoolState)
+  for _, worker in ipairs(state.workers) do
+    if not worker.ready and fs.isfile(worker.dir .. "/ready") then
+      worker.ready = true
+    end
+  end
+end
+
+local function pool_step(state: PoolState): integer
+  pool_ready(state)
+  pool_reap(state)
+  for _, worker in ipairs(state.workers) do
+    if worker.turn ~= nil then
+      pool_advance(state, worker)
+    end
+  end
+  pool_dispatch(state)
+  local live = 0
+  for _, turn in ipairs(state.turns) do
+    if turn.live then
+      live = live + 1
+    end
+  end
+  return live
+end
+
+local function asked_stream(body: string): boolean
+  local decoded = tltp.json_decode(body) as Loose
+  if not (decoded is LooseObject) then
+    return false
+  end
+  local fields = decoded as Fields
+  return fields.stream == true
+end
+
+local function session_of_body(body: string): string | nil
+  local request = request_of(body)
+  if request is nil then
+    return nil
+  end
+  return (request as Request).session_id
+end
+
+local function pool_answer(
+  server: tltp.Server, state: PoolState, body: string
+): serve.Reply
+  local job_body = body
+  if asked_stream(body) then
+    local decoded = tltp.json_decode(body) as Loose
+    local fields = decoded as Fields
+    fields.stream = nil
+    job_body = tltp.json_encode(fields) as string
+  end
+  local turn: PoolTurn = {
+    body = job_body,
+    session_id = session_of_body(body),
+    emit = nil,
+    live = true,
+    assigned = false,
+  }
+  local worker: PoolWorker | nil = nil
+  while worker is nil do
+    pool_reap(state)
+    worker = choose_worker(state, turn.session_id)
+    if worker is nil then
+      serve.step(server)
+      pool_pause(state)
+    end
+  end
+  local held_worker = worker as PoolWorker
+  dispatched(state, held_worker, turn)
+  local job = held_worker.job as string
+  while not fs.isfile(held_worker.dir .. "/" .. job .. ".done") do
+    if ended(held_worker) then
+      local slot = held_worker.slot
+      pool_reap(state)
+      return failed("slot " .. tostring(slot) .. " went away")
+    end
+    pool_pause(state)
+  end
+  local slot = held_worker.slot
+  local first = next_frame(held_worker)
+  released_worker(held_worker)
+  if first is nil then
+    return failed("slot " .. tostring(slot) .. " gave no reply")
+  end
+  local header = tltp.json_decode(first) as PoolHeader | nil
+  if header is nil then
+    return failed("slot " .. tostring(slot) .. " gave no reply")
+  end
+  local reply_body = header.body
+  if reply_body is nil then
+    return failed("slot " .. tostring(slot) .. " gave no reply")
+  end
+  local status: tltp.Status = "InternalServerError"
+  local given = header.status
+  if given is string then
+    status = given as tltp.Status
+  end
+  return {status = status, body = reply_body}
+end
+
+local function pool_producer(state: PoolState, turn: PoolTurn): tltp.StreamFn
+  return function(emit: tltp.EmitFn): boolean | nil
+    turn.emit = emit
+    state.turns[#state.turns + 1] = turn
+    coroutine.yield()
+    while turn.live do
+      coroutine.yield()
+    end
+    return true
+  end
+end
+
+local function pool_stream(
+  server: tltp.Server, state: PoolState, body: string
+): tltp.Response, tltp.StreamFn | nil
+  if not asked_stream(body) then
+    local reply = pool_answer(server, state, body)
+    return server:json(reply.status, reply.body), nil
+  end
+  local turn: PoolTurn = {
+    body = body,
+    session_id = session_of_body(body),
+    emit = nil,
+    live = true,
+    assigned = false,
+  }
+  local stream_fn = pool_producer(state, turn)
+  return server:sse(stream_fn), stream_fn
+end
+
 function serve.step(server: tltp.Server): integer
+  local state = pools[server]
+  if not (state is nil) then
+    return pool_step(state)
+  end
   local list = turns[server]
   if list is nil then
     return 0
@@ -1101,12 +1644,20 @@ function serve.round(server: tltp.Server): string | nil
   if not (list is nil) and #list > 0 then
     timeout = 0
   end
+  local state = pools[server]
+  if not (state is nil) and #state.turns > 0 then
+    timeout = 0
+  end
   local _, line = server:poll(timeout)
   serve.step(server)
   return line
 end
 
 function serve.answer(server: tltp.Server, body: string): serve.Reply
+  local state = pools[server]
+  if not (state is nil) then
+    return pool_answer(server, state, body)
+  end
   local ready, failure = prepared(server, body)
   if ready is nil then
     return failure as serve.Reply
@@ -1120,6 +1671,10 @@ end
 function serve.stream(
   server: tltp.Server, body: string
 ): tltp.Response, tltp.StreamFn | nil
+  local state = pools[server]
+  if not (state is nil) then
+    return pool_stream(server, state, body)
+  end
   local ready, failure = prepared(server, body)
   if ready is nil then
     local fault = failure as serve.Reply
@@ -1195,7 +1750,178 @@ local function install(server: tltp.Server, name: string)
   end
 end
 
-function serve.build(endpoint: serve.Endpoint): tltp.Server | nil, string | nil
+local function endpoint_json(endpoint: serve.Endpoint): string
+  local fields: EndpointFields = {
+    host = endpoint.host,
+    port = endpoint.port,
+    name = endpoint.name,
+    path = endpoint.path,
+    sessions = endpoint.sessions,
+    kv_cache = endpoint.kv_cache,
+    context_path = endpoint.context_path,
+    context_bytes = endpoint.context_bytes,
+  }
+  return tltp.json_encode(fields) as string
+end
+
+-- the bytes the file's tensors hold, read without mapping the file
+local function model_bytes(info: gguf.Info): integer | nil, string | nil
+  local total = 0
+  for _, tensor in ipairs(info.tensors) do
+    local kind = ggml.type_of(tensor.type_code)
+    if kind is nil then
+      return nil,
+        "build: tensor "
+          .. tensor.name
+          .. " is type code "
+          .. tostring(tensor.type_code)
+    end
+    local first = 1
+    if #tensor.dims > 0 then
+      first = tensor.dims[1]
+    end
+    local rest = 1
+    for index = 2, #tensor.dims do
+      rest = rest * tensor.dims[index]
+    end
+    total = total + math.floor(
+      first / kind.block_elements
+    ) * kind.block_bytes * rest
+  end
+  return total, nil
+end
+
+local function pool_build(
+  endpoint: serve.Endpoint, count: integer, spawn: process.Spawn
+): tltp.Server | nil, string | nil
+  local context_path = endpoint.context_path
+  if context_path is nil then
+    return nil, "build: workers need a context: no context_path"
+  end
+  fs.mkdirAll(context_path)
+  if not fs.isdir(context_path) then
+    return nil, "build: cannot create " .. context_path
+  end
+
+  local backend, backend_failure = compute.load()
+  if backend is nil then
+    return nil, backend_failure
+  end
+  local free = backend:memory()
+  compute.unload(backend)
+  if free is integer then
+    local info, read_failure = gguf.read(endpoint.path)
+    if info is nil then
+      return nil, read_failure
+    end
+    local each, byte_line = model_bytes(info)
+    if each is nil then
+      return nil, byte_line
+    end
+    local needed = each * count
+    if needed > free then
+      return nil,
+        "build: "
+          .. tostring(count)
+          .. " workers need "
+          .. tostring(needed)
+          .. " bytes; the device has "
+          .. tostring(free)
+          .. " free"
+    end
+  end
+
+  local dir = os.tmpname()
+  os.remove(dir)
+  fs.mkdirAll(dir)
+  for slot = 0, count - 1 do
+    fs.mkdirAll(dir .. "/w" .. tostring(slot))
+  end
+  local watcher = fs.watch(
+    dir, function(_event: fs.WatchEvent, _name: string) end, {recursive = true}
+  )
+
+  local server = tltp.Server.new(
+    {port = endpoint.port, bind_host = endpoint.host, logging = false}
+  )
+  pools[server] = {
+    dir = dir,
+    workers = {},
+    turns = {},
+    next_turn = 0,
+    watcher = watcher,
+    spawn = spawn,
+    endpoint_json = endpoint_json(endpoint),
+    limit = endpoint.sessions,
+  }
+  install(server, endpoint.name)
+
+  for slot = 0, count - 1 do
+    local spawn_failure = pool_spawn(pools[server] as PoolState, slot, false)
+    if spawn_failure is string then
+      serve.stop(server)
+      return nil, "build: slot " .. tostring(slot) .. ": " .. spawn_failure
+    end
+  end
+
+  local fault = pool_built(pools[server] as PoolState)
+  if fault is string then
+    serve.stop(server)
+    return nil, "build: " .. fault
+  end
+  return server, nil
+end
+
+function serve.pool_of(server: tltp.Server): serve.Pool | nil
+  local state = pools[server]
+  if state is nil then
+    return nil
+  end
+  local workers: {serve.Worker} = {}
+  for _, worker in ipairs(state.workers) do
+    local sessions: {string} = {}
+    for index = 1, #worker.sessions do
+      sessions[index] = worker.sessions[index]
+    end
+    workers[#workers + 1] = {
+      slot = worker.slot,
+      pid = worker.pid,
+      sessions = sessions,
+    }
+  end
+  return {dir = state.dir, workers = workers}
+end
+
+function serve.stop(server: tltp.Server)
+  local state = pools[server]
+  if state is nil then
+    return
+  end
+  pools[server] = nil
+  local watcher = state.watcher
+  if not (watcher is nil) then
+    watcher:close()
+  end
+  for _, worker in ipairs(state.workers) do
+    worker.child:kill()
+  end
+  for _, worker in ipairs(state.workers) do
+    worker.child:wait()
+  end
+  fs.rmdir(state.dir)
+end
+
+function serve.build(
+  endpoint: serve.Endpoint, spawn?: process.Spawn
+): tltp.Server | nil, string | nil
+  local count = endpoint.workers
+  if count is integer and count > 1 then
+    local launcher = spawn
+    if launcher is nil then
+      launcher = process.spawn
+    end
+    return pool_build(endpoint, count as integer, launcher)
+  end
   local context_path = endpoint.context_path
   if context_path is string then
     fs.mkdirAll(context_path)
@@ -1246,9 +1972,9 @@ function serve.build(endpoint: serve.Endpoint): tltp.Server | nil, string | nil
 end
 
 function serve.start(
-  endpoint: serve.Endpoint, write_err: function(string)
+  endpoint: serve.Endpoint, write_err: function(string), spawn?: process.Spawn
 ): integer
-  local server, failure = serve.build(endpoint)
+  local server, failure = serve.build(endpoint, spawn)
   if server is nil then
     write_err(one_line(failure as string))
     return 1
@@ -1272,6 +1998,7 @@ function serve.start(
       return raised
     end
   )
+  serve.stop(server as tltp.Server)
   if not ok then
     write_err(one_line(raised or "server failed"))
     return 1

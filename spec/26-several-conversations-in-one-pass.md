@@ -203,7 +203,9 @@ conversations without the memory growing with every conversation ever seen.
   set portably; the branch writes the line `25/FR-010` already writes.
 - FR-015 (US-004) WHEN `serve.build` is called, THE SYSTEM SHALL build one model for the endpoint
   with the endpoint's `sessions` as its `sequences` and the file's context length as its
-  `positions`, hold it on that server as `serve.model_of` reports it, and build no model per turn.
+  `positions`, hold it on that server as `serve.model_of` reports it, and build no model per turn;
+  for an endpoint whose `workers` is more than one, `build` builds no model and holds none on that
+  server, so `serve.model_of` gives nil.
 - FR-016 (US-004) IF `compute.model` returns nil when `serve.build` builds it, THEN THE SYSTEM SHALL
   return that line as `build`'s second value, so `serve.start` writes it through its `write_err`
   argument and returns 1 as `25/FR-014` says, and no server answers a turn without a model.

@@ -288,6 +288,7 @@ local record compute
   end
 
   load: function(path?: string, offload?: boolean): Backend | nil, string | nil
+  unload: function(Backend)
   attach: function(Backend, weights.Handle): Maths | nil, string | nil
   attend: function(
     Backend, weights.Handle, Geometry
@@ -3335,6 +3336,11 @@ function compute.load(
     offload = offload ~= false,
   }
   return backend
+end
+
+-- forgets the library a backend opened, so the pool's parent keeps no device
+function compute.unload(backend: compute.Backend)
+  LOADED[backend] = nil
 end
 
 function compute.attach(

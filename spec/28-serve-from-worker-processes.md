@@ -1,6 +1,6 @@
 # 28: Serve from worker processes
 
-**Status**: pending   **Depends on**: 04, 18, 21, 23, 25, 26, 27
+**Status**: done   **Depends on**: 04, 18, 21, 23, 25, 26, 27
 
 ## Problem & context
 
@@ -32,10 +32,11 @@ The tools decide the shape of the parent's side. lde's `process` library spawns 
 and kills it, gives it one input string on its standard input at spawn, and hands back the child's
 output only once it has exited (`Child:wait` in `src/init.lua` of `lde-org/process`). Two links are
 possible: a socket from a registry or luarocks library, or files in a scratch directory, a job
-file the worker takes, an output file the parent reads as it grows and a done file that ends the
-turn. This spec takes the files, so the pool's only new dependency is lde's `process` (the `fs` it
-also uses is already carried), at the cost of a poll interval of a few milliseconds per payload. It
-is also the shape lde's own `childPool` uses to hand work to children
+file the worker takes, an output file the parent reads as it grows, a tick the parent writes to
+give the worker one step and a done file that ends the turn. This spec takes the files, so the
+pool's only new dependency is lde's `process` (the `fs` it also uses is already carried), at the
+cost of a poll interval of a few milliseconds per payload. It is also the shape lde's own
+`childPool` uses to hand work to children
 (`packages/lde-core/src/util/childpool.lua` in the lde repository).
 
 It also settles a question no earlier spec settles: whether one machine can have the ggml backend
@@ -43,10 +44,19 @@ open in more than one process at once. The pool's own first case answers it, bec
 each load the library, map the file and answer.
 
 The turn itself does not change. The parent reads two fields of a body, `stream` and `session_id`,
-and hands the body to a worker; the worker answers exactly as it answers today, so its status, its
-body and its payloads reach the client unchanged. Every rule about messages, templates, ids,
-budgets, `sessions` and `TooManyRequests` stays where it is, in the worker, with the cases that
-already pin it. A reply that is not streamed holds the parent until it arrives, as it does today.
+and hands the body to a worker; the worker answers exactly as it answers today, so its status
+where the client is given one, its body and its payloads reach the client unchanged. Every rule
+about messages, templates, ids, budgets, `sessions` and `TooManyRequests` stays where it is, in the
+worker, with the cases that already pin it. A reply that is not streamed holds the parent until it
+arrives, as it does today. A body that asks for a stream is answered with `Server:sse` before a
+worker has judged it, so a refusal that worker gives reaches that stream as one payload holding
+its error body rather than as a JSON status; a body that asks for no stream always carries the
+worker's status and body.
+
+The worker takes one step per round the parent gives it. The parent writes a tick into the worker's
+directory once it has read the payloads the last tick produced, and the worker steps the turn once
+for that tick, so a streamed turn advances at the parent's pace and a worker killed between two
+ticks loses a turn that has not finished.
 
 The pool belongs in `serve` and nowhere else. A plugin never sees a live connection, the listening
 socket or the queue a request waits in, and the model a conversation's keys and values live in is
@@ -81,21 +91,22 @@ local record serve
   -- nil for a server whose turns run in this process, as 27's server does
   pool_of: function(tltp.Server): Pool | nil
   -- the shape of process.spawn, so a caller can start the workers itself
-  build: function(Endpoint, Spawn | nil): tltp.Server | nil, string | nil
+  build: function(
+    endpoint: Endpoint, spawn?: process.Spawn
+  ): tltp.Server | nil, string | nil
   stop: function(tltp.Server)
   -- 26's step, unchanged: one round of the pool's work, returning the live turns
   step: function(tltp.Server): integer
 end
-
-local type Spawn = function(
-  string, {string} | nil, process.Options | nil
-): process.Child | nil, string | nil
 ```
 
 `workers` is nil in every `Endpoint` literal written before this spec, and nil is one worker, so no
 existing literal changes. `stop` is what `serve.start` calls when its loop ends, and what a caller
 uses to end a pool it built. `process.Child` is the handle `process.spawn` gives: a `pid`, a
-`poll` returning the exit code once the child is gone, a `wait` and a `kill`.
+`poll` returning the exit code once the child is gone, a `wait` and a `kill`. `process.Spawn` is
+declared beside `process.Child` in `types/process.d.tl`: Teal does not carry a type alias written
+inside a record to another module, so the shape `process.spawn` already has lives with `process`
+rather than in `serve`.
 
 ## User stories
 
@@ -134,11 +145,12 @@ uses to end a pool it built. `process.Child` is the handle `process.spawn` gives
   one line naming `workers` and `context` and start no worker.
 - FR-004 (US-001) WHEN a request reaches a server whose `pool_of` is not nil, THE SYSTEM SHALL hand
   its body to a worker that has no turn in flight and has reported its server built, and forward
-  that worker's reply unchanged: a streamed reply's payloads reach the request's emit in the order
-  the worker wrote them, and a reply that is not streamed reaches the client with the status and
-  the body the worker gave, keeping `18/FR-001`'s routes on that server, so `/health` answers `OK`
-  with the endpoint's model name and any other path answers `18`'s `NotFound` body, whatever the
-  pool's workers are doing.
+  that worker's reply: a body that asks for no stream reaches the client with the status and the
+  body the worker gave, a body that asks for a stream gets the worker's payloads at the request's
+  emit in the order the worker wrote them, and a refusal the worker gives for such a body reaches
+  that stream as one payload holding its error body, keeping `18/FR-001`'s routes on that server,
+  so `/health` answers `OK` with the endpoint's model name and any other path answers `18`'s
+  `NotFound` body, whatever the pool's workers are doing.
 - FR-005 (US-002) WHEN a request's `session_id` is a string and a running worker's sessions hold
   that id, THE SYSTEM SHALL hand the request to that worker, holding it until that worker has no
   turn in flight as FR-007 holds a request, and SHALL NOT hand it to another worker while that
@@ -171,7 +183,7 @@ uses to end a pool it built. `process.Child` is the handle `process.spawn` gives
   starts whole or leaves nothing behind.
 - FR-011 (US-004) WHEN `serve.build` builds a pool and the backend `compute.load` opens finds a
   device, THE SYSTEM SHALL compare that device's free bytes from `memory` with `workers` copies of
-  the sum of the model file's tensor byte lengths, SHALL release that backend before it returns
+  the sum of the model file's tensor byte lengths, SHALL drop that backend before it returns
   whether or not the copies fit, and IF the free bytes are fewer, THEN THE SYSTEM SHALL return nil
   and one line naming the number of workers and the bytes the device has free, and start no
   worker.
@@ -192,13 +204,15 @@ uses to end a pool it built. `process.Child` is the handle `process.spawn` gives
 
 ## Tests
 
-T-001, T-002, T-003, T-005, T-006, T-007 and T-008 build `18/T-001`'s fixture through the serve
-cases' `build` helper with the endpoint each case names, and take "the in-process server" to be a
-server built from the same bytes by `27`'s path, with `workers` absent. Every case that builds a
-pool gives that endpoint a context directory and a budget. A case that drives a pool repeats
-`serve.step` with a 2 ms wait until it returns 0, up to 5000 tries, and fails when the tries run
-out. `serve.stop` is called at the end of every case that built a pool. FR-008's non-streamed
-branch is not asserted: a case cannot kill a worker while `serve.answer` blocks inside it.
+T-001, T-002, T-003, T-005 and the first half of T-006 build `18/T-001`'s fixture through the serve
+cases' `build` helper with the endpoint each case names; T-006's second half, T-007 and T-008 name
+that fixture's endpoint directly because each needs its own spawn function or its own failure line.
+Every case takes "the in-process server" to be a server built from the same bytes by `27`'s path,
+with `workers` absent. Every case that builds a pool gives that endpoint a context directory and a
+budget. A case that drives a pool repeats `serve.step` with a 2 ms wait until it returns 0, up to
+5000 tries, and fails when the tries run out. `serve.stop` is called at the end of every case that
+built a pool. FR-008's non-streamed branch is not asserted: a case cannot kill a worker while
+`serve.answer` blocks inside it.
 
 - T-001 (FR-002, FR-003, FR-004): `two workers answer at once and the parent holds no model`,
   proves that the helper's endpoint built with `workers` absent gives a server whose `pool_of` is
@@ -215,15 +229,15 @@ branch is not asserted: a case cannot kill a worker while `serve.answer` blocks 
   body naming `s` without `stream` then answers the same status and the same body as the
   in-process server answers for it; and that `/health` on that server answers `OK` and the body
   `18` gives, and a path other than the two answers `NotFound`, while a streamed turn is live.
-- T-002 (FR-005, FR-006): `a session goes back to the worker that served it`, proves on T-001's
-  pool that the streamed body naming `s`, run to its end, leaves a worker whose pid it records and
+- T-002 (FR-005, FR-006): `a session goes back to the worker that served it`, proves on a pool
+  built as T-001's is that the streamed body naming `s`, run to its end, leaves a worker whose pid
+  it records and
   whose `sessions` hold `s`; that the streamed body naming `t`, run to its end, leaves the first
   worker's `sessions` still holding `s`, so a worker holds every session it served, up to the
   endpoint's `sessions`, and not only the session it served last; that the body naming `s` and the
   body holding `a`, an assistant `a` and `a` with `"session_id":"s"` are then resumed with a
-  collector each, and that after the step that
-  dispatches the first of them the second's collector is empty while the other worker has no turn
-  in flight, so a session waits for its own worker; that the steps run to 0 leave that collector
+  collector each, and that after the step that dispatches the first of them the second's collector
+  is empty while the other worker has no turn in flight, so a session waits for its own worker; that the steps run to 0 leave that collector
   holding the payloads the in-process server's producer for that body emits, both turns served by
   the recorded pid, and a streamed body with no `session_id`, run to its end, leaving the recorded
   worker's `sessions` still holding `s`; and that on a second pool of the same fixture built with
@@ -249,11 +263,11 @@ branch is not asserted: a case cannot kill a worker while `serve.answer` blocks 
   workers neither of whose pids is the killed one and no worker whose `sessions` hold `s`; that the
   same three-message body naming `s` then answers `OK` with `cached_tokens` 2 and the text the
   in-process server gives for it, so the conversation came back from its file on another worker;
-  and that, after the case replaces the model file of the copy that pool was built from with text
-  that is not a GGUF and kills a worker, `pool_of` holds one worker whose pid is the same a hundred
-  steps later.
-- T-006 (FR-009): `a stop and a loop that ends leave nothing behind`, proves on T-001's pool that
-  the directory `pool_of(server).dir` names exists, and that after `serve.stop(server)` it does
+  and that, on a second pool of a fresh copy built with `workers` 2 over a context directory and a
+  budget, after the case replaces that copy's file with text that is not a GGUF and kills one of its
+  workers, `pool_of` holds one worker whose pid is the same a hundred steps later.
+- T-006 (FR-009): `a stop and a loop that ends leave nothing behind`, proves on a pool built as
+  T-001's is that the directory `pool_of(server).dir` names exists, and that after `serve.stop(server)` it does
   not, each pid `pool_of` gave before the stop has no `/proc` entry and `pool_of(server)` is nil;
   and that a pool started through `serve.start` with a `write_err` that records its line and, as
   its third argument, a spawn function that records every pid and the directory it was given, on an
@@ -281,23 +295,4 @@ branch is not asserted: a case cannot kill a worker while `serve.answer` blocks 
 
 ## Amendments
 
-- `04/FR-006`: the top-level keys a read file may hold become `host`, `port`, `models`,
-  `sessions`, `kv_cache`, `context` and `workers`.
-- `04/FR-011`: `start` also receives the file's `workers`, 1 when the file sets none, and 1 when no
-  file is read.
-- `08/FR-009`: for an endpoint whose `workers` is more than one, `build` holds no model for the
-  server it returns; every other endpoint holds it as this requirement says.
-- `08/FR-010`: for an endpoint whose `workers` is more than one, `model_of` gives nil for the
-  server `build` returned; every other endpoint gives the model as this requirement says.
-- `18/FR-010`: for an endpoint whose `workers` is more than one, `build` loads no tokenizer into
-  that process and holds none on the server it returns; every other endpoint loads and holds it as
-  this requirement says.
-- `18/FR-011`: for an endpoint whose `workers` is more than one, `build` loads no compute backend
-  into that process and holds none on the server it returns, except the one `28/FR-011` reads
-  `memory` from, which it releases before returning; every other endpoint loads and holds it as
-  this requirement says.
-- `25/FR-014`: `serve.start` also takes an optional third argument, the spawn function it passes
-  to `serve.build`.
-- `26/FR-015`: for an endpoint whose `workers` is more than one, `build` builds no model and holds
-  none on that server, so `serve.model_of` gives nil; every other endpoint builds and holds it as
-  this requirement says.
+- None.

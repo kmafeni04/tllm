@@ -178,7 +178,9 @@ end
 local function serve_code(
   command: targs.Parser,
   write_err: function(string),
-  start: function(serve.Endpoint, function(string)): integer,
+  start: function(
+    endpoint: serve.Endpoint, write_err: function(string)
+  ): integer,
   environment: {string: string}
 ): integer
   local given_port: integer | nil = nil
@@ -224,22 +226,21 @@ local function serve_code(
     config_path = explicit
   end
 
-  local ok, file_host, file_port, models, file_sessions, file_cache, context_path, context_bytes = config.load(
-    environment, config_path, path_word, write_err
-  )
-  if not ok then
+  local settings = config.load(environment, config_path, path_word, write_err)
+  if settings is nil then
     return 1
   end
 
-  local bind_host = given_host or file_host or "127.0.0.1"
-  local bind_port = given_port or file_port or 8080
+  local bind_host = given_host or settings.host or "127.0.0.1"
+  local bind_port = given_port or settings.port or 8080
 
   local cache_type: compute.CacheType = "f16"
-  if file_cache is compute.CacheType then
+  local file_cache = settings.kv_cache
+  if not (file_cache is nil) then
     cache_type = file_cache
   end
 
-  local chosen = chosen_model(models, word, path_word, write_err)
+  local chosen = chosen_model(settings.models, word, path_word, write_err)
   if chosen is nil then
     return 1
   end
@@ -250,10 +251,11 @@ local function serve_code(
       port = bind_port,
       name = chosen.name,
       path = chosen.path,
-      sessions = file_sessions or 4,
+      sessions = settings.sessions or 4,
       kv_cache = cache_type,
-      context_path = context_path,
-      context_bytes = context_bytes,
+      context_path = settings.context_path,
+      context_bytes = settings.context_bytes,
+      workers = settings.workers or 1,
     },
     write_err
   )
@@ -286,7 +288,9 @@ function cli.run(
   args: {string},
   write_out: function(string),
   write_err: function(string),
-  start?: (function(serve.Endpoint, function(string)): integer),
+  start?: (function(
+    endpoint: serve.Endpoint, write_err: function(string)
+  ): integer),
   environment?: {string: string}
 ): integer
   local parser = build()

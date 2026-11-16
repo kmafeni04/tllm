@@ -49,6 +49,12 @@
 			"git": "https://github.com/lde-org/path.git",
 			"sha256": "83bb6b5301394dca2ee1036cf56c233382859cd09b5fe06e5218e7aef6d73530"
 		},
+		"process": {
+			"branch": "master",
+			"commit": "f904b26919ad0d09adacb839a2803848d997ee92",
+			"git": "https://github.com/lde-org/process.git",
+			"sha256": "72422b9b3b1a34fcc2674a518d86490e8bdd05e3613ba8a1935b8571d68eb755"
+		},
 		"sstream": {
 			"branch": "main",
 			"commit": "a841d0c04bdce243e758f2faccfbe2b257457eaa",
@@ -90,6 +96,6 @@
 			"sha256": "7816c24519cf959658d29cb9625777febb812422e6fd312884d131a44025630a"
 		}
 	},
-	"manifestHash": "50fdb0631628f561",
+	"manifestHash": "2133c7bbf732851f",
 	"version": "1"
 }

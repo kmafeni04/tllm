@@ -170,7 +170,8 @@ end
   type `internal_error`, write no event, and answer nil as the producer.
 - FR-014 (US-003) WHEN `serve.start` is called, THE SYSTEM SHALL build the server as it does today,
   report a build failure through its `write_err` argument and return 1, and WHEN the build
-  succeeds, THE SYSTEM SHALL repeat `serve.round(server)` while it returns nil.
+  succeeds, THE SYSTEM SHALL repeat `serve.round(server)` while it returns nil. `serve.start` also
+  takes an optional third argument, the spawn function it passes to `serve.build`.
 - FR-015 (US-004) WHEN a turn names a `session_id` whose stored conversation is in flight, THE
   SYSTEM SHALL give that turn a reserved sequence of its own, sized as `23/FR-004` sizes a
   conversation's sequence, waiting for a free one when none is free, read the whole prompt from

@@ -73,10 +73,10 @@ local record serve
 end
 ```
 
-`config.load` gains the file's context path and budget after `kv_cache`, and `cli` passes them in
-the endpoint `start` receives, which is what `serve.build` gets. A `serve.Endpoint` literal that
-names no context leaves both fields nil, which is the same in-memory server `23` built, so no
-existing literal in the suite changes.
+`config.load` gains the file's context path and budget beside `kv_cache` in the value it returns,
+and `cli` passes them in the endpoint `start` receives, which is what `serve.build` gets. A
+`serve.Endpoint` literal that names no context leaves both fields nil, which is the same in-memory
+server `23` built, so no existing literal in the suite changes.
 
 `capacity` is the one field beside the two calls, because a turn that restored a file must record
 the positions `load` reserved rather than the positions its own need would have asked for: the

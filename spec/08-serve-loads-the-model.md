@@ -86,8 +86,8 @@ mapped until the process ends.
 - FR-006 (US-003) WHEN the model word is a path, THE SYSTEM SHALL call the start function with an endpoint whose `name` and `path` are both that word.
 - FR-007 (US-004) WHEN no model word is given and the config holds exactly one entry, THE SYSTEM SHALL call the start function with an endpoint whose `name` is that entry's key and whose `path` is that entry's `path`.
 - FR-008 (US-002) IF no model word is given and the config holds more than one entry, THEN THE SYSTEM SHALL refuse, as `04/FR-010` states.
-- FR-009 (US-001) WHEN `build` returns a server, THE SYSTEM SHALL hold that server's model in a table declared in `tllm.serve` whose keys are the servers `build` returned, and call no release on its mapping.
-- FR-010 (US-001) WHEN `model_of(server)` is called with a server `build` returned, THE SYSTEM SHALL return the model it holds, whose `name` is that endpoint's `name`, whose `path` is that endpoint's `path`, whose `handle` is the handle `weights.load` returned for that path, and whose `tokenizer` and `backend` are the tokenizer and the compute backend `build` loaded from that file.
+- FR-009 (US-001) WHEN `build` returns a server, THE SYSTEM SHALL hold that server's model in a table declared in `tllm.serve` whose keys are the servers `build` returned, and call no release on its mapping; for an endpoint whose `workers` is more than one, `build` holds no model for the server it returns.
+- FR-010 (US-001) WHEN `model_of(server)` is called with a server `build` returned, THE SYSTEM SHALL return the model it holds, whose `name` is that endpoint's `name`, whose `path` is that endpoint's `path`, whose `handle` is the handle `weights.load` returned for that path, and whose `tokenizer` and `backend` are the tokenizer and the compute backend `build` loaded from that file; for an endpoint whose `workers` is more than one, `model_of` gives nil for the server `build` returned.
 - FR-011 (US-001) IF `model_of` is called with a server `build` did not return, THEN THE SYSTEM SHALL return nil.
 
 ## Non-goals

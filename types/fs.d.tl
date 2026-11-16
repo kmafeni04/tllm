@@ -38,9 +38,9 @@ local record fs is raw
     "rename"
   end
   record Watcher
-    poll: function()
-    wait: function()
-    close: function()
+    poll: function(Watcher)
+    wait: function(Watcher)
+    close: function(Watcher)
   end
 
   interface raw
