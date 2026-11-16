@@ -935,14 +935,23 @@ test.it(
   end
 )
 
-local function model_sequences(
-  handle: weights.Handle, positions: integer, sequences: integer
+local function cached_model(
+  handle: weights.Handle,
+  positions: integer,
+  cache: compute.CacheType,
+  sequences: integer
 ): compute.Model
   local model, failure = compute.model(
-    backend, handle, positions, "f32", sequences
+    backend, handle, positions, cache, sequences
   )
   test.equal(failure, nil)
   return model as compute.Model
+end
+
+local function model_sequences(
+  handle: weights.Handle, positions: integer, sequences: integer
+): compute.Model
+  return cached_model(handle, positions, "f32", sequences)
 end
 
 local function contributing_entries(): {Entry}
@@ -1186,5 +1195,176 @@ test.it(
     )
     test.equal(other_line, nil)
     close((other as {{number}})[1], wanted, 1e-5)
+  end
+)
+
+local function scores_of(
+  model: compute.Model,
+  canary: string | nil,
+  token_id: integer,
+  position: integer
+): {number}
+  local rows, line = model:pass(
+    {
+      {
+        sequence = canary or "a",
+        token = token_id,
+        position = position,
+      },
+    }
+  )
+  test.equal(line, nil)
+  return (rows as {{number}})[1]
+end
+
+local function save_fault(
+  model: compute.Model, sequence: string, ids: {integer}, path: string
+): string
+  local line = model:save(sequence, ids, path)
+  test.truthy(line)
+  local message = line as string
+  test.equal(message:find("\n"), nil)
+  test.falsy(fs.isfile(path), path)
+  return message
+end
+
+test.it(
+  "a saved conversation gives back the numbers it stopped with",
+  function()
+    local handle = loaded(t002_meta(), t002_entries())
+    local first = model_sequences(handle, 2, 2)
+    test.equal(first:reserve("a", 2), nil)
+    test.truthy(first:pass({{sequence = "a", token = 2, position = 0}}))
+
+    local path = ROOT .. "/context1"
+    test.equal(first:save("a", {5}, path), nil)
+    local held = fs.stat(path)
+    test.truthy(held)
+    test.greater((held as fs.Stat).size, 0)
+
+    local second = model_sequences(handle, 2, 2)
+    local given, given_line = second:load("a", path)
+    test.equal(given_line, nil)
+    test.deepEqual(given, {5})
+    test.equal(
+      second:cache_bytes("a", "blk.0."), first:cache_bytes("a", "blk.0.")
+    )
+    test.equal(
+      second:cache_bytes("a", "blk.1."), first:cache_bytes("a", "blk.1.")
+    )
+    test.truthy(first:cache_bytes("a", "blk.1."))
+
+    local before = scores_of(first, "a", 1, 1)
+    local after = scores_of(second, "a", 1, 1)
+    test.equal(#after, #before)
+    for index, value in ipairs(before) do
+      test.less(math.abs(after[index] - value), 1e-6)
+    end
+
+    local third = model_sequences(handle, 2, 2)
+    test.equal(third:reserve("b", 2), nil)
+    local empty_path = ROOT .. "/context2"
+    test.equal(third:save("b", {}, empty_path), nil)
+    local fourth = model_sequences(handle, 2, 2)
+    local nothing, nothing_line = fourth:load("b", empty_path)
+    test.equal(nothing_line, nil)
+    test.deepEqual(nothing, {})
+    test.equal(
+      fourth:cache_bytes("b", "blk.0."), third:cache_bytes("b", "blk.0.")
+    )
+    test.equal(
+      fourth:cache_bytes("b", "blk.1."), third:cache_bytes("b", "blk.1.")
+    )
+    local third_scores = scores_of(third, "b", 2, 0)
+    local fourth_scores = scores_of(fourth, "b", 2, 0)
+    test.equal(#fourth_scores, #third_scores)
+    for index, value in ipairs(third_scores) do
+      test.less(math.abs(fourth_scores[index] - value), 1e-6)
+    end
+
+    local unknown = save_fault(first, "zzz", {1}, ROOT .. "/context3")
+    test.includes(unknown, "save")
+    test.includes(unknown, "zzz")
+    local too_few = save_fault(first, "a", {1}, ROOT .. "/context4")
+    test.includes(too_few, "save")
+    test.includes(too_few, "a")
+
+    local broken = model_sequences(
+      loaded(t002_meta(), without(t002_entries(), "blk.1.attn_v.weight")), 2, 2
+    )
+    test.equal(broken:reserve("a", 2), nil)
+    local _, broken_line = broken:pass(
+      {{sequence = "a", token = 2, position = 0}}
+    )
+    test.truthy(broken_line)
+    local fault = save_fault(broken, "a", {}, ROOT .. "/context5")
+    test.includes(fault, "save")
+    test.includes(fault, "a")
+  end
+)
+
+test.it(
+  "a file that is not this model's is refused",
+  function()
+    local handle = loaded(t002_meta(), t002_entries())
+    local source = model_sequences(handle, 2, 2)
+    test.equal(source:reserve("a", 2), nil)
+    test.truthy(source:pass({{sequence = "a", token = 2, position = 0}}))
+    local path = ROOT .. "/context6"
+    test.equal(source:save("a", {5}, path), nil)
+    local bytes = fs.read(path) as string
+
+    local half = ROOT .. "/context7"
+    fs.write(half, bytes:sub(1, math.floor(#bytes / 2)))
+    local foreign = ROOT .. "/context8"
+    fs.write(foreign, "not a context file")
+    local absent = ROOT .. "/context9"
+    fs.delete(absent)
+
+    local short = cached_model(handle, 1, "f32", 2)
+    local cases: {{compute.Model, string}} = {
+      {short, path},
+      {cached_model(handle, 2, "f16", 2), path},
+      {
+        cached_model(
+          loaded(
+            t002_meta(),
+            replaced(
+              t002_entries(),
+              "output.weight",
+              f32("output.weight", {2, 2}, {1, 0, 0, 1})
+            )
+          ),
+          2,
+          "f32",
+          2
+        ),
+        path,
+      },
+      {model_sequences(handle, 2, 2), half},
+      {model_sequences(handle, 2, 2), foreign},
+      {model_sequences(handle, 2, 2), absent},
+    }
+
+    for _, held in ipairs(cases) do
+      local given, line = held[1]:load("a", held[2])
+      test.equal(given, nil, held[2])
+      test.includes(line as string, "load", held[2])
+    end
+
+    test.equal(short:cache_bytes("a", "blk.0."), nil)
+    test.equal(short:reserve("a", 1), nil)
+
+    local busy = model_sequences(handle, 2, 2)
+    test.equal(busy:reserve("a", 1), nil)
+    local _, busy_line = busy:load("a", path)
+    test.includes(busy_line as string, "reserve")
+    test.includes(busy_line as string, "a")
+
+    local single = model_sequences(handle, 2, 1)
+    test.equal(single:reserve("b", 2), nil)
+    local _, single_line = single:load("a", path)
+    test.includes(single_line as string, "reserve")
+    test.includes(single_line as string, "a")
   end
 )

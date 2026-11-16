@@ -1,6 +1,6 @@
 # 27: A conversation on disk comes back after a restart
 
-**Status**: pending   **Depends on**: 04, 14, 15, 18, 19, 23, 24, 26
+**Status**: done   **Depends on**: 04, 14, 15, 18, 19, 23, 24, 26
 
 ## Problem & context
 
@@ -52,6 +52,7 @@ the next stored turn overwrites the file.
 local record compute
   record Model
     -- 26's fields, unchanged
+    capacity: function(Model, string): integer | nil
     save: function(Model, string, {integer}, string): string | nil
     load: function(Model, string, string): {integer} | nil, string | nil
   end
@@ -73,8 +74,14 @@ end
 ```
 
 `config.load` gains the file's context path and budget after `kv_cache`, and `cli` passes them in
-the endpoint `start` receives, which is what `serve.build` gets. Every `serve.Endpoint` literal in
-the suite gains the two fields, as `24`'s `kv_cache` made it do.
+the endpoint `start` receives, which is what `serve.build` gets. A `serve.Endpoint` literal that
+names no context leaves both fields nil, which is the same in-memory server `23` built, so no
+existing literal in the suite changes.
+
+`capacity` is the one field beside the two calls, because a turn that restored a file must record
+the positions `load` reserved rather than the positions its own need would have asked for: the
+capacity is in the file, `load` returns only the ids, and a turn that guessed a larger capacity
+would pass the next position past the window it restored.
 
 ## User stories
 
@@ -126,9 +133,11 @@ the suite gains the two fields, as `24`'s `kv_cache` made it do.
 - FR-008 (US-003) WHEN a conversation's file is written and the files whose names end in `.context`
   would hold more than the endpoint's `context_bytes`, THE SYSTEM SHALL delete those files with the
   oldest modification times until they hold no more than that, counting and deleting no file of any
-  other name; IF the new file alone holds more than that, THEN THE SYSTEM SHALL delete the new file
-  and no other; IF a delete fails, THEN THE SYSTEM SHALL leave that file in place, change nothing
-  else and leave the reply as FR-011 leaves one.
+  other name, a file this server wrote later going after one it wrote earlier when the file system
+  gives both the same modification time, which `fs.stat` does to the second; IF the new file alone
+  holds more than that, THEN THE SYSTEM SHALL delete the new file and no other; IF a delete fails,
+  THEN THE SYSTEM SHALL leave that file in place, change nothing else and leave the reply as FR-011
+  leaves one.
 - FR-009 (US-004) WHEN a file is named for a session id, THE SYSTEM SHALL place it directly in the
   context directory as that id's escaped text followed by `.context`, so that two different ids get
   two different files whatever text the ids hold.
@@ -250,8 +259,9 @@ fixture's model completes with), then `{"role":"user","content":"a"}`, with `"ma
   size `fs.stat` gives, that a server built with a second directory and that size as its
   `context_bytes` answers the `s1`, `s2` and `s3` bodies in that order, each with `OK`, and after
   each leaves the second directory holding one file whose size is no more than that, that a server
-  built over the second directory answers the extended body naming `s3` with `cached_tokens` 111,
-  its 111 stored ids, and then the body whose `messages` are `<130 copies of a>`, `{"role":
+  built over the second directory answers the body whose `messages` are `<110 copies of a>`,
+  `{"role":"assistant","content":"a"}` and `{"role":"user","content":"a"}` naming `s3` with
+  `cached_tokens` 111, and then the same shape of body holding `<130 copies of a>`, `{"role":
   "assistant","content":"a"}` and `{"role":"user","content":"a"}` naming `s1` with `cached_tokens`
   0, which would be 131 were its file still there, so the oldest file is the one that went and not
   the newest, and that a server built with a third directory and `context_bytes` 1 answers the `s1`
@@ -285,20 +295,4 @@ fixture's model completes with), then `{"role":"user","content":"a"}`, with `"ma
 
 ## Amendments
 
-- `04/FR-001`: the default `environment` also holds `XDG_DATA_HOME` read from the process
-  environment, beside `XDG_CONFIG_HOME` and `HOME`.
-- `04/FR-006`: `context` joins `host`, `port`, `models`, `sessions` and `kv_cache` as a top-level key a
-  read file may hold.
-- `04/FR-007`: `context` set to `false`, or to an object holding a `path` string of one or more
-  characters, a `bytes` integer of one or more and no other key, is valid, and any other shape is a
-  fault named `context` after `kv_cache` when several are.
-- `04/FR-011`: `start` also receives `context_path` and `context_bytes`, the file's `context` path
-  and budget, or `$XDG_DATA_HOME/tllm/contexts` or `$HOME/.local/share/tllm/contexts` and
-  1073741824 when the file sets no `context` or no file is read, or nil for both when the file
-  sets `"context":false`, or nil for both when the file sets no `context` and neither
-  `XDG_DATA_HOME` nor `HOME` holds a value, so a path the file names is never dropped.
-- `23/FR-003`: the turn reserves a sequence and reads the whole prompt from position zero, taking
-  `cached_tokens` as 0, only when no context file for the name is restored as `27/FR-002` says; a
-  restored file continues the conversation as `23/FR-001` continues a stored one, and when a
-  restored file is not the prompt's continuation the sequence its load reserved is released as
-  `27/FR-013` says before that reservation.
+- None.

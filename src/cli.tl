@@ -164,6 +164,10 @@ local function process_environment(): {string: string}
   if xdg is string then
     environment.XDG_CONFIG_HOME = xdg
   end
+  local data = os.getenv("XDG_DATA_HOME")
+  if data is string then
+    environment.XDG_DATA_HOME = data
+  end
   local home = os.getenv("HOME")
   if home is string then
     environment.HOME = home
@@ -220,7 +224,7 @@ local function serve_code(
     config_path = explicit
   end
 
-  local ok, file_host, file_port, models, file_sessions, file_cache = config.load(
+  local ok, file_host, file_port, models, file_sessions, file_cache, context_path, context_bytes = config.load(
     environment, config_path, path_word, write_err
   )
   if not ok then
@@ -248,6 +252,8 @@ local function serve_code(
       path = chosen.path,
       sessions = file_sessions or 4,
       kv_cache = cache_type,
+      context_path = context_path,
+      context_bytes = context_bytes,
     },
     write_err
   )

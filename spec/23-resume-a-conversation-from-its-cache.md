@@ -98,9 +98,13 @@ start: integer | nil
   carries its `sequence` and `positions` in place of a model, `positions` being the positions
   `reserve` gave that sequence. A streamed turn stores when `serve.step` ends it, `25/FR-009`'s
   case.
-- FR-003 (US-001) WHEN a turn asks for a `session_id` the server holds no conversation under, THE
-  SYSTEM SHALL reserve that conversation a sequence and read the whole prompt from position zero,
-  taking `cached_tokens` as 0 when the reply is not streamed.
+- FR-003 (US-001) WHEN a turn asks for a `session_id` the server holds no conversation under and
+  no context file for the name is restored as `27/FR-002` says, THE SYSTEM SHALL reserve that
+  conversation a sequence and read the whole prompt from position zero, taking `cached_tokens` as 0
+  when the reply is not streamed; a restored file continues the conversation as FR-001 continues a
+  stored one, and WHEN a restored file's ids are not the prompt's first ids, or hold all of them,
+  THE SYSTEM SHALL release the sequence its load reserved as `27/FR-013` says before that
+  reservation.
 - FR-004 (US-001) WHEN the server reserves a conversation's sequence, THE SYSTEM SHALL reserve it
   at twice the turn's need, or the file window's positions when that is fewer, the turn's need
   being the prompt's ids plus the budget minus one, and the sequence stays reserved while the

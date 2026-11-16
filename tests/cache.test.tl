@@ -545,3 +545,113 @@ test.it(
     end
   end
 )
+
+local function long_meta(): {Meta}
+  local meta = speakable_meta()
+  for index, entry in ipairs(meta) do
+    if entry.name == "qwen35moe.context_length" then
+      meta[index] = mint(entry.name, 1056)
+    end
+  end
+  return meta
+end
+
+test.it(
+  "a save and a load cost about what their bytes cost",
+  function()
+    local handle = loaded(long_meta(), speakable_entries())
+    local model, failure = compute.model(backend, handle, 1056, "f32", 2)
+    test.equal(failure, nil)
+    local generation = model as compute.Model
+    test.equal(generation:reserve("a", 1056), nil)
+    for position = 0, 1023 do
+      local _, line = generation:pass(
+        {{sequence = "a", token = 0, position = position}}
+      )
+      test.equal(line, nil)
+    end
+
+    local ids: {integer} = {}
+    for index = 1, 1024 do
+      ids[index] = 0
+    end
+    local path = ROOT .. "/context_perf"
+    test.equal(generation:save("a", ids, path), nil)
+    local held = fs.stat(path)
+    test.truthy(held)
+    local size = math.floor(tonumber((held as fs.Stat).size) as number)
+    test.greater(size, 1024)
+
+    local mirror = ROOT .. "/context_mirror"
+    local filler = string.rep("x", size)
+
+    local function shortest_save(): number
+      local best = math.huge
+      for _ = 1, 5 do
+        local started = now()
+        local line = generation:save("a", ids, path)
+        local taken = now() - started
+        test.equal(line, nil)
+        if taken < best then
+          best = taken
+        end
+      end
+      return best
+    end
+
+    local function shortest_write(): number
+      local best = math.huge
+      for _ = 1, 5 do
+        local started = now()
+        local wrote = fs.write(mirror, filler)
+        local taken = now() - started
+        test.truthy(wrote)
+        if taken < best then
+          best = taken
+        end
+      end
+      return best
+    end
+
+    local function shortest_load(): number
+      local best = math.huge
+      for _ = 1, 5 do
+        local started = now()
+        local given, line = generation:load("a", path)
+        local taken = now() - started
+        test.equal(line, nil)
+        test.equal(#(given as {integer}), 1024)
+        generation:release("a")
+        if taken < best then
+          best = taken
+        end
+      end
+      return best
+    end
+
+    local function shortest_read(): number
+      local best = math.huge
+      for _ = 1, 5 do
+        local started = now()
+        local bytes = fs.read(path)
+        local taken = now() - started
+        test.truthy(bytes)
+        if taken < best then
+          best = taken
+        end
+      end
+      return best
+    end
+
+    test.equal(generation:save("a", ids, path), nil)
+    generation:release("a")
+    test.truthy(generation:load("a", path))
+
+    local shortest_saved = shortest_save()
+    generation:release("a")
+    local shortest_loaded = shortest_load()
+
+    test.lessEqual(shortest_saved, 10 * shortest_write())
+    test.lessEqual(shortest_loaded, 10 * shortest_read())
+  end
+)

@@ -345,7 +345,12 @@ local function rejected(server: tltp.Server, body: string): ErrorBody
 end
 
 local function build(
-  file_path: string, name: string, sessions?: integer, cache?: compute.CacheType
+  file_path: string,
+  name: string,
+  sessions?: integer,
+  cache?: compute.CacheType,
+  context_path?: string,
+  context_bytes?: integer
 ): tltp.Server
   local server, failure = serve.build(
     {
@@ -355,6 +360,8 @@ local function build(
       path = file_path,
       sessions = sessions or 4,
       kv_cache = cache or "f32",
+      context_path = context_path,
+      context_bytes = context_bytes,
     }
   )
   test.equal(failure, nil, file_path)
@@ -1767,5 +1774,259 @@ test.it(
     test.includes(written[1], "2")
     test.equal(written[1]:sub(-1), "\n")
     test.equal(written[1]:find("\n"), #written[1])
+  end
+)
+
+local function context_names(dir: string): {string}
+  local names: {string} = {}
+  local next_entry = fs.readdir(dir)
+  if next_entry is nil then
+    return names
+  end
+  while true do
+    local entry = next_entry()
+    if entry is nil then
+      break
+    end
+    names[#names + 1] = (entry as fs.DirEntry).name
+  end
+  table.sort(names)
+  return names
+end
+
+local function context_size(dir: string, name: string): integer
+  local listed = fs.stat(dir .. "/" .. name)
+  test.truthy(listed, name)
+  return math.floor(tonumber((listed as fs.Stat).size) as number)
+end
+
+local function extended_with(id: string): string
+  return named(
+    '{"messages":[{"role":"user","content":"a"},'
+      .. '{"role":"assistant","content":"a"},'
+      .. '{"role":"user","content":"a"}],"max_tokens":2,"session_id":"s"}',
+    id
+  )
+end
+
+test.it(
+  "a restart continues a conversation from its file",
+  function()
+    local file_path = meta_file(t001_meta(), t001_entries())
+    local first_dir = ROOT .. "/contexts1"
+    local server = build(file_path, "m", 4, "f32", first_dir, 1000000)
+    test.truthy(fs.isdir(first_dir))
+
+    local response, stream_fn = serve.stream(
+      server,
+      '{"messages":[{"role":"user","content":"a"}],"max_tokens":2,'
+        .. '"stream":true,"session_id":"s"}'
+    )
+    test.equal(response.status, "OK")
+    test.truthy(stream_fn)
+    begun(stream_fn as tltp.StreamFn, nil, "A")
+    while serve.step(server) > 0 do
+    end
+    local stored_names = context_names(first_dir)
+    test.equal(#stored_names, 1)
+    test.includes(stored_names[1], ".context")
+    local stored_size = context_size(first_dir, stored_names[1])
+
+    local second_dir = temp_dir()
+    fs.write(
+      second_dir .. "/" .. stored_names[1],
+      fs.read(first_dir .. "/" .. stored_names[1]) as string
+    )
+    local copied = context_names(second_dir)
+    test.equal(#copied, 1)
+    test.equal(context_size(second_dir, copied[1]), stored_size)
+
+    local restarted = build(file_path, "m", 4, "f32", first_dir, 1000000)
+    local revived = answered(restarted, extended_with("s"))
+    test.deepEqual(
+      revived.usage,
+      {
+        prompt_tokens = 3,
+        completion_tokens = 2,
+        total_tokens = 5,
+        prompt_tokens_details = {cached_tokens = 2},
+      }
+    )
+
+    local memory = build(file_path, "m", 4, "f32")
+    answered(
+      memory,
+      '{"messages":[{"role":"user","content":"a"}],"max_tokens":2,'
+        .. '"session_id":"s"}'
+    )
+    local wanted = answered(memory, extended_with("s"))
+    test.equal(
+      revived.choices[1].message.content, wanted.choices[1].message.content
+    )
+
+    local other = answered(restarted, extended_with("t"))
+    test.equal(other.usage.prompt_tokens_details.cached_tokens, 0)
+    test.equal(#context_names(first_dir), 2)
+
+    local loose = (extended_with("s"):gsub(',"session_id":"s"', ""))
+    local plain = answered(restarted, loose)
+    test.equal(plain.usage.prompt_tokens_details.cached_tokens, 0)
+    test.equal(#context_names(first_dir), 2)
+
+    local halved = build(file_path, "m", 4, "f16", second_dir, 1000000)
+    local half = answered(halved, extended_with("s"))
+    test.equal(half.usage.prompt_tokens_details.cached_tokens, 0)
+    local half_names = context_names(second_dir)
+    test.equal(#half_names, 1)
+    test.notEqual(context_size(second_dir, half_names[1]), stored_size)
+
+    local blocker = ROOT .. "/blocker"
+    fs.write(blocker, "not a directory")
+    local refused_path = blocker .. "/contexts"
+    local uncreated, uncreated_line = serve.build(
+      {
+        host = "127.0.0.1",
+        port = 9090,
+        name = "m",
+        path = file_path,
+        sessions = 4,
+        kv_cache = "f32",
+        context_path = refused_path,
+        context_bytes = 1000,
+      }
+    )
+    test.equal(uncreated, nil)
+    test.includes(uncreated_line as string, refused_path)
+
+    local lost_dir = temp_dir()
+    local writing = build(file_path, "m", 4, "f32", lost_dir, 1000000)
+    fs.rmdir(lost_dir)
+    fs.write(lost_dir, "not a directory")
+    local unpaired = '{"messages":[{"role":"user","content":"a"}],"max_tokens":2,'
+      .. '"session_id":"f"}'
+    local unwritten = answered(writing, unpaired)
+    local contextless = answered(build(file_path, "m", 4, "f32"), unpaired)
+    test.deepEqual(unwritten.usage, contextless.usage)
+    test.equal(
+      unwritten.choices[1].message.content,
+      contextless.choices[1].message.content
+    )
+    local followed = answered(writing, extended_with("f"))
+    test.equal(followed.usage.prompt_tokens_details.cached_tokens, 2)
+
+    local fourth_dir = ROOT .. "/contexts4"
+    local kept = build(file_path, "m", 4, "f32", fourth_dir, 1000000)
+    answered(
+      kept,
+      '{"messages":[{"role":"user","content":"a"}],"max_tokens":2,'
+        .. '"session_id":"s"}'
+    )
+    local rebuilt = build(file_path, "m", 4, "f32", fourth_dir, 1000000)
+    local moved = answered(
+      rebuilt,
+      '{"messages":[{"role":"user","content":"b"}],"max_tokens":2,'
+        .. '"session_id":"s"}'
+    )
+    test.equal(moved.usage.prompt_tokens_details.cached_tokens, 0)
+    for _, id in ipairs({"t", "u", "v"}) do
+      local next_reply = serve.answer(
+        rebuilt,
+        '{"messages":[{"role":"user","content":"b"}],"max_tokens":2,'
+          .. '"session_id":"'
+          .. id
+          .. '"}'
+      )
+      test.equal(next_reply.status, "OK", id)
+    end
+  end
+)
+
+local function long_body(count: integer, id: string): string
+  return '{"messages":[{"role":"user","content":"'
+    .. string.rep("a", count)
+    .. '"}],"max_tokens":2,"session_id":"'
+    .. id
+    .. '"}'
+end
+
+local function long_extended(count: integer, id: string): string
+  return '{"messages":[{"role":"user","content":"'
+    .. string.rep("a", count)
+    .. '"},{"role":"assistant","content":"a"},'
+    .. '{"role":"user","content":"a"}],"max_tokens":2,"session_id":"'
+    .. id
+    .. '"}'
+end
+
+test.it(
+  "the files stay inside the configured budget",
+  function()
+    local file_path = meta_file(t001_meta(), t001_entries())
+    local wide_dir = temp_dir()
+    local wide = build(file_path, "m", 4, "f32", wide_dir, 10000000)
+    answered(wide, long_body(130, "s1"))
+    local wide_names = context_names(wide_dir)
+    test.equal(#wide_names, 1)
+    local budget = context_size(wide_dir, wide_names[1])
+
+    local kept_dir = temp_dir()
+    local kept = build(file_path, "m", 4, "f32", kept_dir, budget)
+    for _, step in ipairs({{130, "s1"}, {120, "s2"}, {110, "s3"}}) do
+      answered(kept, long_body(step[1] as integer, step[2] as string))
+      local names = context_names(kept_dir)
+      test.equal(#names, 1, step[2] as string)
+      test.lessEqual(
+        context_size(kept_dir, names[1]), budget, step[2] as string
+      )
+    end
+
+    local again = build(file_path, "m", 4, "f32", kept_dir, budget)
+    local newest = answered(again, long_extended(110, "s3"))
+    test.equal(newest.usage.prompt_tokens_details.cached_tokens, 111)
+    test.equal(newest.usage.prompt_tokens, 112)
+
+    local gone = answered(again, long_extended(130, "s1"))
+    test.equal(gone.usage.prompt_tokens_details.cached_tokens, 0)
+    test.equal(gone.usage.prompt_tokens, 132)
+
+    local tight_dir = temp_dir()
+    local tight = build(file_path, "m", 4, "f32", tight_dir, 1)
+    answered(tight, long_body(130, "s1"))
+    test.equal(#context_names(tight_dir), 0)
+  end
+)
+
+test.it(
+  "a session id cannot name a file outside the directory",
+  function()
+    local file_path = meta_file(t001_meta(), t001_entries())
+    local dir = temp_dir()
+    local server = build(file_path, "m", 4, "f32", dir, 10000000)
+
+    local ids = {"../escaped", "x/y", "x_y", "a/b", "a%2Fb", "."}
+    for _, id in ipairs(ids) do
+      answered(
+        server,
+        '{"messages":[{"role":"user","content":"a"}],"max_tokens":2,'
+          .. '"session_id":"'
+          .. id
+          .. '"}'
+      )
+    end
+
+    local names = context_names(dir)
+    test.equal(#names, 6)
+    for _, name in ipairs(names) do
+      test.equal(name:sub(-8), ".context", name)
+      test.falsy(fs.isdir(dir .. "/" .. name), name)
+    end
+    local parent = dir:match("^(.*)/") as string
+    test.falsy(fs.exists(parent .. "/escaped.context"))
+
+    local again = build(file_path, "m", 4, "f32", dir, 10000000)
+    for _, id in ipairs({"../escaped", "x/y", "x_y"}) do
+      local reply = answered(again, extended_with(id))
+      test.equal(reply.usage.prompt_tokens_details.cached_tokens, 2, id)
+    end
   end
 )

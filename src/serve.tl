@@ -1,3 +1,4 @@
+local fs = require("fs")
 local chat = require("tllm.chat")
 local compute = require("tllm.compute")
 local generate = require("tllm.generate")
@@ -14,6 +15,8 @@ local record serve
     backend: compute.Backend
     kv_cache: compute.CacheType | nil
     generation: compute.Model
+    context_path: string | nil
+    context_bytes: integer | nil
   end
 
   record Endpoint
@@ -23,6 +26,8 @@ local record serve
     path: string
     sessions: integer
     kv_cache: compute.CacheType | nil
+    context_path: string | nil
+    context_bytes: integer | nil
   end
 
   record Session
@@ -108,6 +113,29 @@ end
 
 local DEFAULT_BUDGET: integer = 256
 local CHAT_PATH = "/v1/chat/completions"
+local CONTEXT_SUFFIX = ".context"
+
+local record ContextFile
+  name: string
+  size: integer
+  modifyTime: number
+  written: integer
+end
+
+-- the session id as text a file name can hold, so no id reaches another path
+local function escaped(id: string): string
+  local parts: {string} = {}
+  for index = 1, #id do
+    local byte = id:byte(index) as integer
+    local char = string.char(byte)
+    if char:match("^[%w._-]$") then
+      parts[#parts + 1] = char
+    else
+      parts[#parts + 1] = string.format("%%%02X", byte)
+    end
+  end
+  return table.concat(parts)
+end
 
 local models: {tltp.Server: serve.Model} = {}
 local stores: {tltp.Server: Store} = {}
@@ -357,6 +385,199 @@ local function begins_with(ids: {integer}, prefix: {integer}): boolean
   return true
 end
 
+local writes: {tltp.Server: {string: integer}} = {}
+local write_count: integer = 0
+
+local function recorded_write(server: tltp.Server, name: string)
+  local order = writes[server]
+  if order is nil then
+    order = {}
+    writes[server] = order
+  end
+  write_count = write_count + 1
+  order[name] = write_count
+end
+
+local function write_order(server: tltp.Server, name: string): integer
+  local order = writes[server]
+  if order is nil then
+    return 0
+  end
+  return order[name] or 0
+end
+
+local function context_file(model: serve.Model, id: string): string | nil
+  local dir = model.context_path
+  if dir is nil then
+    return nil
+  end
+  return dir .. "/" .. escaped(id) .. CONTEXT_SUFFIX
+end
+
+local function context_files(server: tltp.Server, dir: string): {ContextFile}
+  local files: {ContextFile} = {}
+  local next_entry = fs.readdir(dir)
+  if next_entry is nil then
+    return files
+  end
+  while true do
+    local entry = next_entry()
+    if entry is nil then
+      break
+    end
+    local name = (entry as fs.DirEntry).name
+    if name:sub(-#CONTEXT_SUFFIX) == CONTEXT_SUFFIX then
+      -- the file's own mode tells its type, where a directory entry's may not
+      local details = fs.stat(dir .. "/" .. name)
+      if not (details is nil) then
+        local info = details as fs.Stat
+        if info.type == "file" then
+          files[#files + 1] = {
+            name = name,
+            size = math.floor(tonumber(info.size) as number),
+            modifyTime = tonumber(info.modifyTime) as number,
+            written = write_order(server, name),
+          }
+        end
+      end
+    end
+  end
+  return files
+end
+
+-- the directory holds no more than the budget: the oldest files go first,
+-- and a file that alone holds more than the budget goes alone
+local function trimmed(server: tltp.Server, model: serve.Model, name: string)
+  local dir = model.context_path
+  local budget = model.context_bytes
+  if dir is nil or budget is nil then
+    return
+  end
+  local files = context_files(server, dir)
+  local total = 0
+  local fresh: ContextFile | nil = nil
+  for _, file in ipairs(files) do
+    total = total + file.size
+    if file.name == name then
+      fresh = file
+    end
+  end
+  if fresh is nil then
+    return
+  end
+  local newest = fresh as ContextFile
+  if newest.size > budget then
+    fs.delete(dir .. "/" .. newest.name)
+    return
+  end
+  if total <= budget then
+    return
+  end
+  table.sort(
+    files,
+    function(left: ContextFile, right: ContextFile): boolean
+      if left.modifyTime ~= right.modifyTime then
+        return left.modifyTime < right.modifyTime
+      end
+      if left.written ~= right.written then
+        return left.written < right.written
+      end
+      return left.name < right.name
+    end
+  )
+  for _, file in ipairs(files) do
+    if total <= budget then
+      break
+    end
+    if file.name ~= newest.name then
+      local path = dir .. "/" .. file.name
+      fs.delete(path)
+      if fs.exists(path) then
+        break
+      end
+      total = total - file.size
+    end
+  end
+end
+
+-- the conversation's file, written for a turn that stored it
+local function stored(
+  server: tltp.Server,
+  model: serve.Model,
+  sequence: string,
+  ids: {integer},
+  id: string
+)
+  local path = context_file(model, id)
+  if path is nil then
+    return
+  end
+  local line = model.generation:save(sequence, ids, path)
+  if not (line is nil) then
+    return
+  end
+  local name = escaped(id) .. CONTEXT_SUFFIX
+  recorded_write(server, name)
+  trimmed(server, model, name)
+end
+
+local function free_name(server: tltp.Server, base: string): string
+  local attempt = 0
+  while attempt < 100000 do
+    local name = base
+    if attempt > 0 then
+      if base == "" then
+        name = "turn" .. attempt
+      else
+        name = base .. "#" .. attempt
+      end
+    end
+    if not is_reserved(server, name) then
+      return name
+    end
+    attempt = attempt + 1
+  end
+  return base
+end
+
+-- the conversation the file under this id holds, when it continues the prompt
+local function restored_session(
+  server: tltp.Server, id: string, ids: {integer}, needed: integer
+): Held | nil
+  local model = models[server]
+  if model is nil then
+    return nil
+  end
+  local path = context_file(model, id)
+  if path is nil or not fs.isfile(path) then
+    return nil
+  end
+  local name = free_name(server, id)
+  local file_ids = model.generation:load(name, path)
+  if file_ids is nil then
+    return nil
+  end
+  local restored = file_ids as {integer}
+  local capacity = model.generation:capacity(name)
+  if
+    not (#restored < #ids and begins_with(ids, restored))
+    or not (capacity is integer)
+    or needed > (capacity as integer)
+  then
+    release_name(server, name)
+    return nil
+  end
+  return {
+    ids = restored,
+    session = {
+      id = id,
+      length = #restored,
+      sequence = name,
+      positions = capacity as integer,
+    },
+  }
+end
+
 local function forgotten(store: Store, id: string)
   store.held[id] = nil
   for index = #store.order, 1, -1 do
@@ -501,6 +722,19 @@ local function prepared(
         forgotten(store, id)
         release_name(server, session.sequence)
       end
+    else
+      if #store.order >= store.limit then
+        evict_one(server, store)
+      end
+      if #store.order < store.limit then
+        local revived = restored_session(server, id, ids, needed)
+        if not (revived is nil) then
+          local hold = revived as Held
+          store.held[id] = hold
+          used(store, id)
+          found_session = hold.session
+        end
+      end
     end
   end
 
@@ -626,6 +860,7 @@ local function kept(ready: Prepared, sampled: {integer})
       },
     }
     used(store, id)
+    stored(ready.server, ready.model, ready.sequence, ids, id)
     unmark_held(ready.server, ready.sequence)
     ready.reserved = false
     return
@@ -961,6 +1196,14 @@ local function install(server: tltp.Server, name: string)
 end
 
 function serve.build(endpoint: serve.Endpoint): tltp.Server | nil, string | nil
+  local context_path = endpoint.context_path
+  if context_path is string then
+    fs.mkdirAll(context_path)
+    if not fs.isdir(context_path) then
+      return nil, "build: cannot create " .. context_path
+    end
+  end
+
   local handle, failure = weights.load(endpoint.path)
   if handle is nil then
     return nil, failure
@@ -994,6 +1237,8 @@ function serve.build(endpoint: serve.Endpoint): tltp.Server | nil, string | nil
     backend = backend,
     kv_cache = endpoint.kv_cache,
     generation = generation,
+    context_path = endpoint.context_path,
+    context_bytes = endpoint.context_bytes,
   }
   stores[server] = {held = {}, order = {}, limit = endpoint.sessions}
   install(server, endpoint.name)

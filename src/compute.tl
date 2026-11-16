@@ -1,4 +1,5 @@
 local ffi = require("ffi")
+local fs = require("fs")
 local gguf = require("tllm.gguf")
 local weights = require("tllm.weights")
 
@@ -249,6 +250,10 @@ local record compute
     cache_bytes: function(Attention, string, string): integer | nil
     reserve: function(Attention, string, integer, {string}): string | nil
     release: function(Attention, string)
+    snapshot: function(
+      Attention, string, string, integer
+    ): string | nil, string | nil
+    restore: function(Attention, string, string, integer, string): string | nil
   end
 
   record FeedForward
@@ -261,6 +266,12 @@ local record compute
       LinearAttention, {Row}, string
     ): {{number}} | nil, string | nil
     release: function(LinearAttention, string)
+    snapshot: function(
+      LinearAttention, string, string, integer
+    ): string | nil, string | nil
+    restore: function(
+      LinearAttention, string, string, integer, string
+    ): string | nil
   end
 
   record Model
@@ -270,7 +281,10 @@ local record compute
     reserve: function(Model, string, integer): string | nil
     release: function(Model, string)
     cache_bytes: function(Model, string, string): integer | nil
+    capacity: function(Model, string): integer | nil
     pass: function(Model, {Input}): {{number}} | nil, string | nil
+    save: function(Model, string, {integer}, string): string | nil
+    load: function(Model, string, string): {integer} | nil, string | nil
   end
 
   load: function(path?: string, offload?: boolean): Backend | nil, string | nil
@@ -411,6 +425,8 @@ local record ModelState
   sequences: {string: SequenceState}
   limit: integer
   positions: integer
+  fingerprint: integer
+  cache_code: integer
   full_prefixes: {string}
   linear_prefixes: {string}
 end
@@ -1896,6 +1912,62 @@ local function attention_reserve(
   return nil
 end
 
+-- the bytes one block's keys, or its values, hold for this many positions
+local function attention_bytes(
+  state: AttentionState, positions: integer
+): integer
+  local geometry = state.geometry
+  local kind = cache_kind_of(geometry.cache_type) as CacheKind
+  return positions * geometry.kv_heads * cache_row_size(
+    kind, geometry.head_length
+  )
+end
+
+local function attention_snapshot(
+  state: AttentionState, sequence: string, prefix: string, positions: integer
+): string | nil, string | nil
+  local held = state.caches[sequence]
+  local cache: Cache | nil = nil
+  if not (held is nil) then
+    cache = held[prefix]
+  end
+  if cache is nil then
+    return nil, prefix .. " holds no cache"
+  end
+  local stored = cache as Cache
+  if stored.count ~= positions then
+    return nil,
+      prefix .. " took " .. stored.count .. " positions, not " .. positions
+  end
+  local count = attention_bytes(state, positions)
+  return ffi.string(stored.keys, count) .. ffi.string(stored.values, count), nil
+end
+
+local function attention_restore(
+  state: AttentionState,
+  sequence: string,
+  prefix: string,
+  positions: integer,
+  payload: string
+): string | nil
+  local count = attention_bytes(state, positions)
+  if #payload ~= 2 * count then
+    return prefix .. " holds " .. #payload .. " bytes, not " .. (2 * count)
+  end
+  local cache, failure = cache_of(state, sequence, prefix)
+  if cache is nil then
+    return failure
+  end
+  local stored = cache as Cache
+  local base = ffi.cast("intptr_t", payload) as integer
+  ffi.copy(stored.keys, payload, count)
+  ffi.copy(
+    stored.values, ffi.cast("const char *", base + count) as ffi.CData, count
+  )
+  stored.count = positions
+  return nil
+end
+
 -- every query head's weights over the positions zero to `position` and the
 -- attention numbers they give, computed by ggml over the prefix's cache
 local function attended_heads(
@@ -2833,18 +2905,24 @@ local function prefixes_in(
   return held
 end
 
+-- the floats a linear block's history and its state hold
+local function linear_floats(shape: LinearShape): integer, integer
+  local head_rows = shape.key_heads * shape.key_length
+  local rows = 2 * head_rows + shape.value_heads * shape.value_length
+  local history = (shape.conv_kernel - 1) * rows
+  -- one float stands in for an empty history, so the field never holds nil
+  if history < 1 then
+    history = 1
+  end
+  local state = shape.key_length * shape.value_length * shape.value_heads
+  return history, state
+end
+
 local function linear_prefix_of(
   state: LinearState, sequence: string, prefix: string
 ): LinearKept | nil, string | nil
   local shape = state.shape
-  local head_rows = shape.key_heads * shape.key_length
-  local rows = 2 * head_rows + shape.value_heads * shape.value_length
-  -- one float stands in for an empty history, so the field never holds nil
-  local history_floats = (shape.conv_kernel - 1) * rows
-  if history_floats < 1 then
-    history_floats = 1
-  end
-  local state_floats = shape.key_length * shape.value_length * shape.value_heads
+  local history_floats, state_floats = linear_floats(shape)
 
   local made_history, history = pcall(ffi.new, "float[?]", history_floats)
   if not made_history then
@@ -2876,6 +2954,68 @@ local function linear_release(state: LinearState, sequence: string)
     held[prefix] = nil
   end
   state.prefixes[sequence] = nil
+end
+
+local function linear_snapshot(
+  state: LinearState, sequence: string, prefix: string, positions: integer
+): string | nil, string | nil
+  local held = state.prefixes[sequence]
+  local kept: LinearKept | nil = nil
+  if not (held is nil) then
+    kept = held[prefix]
+  end
+  if kept is nil then
+    if positions == 0 then
+      return "", nil
+    end
+    return nil, prefix .. " holds no history"
+  end
+  local active = kept as LinearKept
+  if active.count ~= positions then
+    return nil,
+      prefix .. " took " .. active.count .. " positions, not " .. positions
+  end
+  if positions == 0 then
+    return "", nil
+  end
+  local history_floats, state_floats = linear_floats(state.shape)
+  return ffi.string(active.history, history_floats * F32_BYTES)
+    .. ffi.string(active.state, state_floats * F32_BYTES), nil
+end
+
+local function linear_restore(
+  state: LinearState,
+  sequence: string,
+  prefix: string,
+  positions: integer,
+  payload: string
+): string | nil
+  local history_floats, state_floats = linear_floats(state.shape)
+  local wanted = 0
+  if positions > 0 then
+    wanted = (history_floats + state_floats) * F32_BYTES
+  end
+  if #payload ~= wanted then
+    return prefix .. " holds " .. #payload .. " bytes, not " .. wanted
+  end
+  if positions == 0 then
+    return nil
+  end
+  local kept, failure = linear_prefix_of(state, sequence, prefix)
+  if kept is nil then
+    return failure
+  end
+  local active = kept as LinearKept
+  local history_bytes = history_floats * F32_BYTES
+  local base = ffi.cast("intptr_t", payload) as integer
+  ffi.copy(active.history, payload, history_bytes)
+  ffi.copy(
+    active.state,
+    ffi.cast("const char *", base + history_bytes) as ffi.CData,
+    state_floats * F32_BYTES
+  )
+  active.count = positions
+  return nil
 end
 
 local function linear_press(
@@ -3311,6 +3451,20 @@ function compute.attend(
   attention.release = function(_: compute.Attention, sequence: string)
     attention_release(state, sequence)
   end
+  attention.snapshot = function(
+    _: compute.Attention, sequence: string, prefix: string, positions: integer
+  ): string | nil, string | nil
+    return attention_snapshot(state, sequence, prefix, positions)
+  end
+  attention.restore = function(
+    _: compute.Attention,
+    sequence: string,
+    prefix: string,
+    positions: integer,
+    payload: string
+  ): string | nil
+    return attention_restore(state, sequence, prefix, positions, payload)
+  end
   return attention
 end
 
@@ -3384,6 +3538,23 @@ function compute.linear_attention(
   end
   linear.release = function(_: compute.LinearAttention, sequence: string)
     linear_release(state, sequence)
+  end
+  linear.snapshot = function(
+    _: compute.LinearAttention,
+    sequence: string,
+    prefix: string,
+    positions: integer
+  ): string | nil, string | nil
+    return linear_snapshot(state, sequence, prefix, positions)
+  end
+  linear.restore = function(
+    _: compute.LinearAttention,
+    sequence: string,
+    prefix: string,
+    positions: integer,
+    payload: string
+  ): string | nil
+    return linear_restore(state, sequence, prefix, positions, payload)
   end
   return linear
 end
@@ -3906,6 +4077,56 @@ local function sequence_release(state: ModelState, sequence: string)
   state.sequences[sequence] = nil
 end
 
+local CONTEXT_MAGIC: integer = 0x54584354
+local CONTEXT_VERSION: integer = 1
+local HASH_MODULUS: integer = 4294967296
+
+local function packed_u32(value: integer): string
+  return string.char(
+    value % 256,
+    math.floor(value / 256) % 256,
+    math.floor(value / 65536) % 256,
+    math.floor(value / 16777216) % 256
+  )
+end
+
+local function read_u32(text: string, at: integer): integer | nil
+  if at < 0 or at + 4 > #text then
+    return nil
+  end
+  local first, second, third, fourth = text:byte(at + 1, at + 4)
+  return first + second * 256 + third * 65536 + fourth * 16777216
+end
+
+local function salted(hash: integer, word: string): integer
+  local running = hash
+  for index = 1, #word do
+    running = (running * 31 + word:byte(index)) % HASH_MODULUS
+  end
+  return running
+end
+
+-- what a file records of the model it came from: every tensor's name, its
+-- dimensions and its type, in name order
+local function fingerprint_of(tensors: {string: Tensor}): integer
+  local names: {string} = {}
+  for name in pairs(tensors) do
+    names[#names + 1] = name
+  end
+  table.sort(names)
+  local hash = 2166136261
+  hash = salted(hash, "tllm.context/" .. CONTEXT_VERSION)
+  for _, name in ipairs(names) do
+    local tensor = tensors[name] as Tensor
+    hash = salted(hash, name)
+    for _, dimension in ipairs(tensor.dims) do
+      hash = salted(hash, tostring(dimension) .. ",")
+    end
+    hash = salted(hash, tensor.kind.name .. ";")
+  end
+  return hash
+end
+
 local function model_pass(
   state: ModelState, inputs: {compute.Input}
 ): {{number}} | nil, string | nil
@@ -4018,6 +4239,7 @@ function compute.model(
   if limit < 1 then
     return nil, "model: sequences is " .. limit
   end
+  local cached: compute.CacheType = cache_type or "f16"
   local plan, plan_line = model_plan(backend, handle, positions, cache_type)
   if plan is nil then
     return nil, plan_line
@@ -4045,6 +4267,8 @@ function compute.model(
     sequences = {},
     limit = limit,
     positions = plan.positions,
+    fingerprint = fingerprint_of(plan.mapped.tensors),
+    cache_code = (cache_kind_of(cached) as CacheKind).code,
     full_prefixes = full_prefixes,
     linear_prefixes = linear_prefixes,
   }
@@ -4093,6 +4317,212 @@ function compute.model(
       return nil
     end
     return attention:cache_bytes(sequence, prefix)
+  end
+  model.capacity = function(_: compute.Model, sequence: string): integer | nil
+    local held = state.sequences[sequence]
+    if held is nil then
+      return nil
+    end
+    return held.capacity
+  end
+  model.save = function(
+    _: compute.Model, sequence: string, ids: {integer}, path: string
+  ): string | nil
+    local held = state.sequences[sequence]
+    if held is nil then
+      return "save: sequence " .. sequence .. " is not reserved"
+    end
+    local taken = held.taken
+    if #ids ~= taken then
+      return "save: sequence "
+        .. sequence
+        .. " took "
+        .. taken
+        .. " positions, not "
+        .. #ids
+        .. " ids"
+    end
+
+    local chunks: {string} = {}
+    chunks[#chunks + 1] = packed_u32(CONTEXT_MAGIC)
+    chunks[#chunks + 1] = packed_u32(CONTEXT_VERSION)
+    chunks[#chunks + 1] = packed_u32(#ids)
+    for _, id in ipairs(ids) do
+      chunks[#chunks + 1] = packed_u32(id)
+    end
+    chunks[#chunks + 1] = packed_u32(state.fingerprint)
+    chunks[#chunks + 1] = packed_u32(state.cache_code)
+    chunks[#chunks + 1] = packed_u32(held.capacity)
+    chunks[#chunks + 1] = packed_u32(taken)
+    chunks[#chunks + 1] = packed_u32(state.count)
+
+    for index = 0, state.count - 1 do
+      local prefix = "blk." .. index .. "."
+      local full = state.kinds[index + 1]
+      local kind = 1
+      if not full then
+        kind = 0
+      end
+      local payload: string | nil = nil
+      local line: string | nil = nil
+      if full then
+        payload, line = (state.attention as compute.Attention):snapshot(
+          sequence, prefix, taken
+        )
+      else
+        payload, line = (state.linear as compute.LinearAttention):snapshot(
+          sequence, prefix, taken
+        )
+      end
+      if payload is nil then
+        return "save: sequence " .. sequence .. ": " .. (line as string)
+      end
+      local bytes = payload as string
+      chunks[#chunks + 1] = packed_u32(kind)
+      chunks[#chunks + 1] = packed_u32(taken)
+      chunks[#chunks + 1] = packed_u32(#bytes)
+      chunks[#chunks + 1] = bytes
+    end
+
+    if not fs.write(path, table.concat(chunks)) then
+      return "save: cannot write " .. path
+    end
+    return nil
+  end
+  model.load = function(
+    _: compute.Model, sequence: string, path: string
+  ): {integer} | nil, string | nil
+    local source = fs.read(path)
+    if source is nil then
+      return nil, "load: cannot read " .. path
+    end
+    local text = source as string
+    local function refused(reason: string): string
+      return "load: " .. path .. ": " .. reason
+    end
+
+    local magic = read_u32(text, 0)
+    if magic ~= CONTEXT_MAGIC then
+      return nil, refused("not a context file")
+    end
+    local version = read_u32(text, 4)
+    if version is nil then
+      return nil, refused("shorter than its version")
+    end
+    if version ~= CONTEXT_VERSION then
+      return nil, refused("version " .. version .. " is not known")
+    end
+    local count = read_u32(text, 8)
+    if count is nil then
+      return nil, refused("shorter than its ids")
+    end
+    local at = 12 + 4 * count
+    if at > #text then
+      return nil, refused("shorter than its " .. count .. " ids")
+    end
+    local ids: {integer} = {}
+    for index = 1, count do
+      ids[index] = read_u32(text, 12 + 4 * (index - 1)) as integer
+    end
+
+    local fingerprint = read_u32(text, at)
+    if fingerprint is nil then
+      return nil, refused("shorter than its fingerprint")
+    end
+    local cache_code = read_u32(text, at + 4)
+    if cache_code is nil then
+      return nil, refused("shorter than its cache type")
+    end
+    local capacity = read_u32(text, at + 8)
+    if capacity is nil then
+      return nil, refused("shorter than its capacity")
+    end
+    local taken = read_u32(text, at + 12)
+    if taken is nil then
+      return nil, refused("shorter than its positions")
+    end
+    local blocks = read_u32(text, at + 16)
+    if blocks is nil then
+      return nil, refused("shorter than its blocks")
+    end
+    at = at + 20
+
+    if fingerprint ~= state.fingerprint then
+      return nil, refused("another model's tensors")
+    end
+    if cache_code ~= state.cache_code then
+      return nil, refused("another cache type")
+    end
+    if capacity > state.positions then
+      return nil,
+        refused("capacity " .. capacity .. " past the " .. state.positions)
+    end
+    if taken > capacity then
+      return nil, refused("taken " .. taken .. " past capacity " .. capacity)
+    end
+    if count ~= taken then
+      return nil, refused(count .. " ids for " .. taken .. " positions")
+    end
+    if blocks ~= state.count then
+      return nil, refused(blocks .. " blocks for " .. state.count)
+    end
+
+    local reserve_line = sequence_reserve(state, sequence, capacity)
+    if not (reserve_line is nil) then
+      return nil, reserve_line
+    end
+    local function give_up(reason: string): string
+      sequence_release(state, sequence)
+      return refused(reason)
+    end
+
+    for index = 0, state.count - 1 do
+      local prefix = "blk." .. index .. "."
+      local kind = read_u32(text, at)
+      if kind is nil then
+        return nil, give_up("shorter than " .. prefix)
+      end
+      local took = read_u32(text, at + 4)
+      if took is nil then
+        return nil, give_up("shorter than " .. prefix)
+      end
+      local length = read_u32(text, at + 8)
+      if length is nil then
+        return nil, give_up("shorter than " .. prefix)
+      end
+      at = at + 12
+      local wanted = 0
+      if state.kinds[index + 1] then
+        wanted = 1
+      end
+      if kind ~= wanted then
+        return nil, give_up(prefix .. " holds another kind of block")
+      end
+      if took ~= taken then
+        return nil,
+          give_up(prefix .. " took " .. took .. " positions, not " .. taken)
+      end
+      if at + length > #text then
+        return nil, give_up("shorter than " .. prefix)
+      end
+      local payload = text:sub(at + 1, at + length)
+      at = at + length
+      local line: string | nil = nil
+      if wanted == 1 then
+        line = (state.attention as compute.Attention):restore(
+          sequence, prefix, took, payload
+        )
+      else
+        line = (state.linear as compute.LinearAttention):restore(
+          sequence, prefix, took, payload
+        )
+      end
+      if not (line is nil) then
+        return nil, give_up(line as string)
+      end
+    end
+    (state.sequences[sequence] as SequenceState).taken = taken
+    return ids, nil
   end
   model.pass = function(
     _: compute.Model, inputs: {compute.Input}

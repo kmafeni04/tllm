@@ -18,7 +18,13 @@ local record Settings
   models: {string: string}
   sessions: integer | nil
   kv_cache: compute.CacheType | nil
+  context_path: string | nil
+  context_bytes: integer | nil
+  context_off: boolean
+  context_set: boolean
 end
+
+local DEFAULT_CONTEXT_BYTES: integer = 1073741824
 
 local CACHE_TYPES: {string: compute.CacheType} = {
   f32 = "f32",
@@ -86,6 +92,7 @@ local function unknown_key(fields: Fields): string | nil
     models = true,
     sessions = true,
     kv_cache = true,
+    context = true,
   }
   local keys: {string} = {}
   for key in pairs(fields) do
@@ -124,7 +131,15 @@ local function parse(
   end
 
   local settings: Settings = {
-    host = nil, port = nil, models = {}, sessions = nil, kv_cache = nil
+    host = nil,
+    port = nil,
+    models = {},
+    sessions = nil,
+    kv_cache = nil,
+    context_path = nil,
+    context_bytes = nil,
+    context_off = false,
+    context_set = false,
   }
 
   local host = fields.host
@@ -248,6 +263,51 @@ local function parse(
     return nil
   end
 
+  local function bad_context(): nil
+    refuse(
+      write_err,
+      "config "
+        .. file_path
+        .. ": context must be false or an object holding a path string"
+        .. " and a bytes integer"
+    )
+    return nil
+  end
+
+  local context = fields.context
+  if context is boolean then
+    if context then
+      return bad_context()
+    end
+    settings.context_off = true
+  elseif context is ConfigObject then
+    local entry = context as Fields
+    local context_path = entry.path
+    local context_bytes = entry.bytes
+    local extra = false
+    for key in pairs(entry) do
+      if key ~= "path" and key ~= "bytes" then
+        extra = true
+        break
+      end
+    end
+    if
+      extra
+      or not (context_path is string)
+      or #(context_path as string) == 0
+      or not (context_bytes is number)
+      or context_bytes % 1 ~= 0
+      or context_bytes < 1
+    then
+      return bad_context()
+    end
+    settings.context_set = true
+    settings.context_path = context_path as string
+    settings.context_bytes = context_bytes as integer
+  elseif not (context is nil) then
+    return bad_context()
+  end
+
   local names: {string} = {}
   for name in pairs(settings.models) do
     names[#names + 1] = name
@@ -283,18 +343,43 @@ local function write_starter(file_path: string, write_err: function(string))
   refuse(write_err, "config: wrote a starter file at " .. file_path)
 end
 
+local function context_of(
+  settings: Settings | nil, environment: {string: string}
+): string | nil, integer | nil
+  if settings is Settings then
+    if settings.context_off then
+      return nil, nil
+    end
+    if settings.context_set then
+      return settings.context_path, settings.context_bytes
+    end
+  end
+  local data = environment.XDG_DATA_HOME
+  if data is string and data ~= "" then
+    return data .. "/tllm/contexts", DEFAULT_CONTEXT_BYTES
+  end
+  local home = environment.HOME
+  if home is string and home ~= "" then
+    return home .. "/.local/share/tllm/contexts", DEFAULT_CONTEXT_BYTES
+  end
+  return nil, nil
+end
+
 local function loaded(
-  settings: Settings | nil
-): boolean, string | nil, integer | nil, {string: string}, integer | nil, compute.CacheType | nil
+  settings: Settings | nil, environment: {string: string}
+): boolean, string | nil, integer | nil, {string: string}, integer | nil, compute.CacheType | nil, string | nil, integer | nil
+  local context_path, context_bytes = context_of(settings, environment)
   if settings is Settings then
     return true,
       settings.host,
       settings.port,
       settings.models,
       settings.sessions,
-      settings.kv_cache
+      settings.kv_cache,
+      context_path,
+      context_bytes
   end
-  return false, nil, nil, {}, nil, nil
+  return false, nil, nil, {}, nil, nil, context_path, context_bytes
 end
 
 function config.load(
@@ -302,14 +387,14 @@ function config.load(
   explicit: string | nil,
   path_word: boolean,
   write_err: function(string)
-): boolean, string | nil, integer | nil, {string: string}, integer | nil, compute.CacheType | nil
+): boolean, string | nil, integer | nil, {string: string}, integer | nil, compute.CacheType | nil, string | nil, integer | nil
   if explicit is string then
     local text = read_file(explicit)
     if text is nil then
       refuse(write_err, "config " .. explicit .. ": cannot be read")
-      return loaded(nil)
+      return loaded(nil, environment)
     end
-    return loaded(parse(explicit, text, write_err))
+    return loaded(parse(explicit, text, write_err), environment)
   end
 
   local paths = lookup_paths(environment)
@@ -325,24 +410,25 @@ function config.load(
     local text = read_file(chosen)
     if text is nil then
       refuse(write_err, "config " .. chosen .. ": cannot be read")
-      return loaded(nil)
+      return loaded(nil, environment)
     end
-    return loaded(parse(chosen, text, write_err))
+    return loaded(parse(chosen, text, write_err), environment)
   end
 
   if path_word then
-    return true, nil, nil, {}, nil, nil
+    local context_path, context_bytes = context_of(nil, environment)
+    return true, nil, nil, {}, nil, nil, context_path, context_bytes
   end
 
   if #paths == 0 then
     refuse(
       write_err, "config: no config directory; set XDG_CONFIG_HOME or HOME"
     )
-    return loaded(nil)
+    return loaded(nil, environment)
   end
 
   write_starter(paths[1], write_err)
-  return loaded(nil)
+  return loaded(nil, environment)
 end
 
 return config

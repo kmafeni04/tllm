@@ -417,3 +417,86 @@ test.it(
     cleanup({xdg})
   end
 )
+
+test.it(
+  "the context directory and its budget come from config",
+  function()
+    local xdg = temp_dir()
+    local model = model_file(xdg)
+    local named_path = xdg .. "/named.json"
+    local context = '"context":{"path":"D","bytes":4096}'
+    fs.write(named_path, config_text(model, context))
+    local plain_path = xdg .. "/plain.json"
+    fs.write(plain_path, config_text(model, ""))
+    local off_path = xdg .. "/off.json"
+    fs.write(off_path, config_text(model, '"context":false'))
+    local environment = {XDG_DATA_HOME = "X", HOME = "H"}
+
+    local named = run({"serve", "m", "--config", named_path}, environment)
+    test.equal(named.code, 0)
+    test.equal(named.starts, 1)
+    local named_endpoint = named.endpoint as serve.Endpoint
+    test.equal(named_endpoint.context_path, "D")
+    test.equal(named_endpoint.context_bytes, 4096)
+
+    local dropped = run({"serve", "m", "--config", named_path}, {})
+    test.equal(dropped.code, 0)
+    local dropped_endpoint = dropped.endpoint as serve.Endpoint
+    test.equal(dropped_endpoint.context_path, "D")
+    test.equal(dropped_endpoint.context_bytes, 4096)
+
+    local defaulted = run({"serve", "m", "--config", plain_path}, environment)
+    test.equal(defaulted.code, 0)
+    local defaulted_endpoint = defaulted.endpoint as serve.Endpoint
+    test.equal(defaulted_endpoint.context_path, "X/tllm/contexts")
+    test.equal(defaulted_endpoint.context_bytes, 1073741824)
+
+    local homed = run({"serve", "m", "--config", plain_path}, {HOME = "H"})
+    test.equal(homed.code, 0)
+    local homed_endpoint = homed.endpoint as serve.Endpoint
+    test.equal(homed_endpoint.context_path, "H/.local/share/tllm/contexts")
+    test.equal(homed_endpoint.context_bytes, 1073741824)
+
+    local nowhere = run({"serve", "m", "--config", plain_path}, {})
+    test.equal(nowhere.code, 0)
+    local nowhere_endpoint = nowhere.endpoint as serve.Endpoint
+    test.equal(nowhere_endpoint.context_path, nil)
+    test.equal(nowhere_endpoint.context_bytes, nil)
+
+    local off = run({"serve", "m", "--config", off_path}, environment)
+    test.equal(off.code, 0)
+    local off_endpoint = off.endpoint as serve.Endpoint
+    test.equal(off_endpoint.context_path, nil)
+    test.equal(off_endpoint.context_bytes, nil)
+
+    local bad: {string} = {
+      "true",
+      "1",
+      '{"bytes":4096}',
+      '{"path":"","bytes":4096}',
+      '{"path":"D"}',
+      '{"path":"D","bytes":0}',
+      '{"path":"D","bytes":"4096"}',
+      '{"path":"D","bytes":4096,"extra":1}',
+    }
+    local bad_path = xdg .. "/bad.json"
+    for _, shape in ipairs(bad) do
+      fs.write(bad_path, config_text(model, '"context":' .. shape))
+      local refused = run({"serve", "m", "--config", bad_path}, environment)
+      test.equal(refused.code, 1, shape)
+      test.equal(#refused.err, 1, shape)
+      test.includes(refused.err[1], "context", shape)
+      test.equal(refused.starts, 0, shape)
+    end
+
+    local both_path = xdg .. "/both.json"
+    fs.write(both_path, config_text(model, '"sessions":0,"context":true'))
+    local both = run({"serve", "m", "--config", both_path}, environment)
+    test.equal(both.code, 1)
+    test.equal(#both.err, 1)
+    test.includes(both.err[1], "sessions")
+    test.equal(both.starts, 0)
+
+    cleanup({xdg})
+  end
+)
