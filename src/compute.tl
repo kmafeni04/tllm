@@ -1,5 +1,6 @@
 local ffi = require("ffi")
 local fs = require("fs")
+local clock = require("tllm.clock")
 local gguf = require("tllm.gguf")
 local weights = require("tllm.weights")
 
@@ -256,8 +257,32 @@ local record compute
     restore: function(Attention, string, string, integer, string): string | nil
   end
 
+  record Measure
+    passes: integer
+    compute: number
+    sampling: number
+    ready: number
+    routed: integer
+    routed_bytes: integer
+  end
+
+  record Routing
+    layer: integer
+    token: integer
+    experts: {integer}
+  end
+
+  record Watch
+    layer: integer
+    token: integer
+    measure: Measure
+    sink: (function(Routing) | nil)
+  end
+
   record FeedForward
-    block: function(FeedForward, {Row}, string): {{number}} | nil, string | nil
+    block: function(
+      FeedForward, {Row}, string, watch?: Watch
+    ): {{number}} | nil, string | nil
     scores: function(FeedForward, {{number}}): {{number}} | nil, string | nil
   end
 
@@ -277,6 +302,8 @@ local record compute
   record Model
     positions: integer
     sequences: integer
+    measure: Measure
+    routing_sink: (function(Routing) | nil)
     forward: function(Model, integer, integer): {number} | nil, string | nil
     reserve: function(Model, string, integer): string | nil
     release: function(Model, string)
@@ -2555,8 +2582,53 @@ local function shared_output(
   return down
 end
 
+local function expert_bytes(
+  mapped: Mapped, prefix: string, selected: {integer}
+): integer
+  local total = 0
+  for _, name in ipairs(
+    {"ffn_up_exps.weight", "ffn_gate_exps.weight", "ffn_down_exps.weight"}
+  ) do
+    local tensor = mapped.tensors[prefix .. name]
+    if not (tensor is nil) then
+      local count = 1
+      if #tensor.dims >= 3 then
+        count = tensor.dims[3] as integer
+      end
+      if count < 1 then
+        count = 1
+      end
+      total = total + math.floor(tensor.bytes / count) * #selected
+    end
+  end
+  return total
+end
+
+local function recorded(
+  watch: compute.Watch, mapped: Mapped, prefix: string, selected: {integer}
+)
+  watch.measure.routed = watch.measure.routed + #selected
+  watch.measure.routed_bytes = watch.measure.routed_bytes + expert_bytes(
+    mapped, prefix, selected
+  )
+  local sink = watch.sink
+  if sink is nil then
+    return
+  end
+  local ids: {integer} = {}
+  for index, expert in ipairs(selected) do
+    ids[index] = expert
+  end
+  table.sort(ids)
+  sink({layer = watch.layer, token = watch.token, experts = ids})
+end
+
 local function feed_forward_row(
-  state: FeedForwardState, hidden: {number}, prefix: string, checked?: boolean
+  state: FeedForwardState,
+  hidden: {number},
+  prefix: string,
+  watch: compute.Watch | nil,
+  checked?: boolean
 ): {number} | nil, string | nil
   local mapped = state.mapped
   local count = #hidden
@@ -2592,6 +2664,9 @@ local function feed_forward_row(
   end
 
   local selected = chosen_experts(probabilities, state.geometry.experts_used)
+  if not (watch is nil) then
+    recorded(watch, mapped, prefix, selected)
+  end
   local total: number = 0
   for _, expert in ipairs(selected) do
     total = total + probabilities[expert + 1]
@@ -2687,13 +2762,18 @@ local function feed_forward_row_scores(
 end
 
 local function feed_forward_block(
-  state: FeedForwardState, rows: {compute.Row}, prefix: string
+  state: FeedForwardState,
+  rows: {compute.Row},
+  prefix: string,
+  watch: compute.Watch | nil
 ): {{number}} | nil, string | nil
   local outputs: {{number}} = {}
   local checked: {integer: boolean} = {}
   for index, entry in ipairs(rows) do
     local known = checked[#entry.hidden] == true
-    local numbers, line = feed_forward_row(state, entry.hidden, prefix, known)
+    local numbers, line = feed_forward_row(
+      state, entry.hidden, prefix, watch, known
+    )
     checked[#entry.hidden] = true
     if numbers is nil then
       return nil, line
@@ -3499,9 +3579,12 @@ function compute.feed_forward(
   }
   local feed_forward = {} as compute.FeedForward
   feed_forward.block = function(
-    _: compute.FeedForward, rows: {compute.Row}, prefix: string
+    _: compute.FeedForward,
+    rows: {compute.Row},
+    prefix: string,
+    watch?: compute.Watch
   ): {{number}} | nil, string | nil
-    return feed_forward_block(state, rows, prefix)
+    return feed_forward_block(state, rows, prefix, watch)
   end
   feed_forward.scores = function(
     _: compute.FeedForward, hidden: {{number}}
@@ -4134,11 +4217,17 @@ local function fingerprint_of(tensors: {string: Tensor}): integer
 end
 
 local function model_pass(
-  state: ModelState, inputs: {compute.Input}
+  state: ModelState,
+  inputs: {compute.Input},
+  measure: compute.Measure,
+  sink: (function(compute.Routing) | nil)
 ): {{number}} | nil, string | nil
   if #inputs == 0 then
     return nil, "pass: no rows"
   end
+
+  local started = clock.now()
+  local token = measure.passes
 
   local seen: {string: boolean} = {}
   for _, input in ipairs(inputs) do
@@ -4199,7 +4288,11 @@ local function model_pass(
         position = entry.position,
       }
     end
-    local blocked, block_line = state.feed_forward:block(mixed, prefix)
+    local blocked, block_line = state.feed_forward:block(
+      mixed,
+      prefix,
+      {layer = index, token = token, measure = measure, sink = sink}
+    )
     if blocked is nil then
       return nil, block_line
     end
@@ -4227,6 +4320,8 @@ local function model_pass(
     local held = state.sequences[input.sequence] as SequenceState
     held.taken = held.taken + 1
   end
+  measure.passes = token + 1
+  measure.compute = measure.compute + (clock.now() - started)
   return scores, nil
 end
 
@@ -4282,6 +4377,16 @@ function compute.model(
   local model = {} as compute.Model
   model.positions = plan.positions
   model.sequences = limit
+  model.measure = {
+    passes = 0,
+    compute = 0,
+    sampling = 0,
+    ready = 0,
+    routed = 0,
+    routed_bytes = 0,
+  }
+  local measure = model.measure
+  model.routing_sink = nil
   model.forward = function(
     _: compute.Model, token_id: integer, position: integer
   ): {number} | nil, string | nil
@@ -4297,7 +4402,10 @@ function compute.model(
         "forward: position " .. position .. ", the next is " .. held.taken
     end
     local scores, line = model_pass(
-      state, {{sequence = "", token = token_id, position = position}}
+      state,
+      {{sequence = "", token = token_id, position = position}},
+      measure,
+      model.routing_sink
     )
     if scores is nil then
       return nil, line
@@ -4533,7 +4641,7 @@ function compute.model(
   model.pass = function(
     _: compute.Model, inputs: {compute.Input}
   ): {{number}} | nil, string | nil
-    return model_pass(state, inputs)
+    return model_pass(state, inputs, measure, model.routing_sink)
   end
   return model
 end

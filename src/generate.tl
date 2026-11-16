@@ -1,3 +1,4 @@
+local clock = require("tllm.clock")
 local compute = require("tllm.compute")
 local tokenizer = require("tllm.tokenizer")
 
@@ -260,7 +261,12 @@ function generate.open(
       return nil, nil
     end
 
+    local started = clock.now()
     local token_id = chosen(scores, progress.options, progress.stream)
+    local ended = clock.now()
+    local measure = progress.model.measure
+    measure.sampling = measure.sampling + (ended - started)
+    measure.ready = ended
     if token_id == progress.end_id then
       self.done = true
       return nil, nil

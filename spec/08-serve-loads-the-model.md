@@ -93,7 +93,7 @@ mapped until the process ends.
 ## Non-goals
 
 - No maths, tokenizer, sampler or generation route: nothing reads a weight, and `serve` only maps the file, names it and holds it.
-- No unload, reload or release, no second resident model, and no `bench` change: the mapping lives until the process ends, and `bench` still prints not implemented and loads nothing.
+- No unload, reload or release, and no second resident model: the mapping lives until the process ends.
 - No examination beyond what `weights.load` already refuses: no architecture, no metadata key and no tensor is read by `serve`.
 
 ## Tests

@@ -100,7 +100,6 @@ resolution). The first fault found is the one line written.
 ## Non-goals
 
 - No engine: `serve` maps the model through `weights.load` under `08` and reads no weight, and the 404 answer and the 500 answer are unchanged.
-- No `bench`: it keeps ignoring `--config` and reads no file, as `02/FR-004` leaves it.
 - No per-model settings beyond `path`, no `TLLM_CONFIG` variable, no router behaviour (loading on request, a resident-model limit, idle sleep) and no `/v1/models` route.
 
 ## Tests

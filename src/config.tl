@@ -337,7 +337,10 @@ local function fresh(environment: {string: string}): Config
 end
 
 function config.load(
-  environment: {string: string}, explicit: string | nil, path_word: boolean
+  environment: {string: string},
+  explicit: string | nil,
+  path_word: boolean,
+  starter?: boolean
 ): Config | nil, string | nil
   if explicit is string then
     local text = read_file(explicit)
@@ -372,7 +375,7 @@ function config.load(
     return settings, nil
   end
 
-  if path_word then
+  if path_word or starter == false then
     return fresh(environment), nil
   end
 

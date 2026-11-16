@@ -1,21 +1,11 @@
 local process = require("process")
 local targs = require("targs")
+local bench = require("tllm.bench")
 local compute = require("tllm.compute")
 local config = require("tllm.config")
 local serve = require("tllm.serve")
 
 local cli = {}
-
-local record Entry
-  label: string
-  text: string
-end
-
-local record Outcome
-  code: integer
-  text: string
-  to_err: boolean
-end
 
 local function build(): targs.Parser
   local parser = targs.new(
@@ -42,59 +32,35 @@ local function build(): targs.Parser
     }
   )
 
-  local bench = parser:command(
+  local bench_parser = parser:command(
     {
       name = "bench",
       description = "Benchmark a model",
     }
   )
-  bench:argument({name = "model", max_length = 1, required = true})
-  bench:option({name = "config", placeholder = "FILE"})
-  bench:option(
+  bench_parser:argument({name = "model", max_length = 1, required = true})
+  bench_parser:option({name = "config", placeholder = "FILE"})
+  bench_parser:option(
     {
       name = "prefill-tokens",
       placeholder = "N",
       type = "number",
     }
   )
-  bench:option(
+  bench_parser:option(
     {
       name = "decode-tokens",
       placeholder = "N",
       type = "number",
     }
   )
+  bench_parser:option({name = "dump-routing", placeholder = "FILE"})
 
   return parser
 end
 
 local function one_line(text: string): string
   return (text:gsub("%s+$", "")) .. "\n"
-end
-
-local function add(
-  entries: {Entry}, label: string, value: string | number | nil
-)
-  if not (value is nil) then
-    local entry: Entry = {label = label}
-    if value is string then
-      entry.text = value
-    else
-      entry.text = tostring(value)
-    end
-    entries[#entries + 1] = entry
-  end
-end
-
-local function refusal(command: string, entries: {Entry}): string
-  if #entries == 0 then
-    return command .. ": not implemented"
-  end
-  local parts: {string} = {}
-  for _, entry in ipairs(entries) do
-    parts[#parts + 1] = entry.label .. " " .. entry.text
-  end
-  return command .. ": not implemented (" .. table.concat(parts, ", ") .. ")"
 end
 
 local function model_of(command: targs.Parser): string | number | nil
@@ -119,6 +85,7 @@ local record Chosen
 end
 
 local function chosen_model(
+  command: string,
   models: {string: string},
   word: string | nil,
   path_word: boolean,
@@ -128,7 +95,9 @@ local function chosen_model(
     if path_word then
       if not config.has_file(word) then
         write_err(
-          one_line("serve: model path " .. word .. " is not a readable file")
+          one_line(
+            command .. ": model path " .. word .. " is not a readable file"
+          )
         )
         return nil
       end
@@ -136,7 +105,7 @@ local function chosen_model(
     end
     local configured = models[word]
     if configured is nil then
-      write_err(one_line("serve: unknown model " .. word))
+      write_err(one_line(command .. ": unknown model " .. word))
       return nil
     end
     return {name = word, path = configured}
@@ -144,13 +113,14 @@ local function chosen_model(
 
   local names = sorted_names(models)
   if #names == 0 then
-    write_err(one_line("serve: no model configured"))
+    write_err(one_line(command .. ": no model configured"))
     return nil
   end
   if #names > 1 then
     write_err(
       one_line(
-        "serve: no model given; configured models are "
+        command
+          .. ": no model given; configured models are "
           .. table.concat(names, ", ")
       )
     )
@@ -242,7 +212,9 @@ local function serve_code(
     cache_type = file_cache
   end
 
-  local chosen = chosen_model(settings.models, word, path_word, write_err)
+  local chosen = chosen_model(
+    "serve", settings.models, word, path_word, write_err
+  )
   if chosen is nil then
     return 1
   end
@@ -263,27 +235,98 @@ local function serve_code(
   )
 end
 
-local function bench_outcome(command: targs.Parser): Outcome
-  local entries: {Entry} = {}
-  add(entries, "model", model_of(command))
-  add(entries, "config", command:get_option("config"))
-
-  for _, name in ipairs({"prefill-tokens", "decode-tokens"}) do
-    local count = command:get_option(name)
-    if count is number and not (count % 1 == 0 and count >= 1) then
-      return {
-        code = 1,
-        text = "'--"
-          .. name
-          .. "' expects a positive integer, got "
-          .. tostring(count),
-        to_err = true,
-      }
+local function bench_code(
+  command: targs.Parser,
+  write_out: function(string),
+  write_err: function(string),
+  environment: {string: string}
+): integer
+  local lengths: {integer} = {512, 2048, 8192, 32768}
+  local prefill = command:get_option("prefill-tokens")
+  if prefill is number then
+    if not (prefill % 1 == 0 and prefill >= 1) then
+      write_err(
+        one_line(
+          "'--prefill-tokens' expects a positive integer, got "
+            .. tostring(prefill)
+        )
+      )
+      return 1
     end
-    add(entries, name, count)
+    lengths = {prefill as integer}
   end
 
-  return {code = 2, text = refusal("bench", entries), to_err = false}
+  local decode = 128
+  local count = command:get_option("decode-tokens")
+  if count is number then
+    if not (count % 1 == 0 and count >= 1) then
+      write_err(
+        one_line(
+          "'--decode-tokens' expects a positive integer, got "
+            .. tostring(count)
+        )
+      )
+      return 1
+    end
+    decode = count as integer
+  end
+
+  local word_value = model_of(command)
+  local word: string | nil = nil
+  if word_value is string then
+    word = word_value
+  end
+
+  local path_word = false
+  if word is string then
+    path_word = config.is_model_path(word)
+  end
+
+  local explicit = command:get_option("config")
+  local config_path: string | nil = nil
+  if explicit is string then
+    config_path = explicit
+  end
+
+  local settings, config_line = config.load(
+    environment, config_path, path_word, false
+  )
+  if settings is nil then
+    write_err(one_line(config_line as string))
+    return 1
+  end
+
+  local chosen = chosen_model(
+    "bench", settings.models, word, path_word, write_err
+  )
+  if chosen is nil then
+    return 1
+  end
+
+  local routing = command:get_option("dump-routing")
+  local routing_path: string | nil = nil
+  if routing is string then
+    routing_path = routing
+  end
+
+  local cache_type: compute.CacheType = "f16"
+  local file_cache = settings.kv_cache
+  if not (file_cache is nil) then
+    cache_type = file_cache
+  end
+
+  return bench.run(
+    {
+      path = chosen.path,
+      name = chosen.name,
+      lengths = lengths,
+      decode = decode,
+      kv_cache = cache_type,
+      routing_path = routing_path,
+    },
+    write_out,
+    write_err
+  )
 end
 
 function cli.run(
@@ -308,7 +351,7 @@ function cli.run(
   end
 
   local serve_command = parser:get_command("serve")
-  local bench = parser:get_command("bench")
+  local bench_command = parser:get_command("bench")
 
   if serve_command then
     return serve_code(
@@ -319,20 +362,14 @@ function cli.run(
     )
   end
 
-  local outcome: Outcome
-  if bench then
-    outcome = bench_outcome(bench)
-  else
-    write_out(one_line(parser:get_help()))
-    return 1
+  if bench_command then
+    return bench_code(
+      bench_command, write_out, write_err, environment or process_environment()
+    )
   end
 
-  if outcome.to_err then
-    write_err(one_line(outcome.text))
-  else
-    write_out(one_line(outcome.text))
-  end
-  return outcome.code
+  write_out(one_line(parser:get_help()))
+  return 1
 end
 
 return cli

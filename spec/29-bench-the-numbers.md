@@ -1,6 +1,6 @@
 # 29: Bench, the numbers before the changes
 
-**Status**: pending   **Depends on**: 02, 04, 08, 13, 15, 16, 18, 19, 24, 25
+**Status**: done   **Depends on**: 02, 04, 08, 13, 15, 16, 18, 19, 24, 25
 
 ## Problem & context
 
@@ -119,13 +119,14 @@ refusal lines through the second, and hands back the exit code. The `generation`
   `The quick brown fox jumps over the lazy dog. ` repeated as many times as it takes for that
   content's own encoding to hold at least that length's count of ids, `max_tokens` set to
   `--decode-tokens` (128 when absent), `temperature` 0 and `seed` 0; SHALL resume
-  the producer that call answers once with an `emit` that records the clock reading and the
-  payload of every frame it is handed, then call `serve.step` until it returns 0; SHALL zero the
+  the producer that call answers once with an `emit` that reads the clock at every payload it is
+  handed and, for a payload holding a choice's `delta.content`, records that reading with the
+  `measure` marks of that moment, the turn's last payload being the one holding that choice's
+  `finish_reason`, then call `serve.step` until it returns 0; SHALL zero the
   `measure` of `serve.model_of(server).generation` before the turn and read that `measure` and its
   `routing_sink` there, and encode the filler with `serve.model_of(server).tokenizer`; and SHALL
-  take a payload holding a choice's `delta.content` as a content frame and a payload holding that
-  choice's `finish_reason` as the end of the turn, so the same model and length twice routes the
-  same experts and reports the same expert count and bytes.
+  take a payload holding a choice's `delta.content` as a content frame, so the same model and
+  length twice routes the same experts and reports the same expert count and bytes.
 - FR-004 (US-001) WHEN a length's turn has run, THE SYSTEM SHALL write the line
   `prompt L: C tokens at R tok/s, first token M ms` and the line
   `decode L: C tokens at R tok/s`, where L is the length, the prompt C is the tokens passed up to
@@ -159,23 +160,24 @@ refusal lines through the second, and hands back the exit code. The `generation`
   be loaded, THEN THE SYSTEM SHALL write one line naming MODEL and the reason to the stderr writer
   and exit 1, having written no length's lines.
 - FR-008 (US-003) WHEN `--dump-routing FILE` is given, THE SYSTEM SHALL set a routing sink on the
-  model that appends to FILE one line per record, a JSON object holding the keys `layer`, `token`
-  and `experts`, the first two whole numbers and the third the ids in ascending order, `token`
-  being the pass count since `measure` was last zeroed so each length's records start at 0, SHALL
-  truncate FILE once a length's body has been accepted and before that length's first pass,
-  opening FILE then and closing it when that length's turn ends, so
-  FILE ends up holding the run of the largest length that ran, and SHALL write no line and open no
-  file when the flag is absent; IF FILE cannot be written, THEN THE SYSTEM SHALL write one line
-  naming FILE to the stderr writer, run no further length, and exit 1.
+  model that collects one line per record, a JSON object holding the keys `layer`, `token` and
+  `experts`, the first two whole numbers and the third the ids in ascending order, `token` being
+  the pass count since `measure` was last zeroed so each length's records start at 0, SHALL truncate
+  FILE once a length's body has been accepted and before that length's first pass, write that
+  length's collected lines when its turn ends, so FILE ends up holding the run of the largest
+  length that ran, and SHALL write no line and create no file when the flag is absent; IF FILE
+  cannot be written, THEN THE SYSTEM SHALL write one line naming FILE to the stderr writer, run no
+  further length, and exit 1.
 - FR-009 (US-002) WHEN a model has passed a token, THE SYSTEM SHALL add that pass to its `measure`
   with the seconds it took, WHEN a token has been chosen from those scores, THE SYSTEM SHALL add
   that choice's seconds and its clock mark to `measure`, and WHEN a pass has routed its experts,
   THE SYSTEM SHALL add their count and the bytes their three matrices hold and, only while
   `routing_sink` is held, hand it one record per layer, so a run with no sink keeps no routing.
 - FR-010 (US-002) THE SYSTEM SHALL read the monotonic clock as `ffi.C.clock_gettime` with
-  `CLOCK_MONOTONIC`, filling the one `struct timespec` the module keeps rather than allocating one
+  `CLOCK_MONOTONIC`, filling the one two-long struct the module keeps rather than allocating one
   per read, in `src/clock.tl` and nowhere else, so every number `bench` prints comes from that one
-  module.
+  module. The struct carries the module's own tag because the `fs` dependency's `stat` already
+  declares `timespec`.
   Not testable: a module, its allocation and where it is called, visible in the tree; the numbers
   it produces are asserted by T-001.
 - FR-011 (US-004) THE SYSTEM SHALL build its server through `serve.build` with an endpoint whose
@@ -246,7 +248,8 @@ fixture with `context_length` 260, T-002 and T-004 also with 4096.
   directory that does not exist returns 1 with one stderr line naming that path and no `prompt`
   line; and that the same call without the flag leaves R absent.
 
-`02/T-002`'s refusal case goes with the amendment below: no call exits 2 any more.
+`02/T-002`'s refusal case is gone with the amendment, applied before this spec was built: no call
+exits 2 any more.
 
 ## Open questions
 
@@ -254,10 +257,4 @@ fixture with `context_length` 260, T-002 and T-004 also with 4096.
 
 ## Amendments
 
-- `02/FR-003`: bench's option list gains `--dump-routing FILE`, and `02/FR-007`'s usage text names
-  it.
-- `02/FR-004`: the `bench: not implemented (...)` line and exit code 2 are replaced by the report
-  and the exit codes of FR-004 to FR-008 above; `02/T-002`, which pins that line, goes with it, and
-  so does the sentence that bench applies no default, the ladder and 128 being bench's. The
-  non-goals of `04` and `08` saying bench ignores `--config`, reads no file, loads nothing and
-  stops at the refusal line no longer hold.
+- None.

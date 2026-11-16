@@ -32,7 +32,7 @@ test.it(
 
     local failure_code, failure_out, failure_err = run_with({"bogus"})
     local refusal_code, refusal_out, refusal_err = run_with(
-      {"bench", "qwen3.8-27b"}
+      {"bench", "qwen3.8-27b", "--config", "/nonexistent/config.json"}
     )
 
     io.stdout = real_stdout
@@ -49,37 +49,11 @@ test.it(
     test.equal(failure_code, 1)
     test.equal(#failure_out, 0)
     test.equal(#failure_err, 1)
-    test.equal(refusal_code, 2)
-    test.equal(#refusal_out, 1)
-    test.equal(#refusal_err, 0)
+    test.equal(refusal_code, 1)
+    test.equal(#refusal_out, 0)
+    test.equal(#refusal_err, 1)
     test.equal(stream_out, "")
     test.equal(stream_err, "")
-  end
-)
-
-test.it(
-  "bench echoes the values it was given",
-  function()
-    local code, out, err = run_with(
-      {
-        "bench",
-        "qwen3.8-27b",
-        "--config",
-        "cfg.json",
-        "--prefill-tokens",
-        "512",
-        "--decode-tokens",
-        "128",
-      }
-    )
-
-    test.equal(code, 2)
-    test.equal(#err, 0)
-    test.equal(#out, 1)
-    test.equal(
-      out[1],
-      "bench: not implemented (model qwen3.8-27b, config cfg.json, prefill-tokens 512, decode-tokens 128)\n"
-    )
   end
 )
 
@@ -219,5 +193,59 @@ test.it(
     test.equal(serve_code, 0)
     test.equal(#serve_err, 0)
     test.includes(table.concat(serve_out), "Usage: tllm serve")
+  end
+)
+
+test.it(
+  "every command accepts its options",
+  function()
+    local config_path = os.tmpname()
+    os.remove(config_path)
+
+    local started = false
+    local function stub(
+      _endpoint: serve.Endpoint, _write_err: function(string)
+    ): integer
+      started = true
+      return 0
+    end
+
+    local serve_code, serve_out, serve_err = run_with(
+      {
+        "serve",
+        "m",
+        "--config",
+        config_path,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "9090",
+      },
+      stub
+    )
+    test.equal(serve_code, 1)
+    test.equal(#serve_out, 0)
+    test.equal(#serve_err, 1)
+    test.includes(serve_err[1], config_path)
+    test.falsy(started)
+
+    local bench_code, bench_out, bench_err = run_with(
+      {
+        "bench",
+        "m",
+        "--config",
+        config_path,
+        "--prefill-tokens",
+        "8",
+        "--decode-tokens",
+        "8",
+        "--dump-routing",
+        config_path .. ".routing",
+      }
+    )
+    test.equal(bench_code, 1)
+    test.equal(#bench_out, 0)
+    test.equal(#bench_err, 1)
+    test.includes(bench_err[1], config_path)
   end
 )
