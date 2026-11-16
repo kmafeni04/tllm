@@ -295,7 +295,7 @@ test.it(
       }
     )
     test.equal(line, nil)
-    test.equal(answer, "aa")
+    test.equal((answer as generate.Text).text, "aa")
 
     answer, line = generate.text(
       fresh(handle, 2),
@@ -307,7 +307,7 @@ test.it(
       }
     )
     test.equal(line, nil)
-    test.equal(answer, "a")
+    test.equal((answer as generate.Text).text, "a")
 
     answer, line = generate.text(
       fresh(handle, 2),
@@ -344,7 +344,7 @@ test.it(
       }
     )
     test.equal(line, nil)
-    test.equal(answer, "ccc")
+    test.equal((answer as generate.Text).text, "ccc")
 
     answer, line = generate.text(
       fresh(handle, 4),
@@ -358,7 +358,7 @@ test.it(
       }
     )
     test.equal(line, nil)
-    test.equal(answer, "aac")
+    test.equal((answer as generate.Text).text, "aac")
 
     answer, line = generate.text(
       fresh(handle, 4),
@@ -371,7 +371,7 @@ test.it(
       }
     )
     test.equal(line, nil)
-    test.equal(answer, "b")
+    test.equal((answer as generate.Text).text, "b")
 
     answer, line = generate.text(
       fresh(handle, 4),
@@ -385,7 +385,7 @@ test.it(
       }
     )
     test.equal(line, nil)
-    test.equal(answer, "b")
+    test.equal((answer as generate.Text).text, "b")
 
     answer, line = generate.text(
       fresh(handle, 4),
@@ -399,7 +399,7 @@ test.it(
       }
     )
     test.equal(line, nil)
-    test.equal(answer, "c")
+    test.equal((answer as generate.Text).text, "c")
 
     answer, line = generate.text(
       fresh(handle, 4),
@@ -412,7 +412,7 @@ test.it(
       }
     )
     test.equal(line, nil)
-    test.equal(answer, "aa")
+    test.equal((answer as generate.Text).text, "aa")
   end
 )
 
@@ -435,7 +435,7 @@ test.it(
       }
     )
     test.equal(line, nil)
-    test.equal(answer, "")
+    test.equal((answer as generate.Text).text, "")
 
     answer, line = generate.text(
       fresh(ended, 4),
@@ -448,7 +448,7 @@ test.it(
       }
     )
     test.equal(line, nil)
-    test.equal(answer, "aa")
+    test.equal((answer as generate.Text).text, "aa")
 
     local open = loaded(
       without_meta(t001_meta(), "tokenizer.ggml.eos_token_id"), t001_entries()
@@ -464,7 +464,7 @@ test.it(
       }
     )
     test.equal(line, nil)
-    test.equal(answer, "aa")
+    test.equal((answer as generate.Text).text, "aa")
   end
 )
 

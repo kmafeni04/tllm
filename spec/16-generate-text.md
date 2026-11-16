@@ -43,9 +43,14 @@ local record generate
     start: integer | nil
   end
 
+  record Text
+    text: string
+    sampled: {integer}
+  end
+
   text: function(
     compute.Model, tokenizer.Tokenizer, string, Options, sequence?: string
-  ): string | nil, string | nil, integer | nil, {integer} | nil
+  ): Text | nil, string | nil
 end
 ```
 
@@ -69,7 +74,7 @@ a sample takes are worked out by hand from `15/T-001`'s scores.
 
 ## Functional requirements
 
-- FR-001 (US-001) WHEN `generate.text(model, tokenizer, prompt, options, sequence)` is called with options FR-009 accepts, THE SYSTEM SHALL take the optional sequence name, `""` when it is absent, and drive a run through its rows, returning the ids it sampled decoded by `tokenizer:decode` as the first value, nil as the second, the number of ids it sampled as the third, and the ids it sampled in the order it appended them as the fourth, nil when it returns nil, holding no part of the prompt. Its tests build their models with `f32`, so the numbers and reply they record stand.
+- FR-001 (US-001) WHEN `generate.text(model, tokenizer, prompt, options, sequence)` is called with options FR-009 accepts, THE SYSTEM SHALL take the optional sequence name, `""` when it is absent, and drive a run through its rows, returning a `Text` whose `text` is the ids it sampled decoded by `tokenizer:decode` and whose `sampled` is those ids in the order it appended them, nil as the second value, and holding no part of the prompt. Its tests build their models with `f32`, so the numbers and reply they record stand.
 - FR-002 (US-002) WHEN a call begins, THE SYSTEM SHALL take the prompt's ids from `tokenizer:encode(prompt)`, forward each id from the options' `start` on as a one-row pass at its position on the run's sequence, in list order, and take the first sampled token from the scores the last of those rows returns, `start` absent being 0, so a call may begin at a position the model has already reached.
 - FR-003 (US-002) WHEN a token is sampled that is neither the end id nor the last `max_tokens` allows, THE SYSTEM SHALL forward it as a one-row pass at the next position and sample the next token from the scores that row returns.
 - FR-004 (US-003) WHEN `temperature` is absent or zero, THE SYSTEM SHALL take the sampled token as the id of the highest score, the lowest id among equal highest scores.
@@ -100,37 +105,38 @@ a sample takes are worked out by hand from `15/T-001`'s scores.
   at the root, except that `token_embd.weight` holds 2 numbers per row over 3 rows, `{1,0}`,
   `{3,4}` and `{1,0}`, that `compute.model(backend, handle, 4, "f32")` and `tokenizer.load(path)` each
   return their record and nil, that `generate.text(model, tokenizer, "a", {max_tokens = 2, seed =
-  0})` returns `aa` and nil, the prefill giving `15/T-001`'s `{1.4142136, 0, 1.4142136}` and the
-  greedy pick being id 0 there and after the second forward, so the prompt's own `a` is not in the
-  result; that on a fresh model built with `positions` 2 `generate.text(model, tokenizer, "aa",
-  {max_tokens = 1, seed = 0})` returns `a` and nil, the three-piece vocabulary encoding `aa` as
-  two ids 0 standing at positions 0 and 1; and that on a fresh model built with `positions` 2
-  `generate.text(model, tokenizer, "aaa", {max_tokens = 1, seed = 0})` returns nil and one line
-  holding `blk.0.` and 2, a third prompt id finding no third position, that being `forward`'s
-  second value unchanged.
+  0})` returns a `Text` holding `aa` and nil, the prefill giving `15/T-001`'s
+  `{1.4142136, 0, 1.4142136}` and the greedy pick being id 0 there and after the second forward,
+  so the prompt's own `a` is not in the result; that on a fresh model built with `positions` 2
+  `generate.text(model, tokenizer, "aa", {max_tokens = 1, seed = 0})` returns a `Text` holding `a`
+  and nil, the three-piece vocabulary encoding `aa` as two ids 0 standing at positions 0 and 1;
+  and that on a fresh model built with `positions` 2 `generate.text(model, tokenizer, "aaa",
+  {max_tokens = 1, seed = 0})` returns nil and one line holding `blk.0.` and 2, a third prompt id
+  finding no third position, that being `forward`'s second value unchanged.
 - T-002 (FR-003, FR-005, FR-006): `a seeded draw takes the token temperature and top-k leave`,
   proves on T-001's fixture with `tokenizer.ggml.eos_token_id` removed that with `{max_tokens = 3,
-  seed = 1000, temperature = 1, top_k = 2}`
-  `generate.text(model, tokenizer, "a", options)` returns `ccc` and nil, ids 0 and 2 tying at
-  1.4142136 as the two candidates at half each, the seed's first draw 0.6236204 above the first
-  half, and id 2's row `{1,0}` repeating the scores; that with seed 0 the same options return
-  `aac` and nil, the draws 0.2360680 and 0.2785669 falling below that half and the third
-  0.8195338 above it; that with `{max_tokens = 1, seed = 1791, temperature = 1}` and no `top_k`
-  it returns `b` and nil, the candidates being ids 0, 2 and 1 with the probabilities 0.4458083,
+  seed = 1000, temperature = 1, top_k = 2}` `generate.text(model, tokenizer, "a", options)`
+  returns a `Text` holding `ccc` and nil, ids 0 and 2 tying at 1.4142136 as the two candidates at
+  half each, the seed's first draw 0.6236204 above the first half, and id 2's row `{1,0}`
+  repeating the scores; that with seed 0 the same options return a `Text` holding `aac` and nil,
+  the draws 0.2360680 and 0.2785669 falling below that half and the third 0.8195338 above it;
+  that with `{max_tokens = 1, seed = 1791, temperature = 1}` and no `top_k` it returns a `Text`
+  holding `b` and nil, the candidates being ids 0, 2 and 1 with the probabilities 0.4458083,
   0.4458083 and 0.1083834 and the draw 0.9301744 falling in the third; that with `{max_tokens =
-  1, seed = 1791, temperature = 1, top_k = 5}` it returns `b` and nil, the three-piece vocabulary
-  giving those same three candidates for a `top_k` above its size; that with `{max_tokens = 1,
-  seed = 1791, temperature = 1, top_k = 2}` it returns `c` and nil, the same draw falling past the
-  first half of two; and that with `{max_tokens = 2, seed = 1000, temperature = 0}` it returns
-  `aa` and nil, the seed unused.
+  1, seed = 1791, temperature = 1, top_k = 5}` it returns a `Text` holding `b` and nil, the
+  three-piece vocabulary giving those same three candidates for a `top_k` above its size; that
+  with `{max_tokens = 1, seed = 1791, temperature = 1, top_k = 2}` it returns a `Text` holding
+  `c` and nil, the same draw falling past the first half of two; and that with `{max_tokens = 2,
+  seed = 1000, temperature = 0}` it returns a `Text` holding `aa` and nil, the seed unused.
 - T-003 (FR-007, FR-008): `generation stops at end of text or at the count`, proves on T-001's
   fixture with `tokenizer.ggml.eos_token_id` 0 that `generate.text(model, tokenizer, "a",
-  {max_tokens = 4, seed = 0})` returns the empty string and nil, the first greedy sample 0 being
-  the file's end id and never appended, so the count never stops it; that on the same fixture with
-  `end_id = 1` in the options the call with `{max_tokens = 2, seed = 0, end_id = 1}` returns `aa`
-  and nil, the given id overriding the file's 0; and that on T-001's fixture with
-  `tokenizer.ggml.eos_token_id` removed the call with `{max_tokens = 2, seed = 0}` returns `aa`
-  and nil, no end id stopping it before the count.
+  {max_tokens = 4, seed = 0})` returns a `Text` whose `text` is the empty string and nil, the
+  first greedy sample 0 being the file's end id and never appended, so the count never stops it;
+  that on the same fixture with `end_id = 1` in the options the call with `{max_tokens = 2, seed =
+  0, end_id = 1}` returns a `Text` holding `aa` and nil, the given id overriding the file's 0;
+  and that on T-001's fixture with `tokenizer.ggml.eos_token_id` removed the call with
+  `{max_tokens = 2, seed = 0}` returns a `Text` holding `aa` and nil, no end id stopping it before
+  the count.
 - T-004 (FR-003, FR-009, FR-010, FR-011): `a prompt and options that cannot be used are refused`,
   proves on T-001's fixture that `generate.text` with the prompt `""` and `{max_tokens = 2, seed =
   0}` returns nil and one line holding `prompt`; that `{max_tokens = 0, seed = 0}`,

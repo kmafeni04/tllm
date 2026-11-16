@@ -5,6 +5,7 @@ local compute = require("tllm.compute")
 local generate = require("tllm.generate")
 local ggml = require("tllm.ggml")
 local gguf = require("tllm.gguf")
+local pause = require("tllm.pause")
 local tokenizer = require("tllm.tokenizer")
 local weights = require("tllm.weights")
 local tltp = require("tltp")
@@ -112,6 +113,12 @@ local record Prepared
   store: Store | nil
   waiting: boolean
   reserved: boolean
+end
+
+-- why a request was not admitted: the route turns this into a reply
+local record Fault
+  status: tltp.Status
+  message: string
 end
 
 local record EventChoice
@@ -236,18 +243,22 @@ local function error_body(message: string, kind: string): string
   return tltp.json_encode({error = {message = message, type = kind}}) as string
 end
 
-local function rejected(message: string): serve.Reply
-  return {
-    status = "BadRequest",
-    body = error_body(message, "invalid_request_error"),
-  }
+local function as_reply(refusal: Fault): serve.Reply
+  local kind = "internal_error"
+  if refusal.status == "BadRequest" then
+    kind = "invalid_request_error"
+  elseif refusal.status == "TooManyRequests" then
+    kind = "too_many_requests"
+  end
+  return {status = refusal.status, body = error_body(refusal.message, kind)}
 end
 
-local function failed(message: string): serve.Reply
-  return {
-    status = "InternalServerError",
-    body = error_body(message, "internal_error"),
-  }
+local function bad_request(message: string): Fault
+  return {status = "BadRequest", message = message}
+end
+
+local function internal(message: string): Fault
+  return {status = "InternalServerError", message = message}
 end
 
 local function entry_fault(index: integer): string
@@ -384,8 +395,8 @@ end
 
 local function budget_fault(
   ids: integer, budget: integer, positions: integer
-): serve.Reply
-  return rejected(
+): Fault
+  return bad_request(
     "messages: the prompt's "
       .. tostring(ids)
       .. " ids plus the max_tokens budget "
@@ -722,7 +733,7 @@ local function reserve_sequence(
   return nil, "reserve: no free sequence name"
 end
 
-local function too_many(server: tltp.Server): serve.Reply
+local function too_many(server: tltp.Server): Fault
   local store = stores[server]
   local limit = 0
   if not (store is nil) then
@@ -730,34 +741,32 @@ local function too_many(server: tltp.Server): serve.Reply
   end
   return {
     status = "TooManyRequests",
-    body = error_body(
-      "the server holds no free session; sessions is " .. tostring(limit),
-      "too_many_requests"
-    ),
+    message = "the server holds no free session; sessions is "
+      .. tostring(limit),
   }
 end
 
 local function prepared(
   server: tltp.Server, body: string
-): Prepared | nil, serve.Reply | nil
+): Prepared | nil, Fault | nil
   local model = models[server]
   if model is nil then
-    return nil, failed("model: this server holds none")
+    return nil, internal("model: this server holds none")
   end
 
   local request, request_line = request_of(body)
   if request is nil then
-    return nil, rejected(request_line as string)
+    return nil, bad_request(request_line as string)
   end
 
   local prompt, render_line = chat.render(model.tokenizer, request.messages)
   if prompt is nil then
-    return nil, failed(render_line as string)
+    return nil, internal(render_line as string)
   end
 
   local ids, encode_line = model.tokenizer:encode(prompt)
   if ids is nil then
-    return nil, failed(encode_line as string)
+    return nil, internal(encode_line as string)
   end
 
   local generation = model.generation
@@ -850,7 +859,7 @@ local function prepared(
   else
     local name, reserve_line = reserve_sequence(server, id or "", positions)
     if name is nil then
-      return nil, failed(reserve_line as string)
+      return nil, internal(reserve_line as string)
     end
     sequence = name
     mark_held(server, sequence)
@@ -956,25 +965,27 @@ local function lost(ready: Prepared)
 end
 
 local function finished(ready: Prepared): serve.Reply
-  local text, text_line, completion, sampled = generate.text(
+  local answer, text_line = generate.text(
     ready.model.generation,
     ready.model.tokenizer,
     ready.prompt,
     options_of(ready),
     ready.sequence
   )
-  if text is nil then
+  if answer is nil then
     lost(ready)
-    return failed(text_line as string)
+    return as_reply(internal(text_line as string))
   end
 
-  kept(ready, sampled as {integer})
+  local sampled = answer.sampled
+  local completion = #sampled
+  kept(ready, sampled)
   return {
     status = "OK",
     body = tltp.json_encode(
       {
         choices = {
-          {index = 0, message = {role = "assistant", content = text}},
+          {index = 0, message = {role = "assistant", content = answer.text}},
         },
         usage = {
           prompt_tokens = #ready.ids,
@@ -1078,9 +1089,7 @@ local function pool_pause(state: PoolState)
   if not (watcher is nil) then
     watcher:poll()
   end
-  local until_time = os.clock() + 0.002
-  while os.clock() < until_time do
-  end
+  pause.milliseconds(2)
 end
 
 local function clear_files(dir: string)
@@ -1482,7 +1491,7 @@ local function pool_answer(
     if ended(held_worker) then
       local slot = held_worker.slot
       pool_reap(state)
-      return failed("slot " .. tostring(slot) .. " went away")
+      return as_reply(internal("slot " .. tostring(slot) .. " went away"))
     end
     pool_pause(state)
   end
@@ -1490,15 +1499,15 @@ local function pool_answer(
   local first = next_frame(held_worker)
   released_worker(held_worker)
   if first is nil then
-    return failed("slot " .. tostring(slot) .. " gave no reply")
+    return as_reply(internal("slot " .. tostring(slot) .. " gave no reply"))
   end
   local header = tltp.json_decode(first) as PoolHeader | nil
   if header is nil then
-    return failed("slot " .. tostring(slot) .. " gave no reply")
+    return as_reply(internal("slot " .. tostring(slot) .. " gave no reply"))
   end
   local reply_body = header.body
   if reply_body is nil then
-    return failed("slot " .. tostring(slot) .. " gave no reply")
+    return as_reply(internal("slot " .. tostring(slot) .. " gave no reply"))
   end
   local status: tltp.Status = "InternalServerError"
   local given = header.status
@@ -1658,12 +1667,12 @@ function serve.answer(server: tltp.Server, body: string): serve.Reply
   if not (state is nil) then
     return pool_answer(server, state, body)
   end
-  local ready, failure = prepared(server, body)
+  local ready, refusal = prepared(server, body)
   if ready is nil then
-    return failure as serve.Reply
+    return as_reply(refusal as Fault)
   end
   if ready.waiting then
-    return too_many(server)
+    return as_reply(too_many(server))
   end
   return finished(ready)
 end
@@ -1675,16 +1684,16 @@ function serve.stream(
   if not (state is nil) then
     return pool_stream(server, state, body)
   end
-  local ready, failure = prepared(server, body)
+  local ready, refusal = prepared(server, body)
   if ready is nil then
-    local fault = failure as serve.Reply
-    return server:json(fault.status, fault.body), nil
+    local reply = as_reply(refusal as Fault)
+    return server:json(reply.status, reply.body), nil
   end
 
   if not ready.request.stream then
     if ready.waiting then
-      local fault = too_many(server)
-      return server:json(fault.status, fault.body), nil
+      local reply = as_reply(too_many(server))
+      return server:json(reply.status, reply.body), nil
     end
     local reply = finished(ready)
     return server:json(reply.status, reply.body), nil
@@ -1699,8 +1708,8 @@ function serve.stream(
   )
   if run is nil then
     released(ready)
-    local fault = failed(open_line as string)
-    return server:json(fault.status, fault.body), nil
+    local reply = as_reply(internal(open_line as string))
+    return server:json(reply.status, reply.body), nil
   end
 
   local held_run: generate.Run | nil = run

@@ -1,3 +1,4 @@
+local process = require("process")
 local targs = require("targs")
 local compute = require("tllm.compute")
 local config = require("tllm.config")
@@ -179,7 +180,7 @@ local function serve_code(
   command: targs.Parser,
   write_err: function(string),
   start: function(
-    endpoint: serve.Endpoint, write_err: function(string)
+    endpoint: serve.Endpoint, write_err: function(string), spawn?: process.Spawn
   ): integer,
   environment: {string: string}
 ): integer
@@ -226,8 +227,9 @@ local function serve_code(
     config_path = explicit
   end
 
-  local settings = config.load(environment, config_path, path_word, write_err)
+  local settings, config_line = config.load(environment, config_path, path_word)
   if settings is nil then
+    write_err(one_line(config_line as string))
     return 1
   end
 
@@ -289,7 +291,7 @@ function cli.run(
   write_out: function(string),
   write_err: function(string),
   start?: (function(
-    endpoint: serve.Endpoint, write_err: function(string)
+    endpoint: serve.Endpoint, write_err: function(string), spawn?: process.Spawn
   ): integer),
   environment?: {string: string}
 ): integer

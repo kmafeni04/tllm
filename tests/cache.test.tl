@@ -535,7 +535,7 @@ test.it(
         {max_tokens = 2, seed = 0, end_id = 3}
       )
       test.equal(line, nil)
-      return output as string
+      return (output as generate.Text).text
     end
 
     local single = reply("f32")

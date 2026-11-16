@@ -475,13 +475,13 @@ local function split_pieces(template: string): {Piece} | nil, string | nil
   return pieces, nil
 end
 
-local function next_atom(
-  source: string, index: integer
-): Atom | nil, integer | nil, string | nil
+local function next_atom(source: string, walk: Cursor): Atom | nil, string | nil
+  local index = walk.at
   local length = #source
   local one = source:sub(index, index)
   if one == " " or one == "\t" or one == "\n" or one == "\r" then
-    return nil, index + 1, nil
+    walk.at = index + 1
+    return nil, nil
   end
   if one == "'" or one == '"' then
     local pieces: {string} = {}
@@ -512,58 +512,57 @@ local function next_atom(
       end
     end
     if not closed then
-      return nil, nil, fault("an expression holds an unclosed string")
+      return nil, fault("an expression holds an unclosed string")
     end
-    return {form = "text", text = table.concat(pieces), num = 0},
-      cursor + 1,
-      nil
+    walk.at = cursor + 1
+    return {form = "text", text = table.concat(pieces), num = 0}, nil
   end
   if one:match("%d") then
     local digits = source:match("^[%d%._]+", index)
     local amount = tonumber(digits as string)
     if amount is nil then
-      return nil, nil, fault("an expression holds a bad number")
+      return nil, fault("an expression holds a bad number")
     end
-    return {form = "number", text = "", num = amount as number},
-      index + #(digits as string),
-      nil
+    walk.at = index + #(digits as string)
+    return {form = "number", text = "", num = amount as number}, nil
   end
   if one == "." and source:sub(index + 1, index + 1):match("%d") then
     local digits = source:match("^[%d%._]+", index)
     local amount = tonumber(digits as string)
     if amount is nil then
-      return nil, nil, fault("an expression holds a bad number")
+      return nil, fault("an expression holds a bad number")
     end
-    return {form = "number", text = "", num = amount as number},
-      index + #(digits as string),
-      nil
+    walk.at = index + #(digits as string)
+    return {form = "number", text = "", num = amount as number}, nil
   end
   if one:match("[%a_]") then
     local word = source:match("^[%a_][%w_]*", index) as string
-    return {form = "word", text = word, num = 0}, index + #word, nil
+    walk.at = index + #word
+    return {form = "word", text = word, num = 0}, nil
   end
   local pair = source:sub(index, index + 1)
   if
     SIGNS[pair]
     and (pair == "==" or pair == "!=" or pair == "<=" or pair == ">=")
   then
-    return {form = "sign", text = pair, num = 0}, index + 2, nil
+    walk.at = index + 2
+    return {form = "sign", text = pair, num = 0}, nil
   end
   if SIGNS[one] then
-    return {form = "sign", text = one, num = 0}, index + 1, nil
+    walk.at = index + 1
+    return {form = "sign", text = one, num = 0}, nil
   end
-  return nil, nil, fault("an expression holds an unusable character")
+  return nil, fault("an expression holds an unusable character")
 end
 
 local function split_atoms(source: string): {Atom} | nil, string | nil
   local atoms: {Atom} = {}
-  local index = 1
-  while index <= #source do
-    local atom, moved, failure = next_atom(source, index)
+  local walk: Cursor = {at = 1}
+  while walk.at <= #source do
+    local atom, failure = next_atom(source, walk)
     if not (failure is nil) then
       return nil, failure
     end
-    index = moved as integer
     if not (atom is nil) then
       atoms[#atoms + 1] = atom as Atom
     end
@@ -703,11 +702,16 @@ local function read_atom(parser: Parser): Expr | nil, string | nil
   return nil, fault("an expression starts with something unusable")
 end
 
-local function read_arguments(parser: Parser): {Expr}, {string}, string | nil
+local record Arguments
+  args: {Expr}
+  labels: {string}
+end
+
+local function read_arguments(parser: Parser): Arguments | nil, string | nil
   local args: {Expr} = {}
   local labels: {string} = {}
   if take_sign(parser, ")") then
-    return args, labels, nil
+    return {args = args, labels = labels}, nil
   end
   while true do
     local label = ""
@@ -724,18 +728,18 @@ local function read_arguments(parser: Parser): {Expr}, {string}, string | nil
     end
     local value, failure = read_expression(parser)
     if value is nil then
-      return args, labels, failure
+      return nil, failure
     end
     args[#args + 1] = value
     labels[#labels + 1] = label
     if take_sign(parser, ",") then
       if take_sign(parser, ")") then
-        return args, labels, nil
+        return {args = args, labels = labels}, nil
       end
     elseif take_sign(parser, ")") then
-      return args, labels, nil
+      return {args = args, labels = labels}, nil
     else
-      return args, labels, fault("a call is not closed")
+      return nil, fault("a call is not closed")
     end
   end
 end
@@ -766,15 +770,15 @@ local function read_postfix(parser: Parser): Expr | nil, string | nil
       parser.mark = parser.mark + 1
       if is_sign(parser, "(") then
         parser.mark = parser.mark + 1
-        local args, labels, bad = read_arguments(parser)
-        if not (bad is nil) then
+        local arguments, bad = read_arguments(parser)
+        if arguments is nil then
           return nil, bad
         end
         local call = new_expr("method")
         call.left = node
         call.text = held.text
-        call.parts = args
-        call.labels = labels
+        call.parts = arguments.args
+        call.labels = arguments.labels
         node = call
       else
         local field = new_expr("field")
@@ -826,14 +830,14 @@ local function read_postfix(parser: Parser): Expr | nil, string | nil
       end
     elseif atom.text == "(" then
       parser.mark = parser.mark + 1
-      local args, labels, bad = read_arguments(parser)
-      if not (bad is nil) then
+      local arguments, bad = read_arguments(parser)
+      if arguments is nil then
         return nil, bad
       end
       local call = new_expr("call")
       call.left = node
-      call.parts = args
-      call.labels = labels
+      call.parts = arguments.args
+      call.labels = arguments.labels
       node = call
     elseif atom.text == "|" then
       parser.mark = parser.mark + 1
@@ -1139,9 +1143,14 @@ local function new_node(form: string): Node
   }
 end
 
+local record Block
+  nodes: {Node}
+  stop: Piece | nil
+end
+
 local read_block: function(
   pieces: {Piece}, walk: Cursor, stops: {string: boolean}
-): {Node} | nil, Piece | nil, string | nil
+): Block | nil, string | nil
 
 local function read_set(body: string): Node | nil, string | nil
   local target, source = body:match("^(.-)%s*=%s*(.+)$")
@@ -1212,7 +1221,7 @@ end
 
 read_block = function(
   pieces: {Piece}, walk: Cursor, stops: {string: boolean}
-): {Node} | nil, Piece | nil, string | nil
+): Block | nil, string | nil
   local nodes: {Node} = {}
   while walk.at <= #pieces do
     local piece = pieces[walk.at]
@@ -1226,7 +1235,7 @@ read_block = function(
     elseif piece.form == "output" then
       local expression, failure = parse_source(piece.source)
       if expression is nil then
-        return nil, nil, failure
+        return nil, failure
       end
       local held = new_node("output")
       held.value = expression
@@ -1234,50 +1243,49 @@ read_block = function(
     else
       local name = piece.name
       if stops[name] then
-        return nodes, piece, nil
+        return {nodes = nodes, stop = piece}, nil
       end
       if name == "if" then
         local body = piece_body(piece)
         if body == "" then
-          return nil, nil, fault("tag 'if' holds no expression")
+          return nil, fault("tag 'if' holds no expression")
         end
         local test, failure = parse_source(body)
         if test is nil then
-          return nil, nil, failure
+          return nil, failure
         end
         local branches: {Branch} = {}
         local taken_once = false
         while not taken_once do
-          local inner, stop, inner_failure = read_block(pieces, walk, IF_STOPS)
+          local inner, inner_failure = read_block(pieces, walk, IF_STOPS)
           if inner is nil then
-            return nil, nil, inner_failure
+            return nil, inner_failure
           end
+          local stop = inner.stop
           if stop is nil then
-            return nil, nil, fault("tag 'if' is never closed")
+            return nil, fault("tag 'if' is never closed")
           end
-          branches[#branches + 1] = {test = test, body = inner}
-          local held_stop = stop as Piece
-          if held_stop.name == "elif" then
-            local next_body = piece_body(held_stop)
+          branches[#branches + 1] = {test = test, body = inner.nodes}
+          if stop.name == "elif" then
+            local next_body = piece_body(stop)
             if next_body == "" then
-              return nil, nil, fault("tag 'elif' holds no expression")
+              return nil, fault("tag 'elif' holds no expression")
             end
             local next_test, next_failure = parse_source(next_body)
             if next_test is nil then
-              return nil, nil, next_failure
+              return nil, next_failure
             end
             test = next_test
-          elseif held_stop.name == "else" then
-            local other, other_stop, other_failure = read_block(
-              pieces, walk, ELSE_STOPS
-            )
+          elseif stop.name == "else" then
+            local other, other_failure = read_block(pieces, walk, ELSE_STOPS)
             if other is nil then
-              return nil, nil, other_failure
+              return nil, other_failure
             end
+            local other_stop = other.stop
             if other_stop is nil then
-              return nil, nil, fault("tag 'if' is never closed")
+              return nil, fault("tag 'if' is never closed")
             end
-            branches[#branches + 1] = {test = nil, body = other}
+            branches[#branches + 1] = {test = nil, body = other.nodes}
             taken_once = true
           else
             taken_once = true
@@ -1290,47 +1298,49 @@ read_block = function(
         local body = piece_body(piece)
         local binding, source = body:match("^(.-)%s+in%s+(.+)$")
         if binding is nil or source is nil then
-          return nil, nil, fault("tag 'for' holds no '<name> in <list>'")
+          return nil, fault("tag 'for' holds no '<name> in <list>'")
         end
         if (binding as string):match("^%a[%w_]*$") == nil then
-          return nil, nil, fault("tag 'for' holds no name")
+          return nil, fault("tag 'for' holds no name")
         end
         local list, failure = parse_source(bare(source as string))
         if list is nil then
-          return nil, nil, failure
+          return nil, failure
         end
-        local inner, stop, inner_failure = read_block(pieces, walk, FOR_STOPS)
+        local inner, inner_failure = read_block(pieces, walk, FOR_STOPS)
         if inner is nil then
-          return nil, nil, inner_failure
+          return nil, inner_failure
         end
-        if stop is nil then
-          return nil, nil, fault("tag 'for' is never closed")
+        local inner_stop = inner.stop
+        if inner_stop is nil then
+          return nil, fault("tag 'for' is never closed")
         end
         local held = new_node("for")
         held.binding = binding as string
         held.value = list
-        held.body = inner
+        held.body = inner.nodes
         nodes[#nodes + 1] = held
       elseif name == "set" then
         local held, failure = read_set(piece_body(piece))
         if held is nil then
-          return nil, nil, failure
+          return nil, failure
         end
         nodes[#nodes + 1] = held as Node
       elseif name == "macro" then
         local entry, failure = read_macro(piece_body(piece))
         if entry is nil then
-          return nil, nil, failure
+          return nil, failure
         end
-        local inner, stop, inner_failure = read_block(pieces, walk, MACRO_STOPS)
+        local inner, inner_failure = read_block(pieces, walk, MACRO_STOPS)
         if inner is nil then
-          return nil, nil, inner_failure
+          return nil, inner_failure
         end
-        if stop is nil then
-          return nil, nil, fault("tag 'macro' is never closed")
+        local inner_stop = inner.stop
+        if inner_stop is nil then
+          return nil, fault("tag 'macro' is never closed")
         end
         local held_entry = entry as Macro
-        held_entry.body = inner
+        held_entry.body = inner.nodes
         local held = new_node("macro")
         held.binding = held_entry.name
         held.text = held_entry.name
@@ -1343,7 +1353,7 @@ read_block = function(
       end
     end
   end
-  return nodes, nil, nil
+  return {nodes = nodes, stop = nil}, nil
 end
 
 -- Evaluation
@@ -2305,10 +2315,11 @@ function chat.render(
 
   local walk: Cursor = {at = 1}
   local stops: {string: boolean} = {}
-  local nodes, stop, parse_failure = read_block(pieces as {Piece}, walk, stops)
-  if nodes is nil then
+  local block, parse_failure = read_block(pieces as {Piece}, walk, stops)
+  if block is nil then
     return nil, parse_failure
   end
+  local stop = block.stop
   if not (stop is nil) then
     return nil, fault("tag '" .. tostring(stop.name) .. "' is out of place")
   end
@@ -2333,7 +2344,7 @@ function chat.render(
     broken = false,
     depth = 0,
   }
-  local failure = walk_nodes(run, nodes as {Node})
+  local failure = walk_nodes(run, block.nodes)
   if not (failure is nil) then
     return nil, failure
   end

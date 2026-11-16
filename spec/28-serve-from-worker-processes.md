@@ -39,6 +39,11 @@ cost of a poll interval of a few milliseconds per payload. It is also the shape 
 `childPool` uses to hand work to children
 (`packages/lde-core/src/util/childpool.lua` in the lde repository).
 
+Neither the tick nor the watcher wakes on a clock, so a parent waiting for a reply and a worker
+waiting for a tick would each spin a core. Lua's standard library has no sleep and `fs`'s watcher
+only wakes on a change, so both sides wait through `src/pause.tl`, a few lines over `ffi` that ask
+the system for a bounded pause; that module is the only place in the pool that reaches `ffi`.
+
 It also settles a question no earlier spec settles: whether one machine can have the ggml backend
 open in more than one process at once. The pool's own first case answers it, because two workers
 each load the library, map the file and answer.
@@ -189,7 +194,9 @@ rather than in `serve`.
   worker.
 - FR-012 (US-003) THE SYSTEM SHALL declare lde's `process` in `lde.json` at its registry version
   and declare its shape in `types/process.d.tl`, so that starting, polling and stopping a worker go
-  through it and nothing in the pool runs `os.execute` or reaches `ffi`.
+  through it and nothing in the pool runs `os.execute`; the only `ffi` the pool reaches is the
+  bounded pause in `src/pause.tl`, which the parent's wait and the worker's wait call instead of
+  spinning.
   Not testable: a dependency and a type declaration, visible in `lde.json`, `lde.lock` and the
   tree.
 
@@ -197,6 +204,9 @@ rather than in `serve`.
 
 - No single copy of the weights across processes and no measurement: every worker loads the model
   itself, and nothing here says whether this or `26`'s shared pass serves a prompt queue faster.
+- No returning the probing process's own device memory to the card: `compute.unload` forgets the
+  backend, and the ggml library it opened and any device context it created stay until the process
+  exits. `FR-011` compares the device's free bytes and drops the backend; it does not reclaim them.
 - No moving a conversation while its worker lives, and no rebalancing: a session moves only because
   its worker went away.
 - No cleanup after a parent killed uncleanly: a worker left behind by a `SIGKILL` of its parent is

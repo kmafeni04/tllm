@@ -105,9 +105,14 @@ local record generate
     compute.Model, tokenizer.Tokenizer, string, Options, string | nil
   ): Run | nil, string | nil
 
+  record Text
+    text: string
+    sampled: {integer}
+  end
+
   text: function(
     compute.Model, tokenizer.Tokenizer, string, Options, string | nil
-  ): string | nil, string | nil, integer | nil, {integer} | nil
+  ): Text | nil, string | nil
 end
 
 local record serve

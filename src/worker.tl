@@ -3,6 +3,7 @@
 
 local fs = require("fs")
 local compute = require("tllm.compute")
+local pause = require("tllm.pause")
 local serve = require("tllm.serve")
 local tltp = require("tltp")
 
@@ -47,9 +48,7 @@ end
 local function waited(watcher: fs.Watcher | nil, path: string)
   while not fs.isfile(path) do
     if watcher is nil then
-      local until_time = os.clock() + 0.002
-      while os.clock() < until_time do
-      end
+      pause.milliseconds(2)
     else
       watcher:wait()
     end
@@ -172,9 +171,7 @@ local function main()
     local jobs = batch as {string}
     if #jobs == 0 then
       if watcher is nil then
-        local until_time = os.clock() + 0.002
-        while os.clock() < until_time do
-        end
+        pause.milliseconds(2)
       else
         watcher:wait()
       end

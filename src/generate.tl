@@ -20,13 +20,18 @@ local record generate
     fail: function(Run, string)
   end
 
+  record Text
+    text: string
+    sampled: {integer}
+  end
+
   open: function(
     compute.Model, tokenizer.Tokenizer, string, Options, sequence?: string
   ): Run | nil, string | nil
 
   text: function(
     compute.Model, tokenizer.Tokenizer, string, Options, sequence?: string
-  ): string | nil, string | nil, integer | nil, {integer} | nil
+  ): Text | nil, string | nil
 end
 
 local type Options = generate.Options
@@ -298,7 +303,7 @@ function generate.text(
   prompt: string,
   options: Options,
   sequence?: string
-): string | nil, string | nil, integer | nil, {integer} | nil
+): generate.Text | nil, string | nil
   local run, open_line = generate.open(model, tokens, prompt, options, sequence)
   if run is nil then
     return nil, open_line
@@ -336,7 +341,7 @@ function generate.text(
   if answer is nil then
     return nil, decode_line
   end
-  return answer, nil, #run.produced, run.produced
+  return {text = answer, sampled = run.produced}, nil
 end
 
 return generate
