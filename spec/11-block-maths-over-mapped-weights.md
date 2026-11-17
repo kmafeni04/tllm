@@ -58,10 +58,8 @@ one tensor short. ggml answers a context with no room for one more tensor with N
 placing a short one, and every later call in the same build would dereference that NULL, so the
 tensor request raises at once and the operation catches the raise around its build and returns it as
 one line. That covers the tensors an operation asks its context for by shape, `vector_of`,
-`scalar_of`, `host_tensor`, `matrix_of` and the linear block's `shapes`; a NULL an expression node
-returns, from `ggml_mul`, `ggml_mul_mat`, `ggml_rms_norm` and the rest, is ggml's own allocation and
-is not caught, so for those the constant remains the contract and `32`'s graph rework is where they
-are wrapped. `ggml_used_mem` cannot serve as this guard: it reports what ggml placed, and ggml never
+`scalar_of`, `host_tensor` and `matrix_of`; the constant beside each operation remains the contract
+for the rest. `ggml_used_mem` cannot serve as this guard: it reports what ggml placed, and ggml never
 places past the buffer, so a comparison against the buffer's size can never fire.
 
 ```teal
@@ -177,11 +175,10 @@ end
 - FR-016 (US-001) IF a tensor an operation asks its graph's context for by shape comes back NULL,
   THEN THE SYSTEM SHALL stop that operation's build at that tensor and return nil and one line
   naming the operation and the number of numbers the tensor asked for, so no later call in the same
-  build reads through the NULL; a NULL an expression node returns is not covered, that being `32`'s
-  graph rework.
+  build reads through the NULL.
   Not testable: reaching the branch needs an operation whose constant is wrong, which the suite
   would have to ship; a reader confirms the raise in `graph_tensor` and the `pcall` around the build
-  in `gathered` and `linear_press` in `src/compute.tl`.
+  in `gathered` in `src/compute.tl`.
 - FR-017 (US-001) WHEN a maths handle's `close` is called, THE SYSTEM SHALL give back its hold on the
   weights handle, so that a handle whose last maths handle is closed can be released, and a second
   `close` SHALL return without doing it again; IF an operation is called on a closed handle, THEN

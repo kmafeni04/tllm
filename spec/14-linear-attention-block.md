@@ -201,12 +201,12 @@ the refusal line.
   history and state start as zeros, and a refused block call stores nothing: every refusal of
   FR-012 to FR-015 happens before those numbers are written. The history and state are kept under
   a sequence and a prefix, and are freed with that sequence as `26/FR-005` says.
-- FR-017 (US-002) THE SYSTEM SHALL size one block call's arena from the shapes that call builds in:
-  four state-sized tensors, being the host tensor the call hands ggml for the stored state, whose
-  own buffer ggml still allocates before the caller's pointer replaces it, the state it decays, the
-  product that corrects it and the state it writes, plus the convolution window, the heads'
-  vectors and the one-row tensors between them with room to spare, so that a block's arena follows
-  its geometry rather than a multiplier of it.
+- FR-017 (US-002) WHEN a block call builds its graph, THE SYSTEM SHALL build it in the one arena the
+  model that built the handle holds, sized by `32/FR-005` from the largest graph a pass builds at
+  the model's `positions`, and, for a handle built on its own, in one arena of its own sized by the
+  same rule at the geometry's `positions`, so that the state the call reads, the state it decays,
+  the product that corrects it and the state it writes, the convolution window, the heads' vectors
+  and the one-row tensors between them all fit that arena and no arena is allocated per call.
 - FR-011 (US-003) IF `compute.linear_attention` is given a backend that `compute.load`
   did not return, or a `geometry` missing any of the five numbers FR-001 names or
   holding `linear_key_heads`, `linear_key_length`, `linear_value_heads`,

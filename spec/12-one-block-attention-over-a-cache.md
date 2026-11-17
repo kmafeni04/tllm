@@ -46,7 +46,8 @@ before `attn_output.weight` is applied. Rope is `11/FR-005`'s NEOX rope with one
 
 Refusals keep the shape `11` uses: nil and one line, so a mistake in the next spec's wiring is a
 return value and the process stays up. A cache allocates on the first block call that names its
-prefix, so an `Attention` handle over a 23 GB model allocates nothing until a block is used.
+prefix, so an `Attention` handle over a 23 GB model allocates nothing until a block is used; `32`
+gives that first call the handle's one arena as well, sized from the largest graph it builds.
 
 ```teal
 local weights = require("tllm.weights")
@@ -122,7 +123,10 @@ end
   cache exists and nil before. Such a cache is freed by `release` and does not count against the
   model's `sequences`. A refused block call stores nothing: every refusal of FR-009 to FR-012
   happens before those numbers are written, so a sequence and prefix's next position is the same
-  after a refused call as before it.
+  after a refused call as before it. WHEN `reserve` is given a `positions` above the geometry's
+  `positions`, THE SYSTEM SHALL return one line naming `reserve` and the positions and reserve
+  nothing, so a handle's one arena, sized at the geometry's `positions`, holds every graph the
+  handle builds; `13`'s and `14`'s handles have no caches and are unchanged.
 - FR-006 (US-001) WHEN the cached positions of a sequence and prefix are known, THE SYSTEM SHALL
   take a query head's weight for a position as `11/FR-006`'s softmax, over the positions zero to
   that row's `position` of its own sequence's cache, of
@@ -157,7 +161,8 @@ end
   Not testable: making that allocation fail needs a memory limit the suite cannot set portably; the
   branch returns nil and one line, which a reader confirms by inspection.
 - FR-014 (US-004) WHEN an attention handle's `close` is called, THE SYSTEM SHALL free every prefix's
-  cache it holds and give back the handle's hold on the weights mapping, so the weights file can be
+  cache it holds, the one arena a handle built outside a model holds and that handle's graphs' device
+  buffer, and give back the handle's hold on the weights mapping, so the weights file can be
   released; a second `close` SHALL change nothing, and IF `block`, `cache_bytes`, `reserve`,
   `snapshot` or `restore` is called after `close`, THEN THE SYSTEM SHALL return nil and one line
   naming the operation and saying the attention is closed, `reserve` and `restore` returning that

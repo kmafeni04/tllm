@@ -1430,3 +1430,58 @@ test.it(
     test.includes(single_line as string, "a")
   end
 )
+
+test.it(
+  "a pass builds three graphs per block and two for itself",
+  function()
+    local one = model_of(loaded(t001_meta(), t001_entries()), 2)
+    local before = one.measure.graphs
+    test.truthy(forward(one, 0, 0))
+    test.equal(one.measure.graphs - before, 5)
+
+    local two = model_of(loaded(t002_meta(), t002_entries()), 2)
+    local started = two.measure.graphs
+    test.truthy(forward(two, 2, 0))
+    test.equal(two.measure.graphs - started, 8)
+  end
+)
+
+test.it(
+  "neither heads nor rows multiply the graphs",
+  function()
+    local wide = model_of(loaded(t005_meta(), t005_entries()), 2)
+    local before = wide.measure.graphs
+    test.truthy(forward(wide, 0, 0))
+    test.equal(wide.measure.graphs - before, 5)
+
+    local batch = model_sequences(loaded(t002_meta(), t002_entries()), 4, 2)
+    test.equal(batch:reserve("a", 4), nil)
+    test.equal(batch:reserve("b", 4), nil)
+    local started = batch.measure.graphs
+    local rows, line = batch:pass(
+      {
+        {sequence = "a", token = 2, position = 0},
+        {sequence = "b", token = 2, position = 0},
+      }
+    )
+    test.equal(line, nil)
+    test.equal(#(rows as {{number}}), 2)
+    test.equal(batch.measure.graphs - started, 8)
+  end
+)
+
+test.it(
+  "two hundred passes fit the arena built with the model",
+  function()
+    local meta = with_integer(t001_meta(), "qwen35moe.context_length", 256)
+    local handle = loaded(meta, t001_entries())
+    local model, failure = compute.model(backend, handle, 256, "f32")
+    test.equal(failure, nil)
+    local walking = model as compute.Model
+    for position = 0, 199 do
+      local scores, line = walking.forward(walking, 0, position)
+      test.equal(line, nil)
+      close(scores as {number}, {1.4142136, 0, 1.4142136}, 1e-5)
+    end
+  end
+)

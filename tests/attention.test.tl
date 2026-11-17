@@ -794,3 +794,19 @@ test.it(
     )
   end
 )
+
+test.it(
+  "a reserve above the handle's geometry is refused",
+  function()
+    local shape = geometry()
+    shape.positions = 2
+    local attention = attended(loaded(toy_entries()), shape)
+
+    local wide = attention.reserve(attention, "s", 3, {"blk.0."})
+    test.truthy(wide)
+    test.includes(wide as string, "reserve")
+    test.includes(wide as string, "3")
+
+    test.equal(attention.reserve(attention, "s", 2, {"blk.0."}), nil)
+  end
+)

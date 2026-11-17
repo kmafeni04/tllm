@@ -1,6 +1,6 @@
 # 32: One graph per block per pass
 
-**Status**: pending   **Depends on**: 11, 12, 13, 14, 15, 29
+**Status**: done   **Depends on**: 11, 12, 13, 14, 15, 29
 
 ## Problem & context
 
@@ -35,24 +35,26 @@ What a block's graph reads and writes is decided here too. It reads the block's 
 pass's rows for that block, and the state the block keeps: for an attention block each row's
 sequence cache up to that row's position, and it appends that position's key and value rows itself;
 for a linear block each row's sequence history and state, and writes back what that row's position
-leaves them. Today those numbers cross into and out of Lua per operation, the cache rows quantised
-on the host by `cache_row_write` and the linear history shifted on the host beside `linear_press`.
+leaves them. Before this spec those numbers crossed into and out of Lua per operation, the cache
+rows quantised on the host and the linear history shifted there too.
 One row per sequence, which is what `26` allows, so a pass of several conversations is still one
 graph per block: the rows' state tensors and caches are separate host tensors of one graph.
 
 One arena per model, sized once from the largest of the graphs a pass builds at the model's whole
 position count, because the scores a graph holds for each of the batch's heads grow with the
 position. A block handle built on its own, as `12`, `13` and `14` publish one, gets one arena of
-its own by the same rule. Placing a graph in an arena again is what the cost drops by, and it is
-also what it costs: every tensor of an earlier graph is gone once the arena is initialised again,
-so each graph builds its own descriptors and its numbers are read back into Lua before the next one
-is built. The guard that a graph bigger than its arena is a line and not a write past the buffer
-stays `11/FR-016`'s check. `11` found that `ggml_used_mem` cannot serve as that guard, since it
-reports what ggml placed and ggml never places past its buffer, so a comparison against the
-buffer's size can never fire; that holds here, and the guard is the NULL check. Its reach does
-change: `11` let a NULL an expression node returns go unchecked, because the constant beside each
-operation was the contract, and no constant can be the contract for a graph of a block, so every
-node's result is checked and a NULL raises.
+its own by the same rule, made at its first graph since that is the first time the tensors it reads
+are known. Placing a graph in an arena again is what the cost drops by, and it is also what it
+costs: every tensor of an earlier graph is gone once the arena is initialised again, so each graph
+builds its own descriptors and its numbers are read back into Lua before the next one is built. The
+feed-forward's second graph therefore normalises the row again rather than reading the first
+graph's norm: the router's numbers are the only ones that cross between them. The guard that a
+graph bigger than its arena is a line and not a write past the buffer stays `11/FR-016`'s check.
+`11` found that `ggml_used_mem` cannot serve as that guard, since it reports what ggml placed and
+ggml never places past its buffer, so a comparison against the buffer's size can never fire; that
+holds here, and the guard is the NULL check. Its reach does change: `11`'s per-call builds lean on
+the constant beside each operation, and no constant can be the contract for a graph of a block, so
+every node's result is checked and a NULL raises.
 
 On the device path of `21` the same reasoning applies to device memory: a block gets one device
 buffer holding its graphs' tensors, sized the same way from the largest graph the block builds at
@@ -125,13 +127,14 @@ record `29` declares, and `29/FR-009` is amended to say so.
   a reader confirms the one allocation and the largest-graph sizing in the tree.
 - FR-006 (US-004) WHEN a block handle is built outside a model, THE SYSTEM SHALL give it one arena of
   its own, sized by FR-005's rule from the largest graph the handle builds at its geometry's
-  `positions`.
+  `positions`, made at the handle's first graph because that is the first time the tensors it reads
+  and the rows it is given are known, so that between being built and being used it holds none.
   Not testable: `12`'s, `13`'s and `14`'s cases build such a handle and run unchanged, and nothing
   reports its arena's size; a reader confirms the handle's one arena.
 - FR-007 (US-004) IF a graph asks an arena for a tensor it has no room for, THEN THE SYSTEM SHALL
   stop that graph's build at that tensor and return nil and one line naming the block or the pass's
   graph and the numbers the tensor asked for, for a NULL a node returns as for a NULL a build asks
-  for.
+  for, a node's result having no number to name and the line then saying it had no room.
   Not testable: reaching the branch needs an arena one tensor short, which the sizing makes
   unreachable from outside; the branch is the raise in `graph_tensor` and the `pcall` around a
   graph's build, confirmed by inspection, and `11/FR-016` states the same for one operation.
@@ -200,27 +203,4 @@ record `29` declares, and `29/FR-009` is amended to say so.
 
 ## Amendments
 
-- `11/FR-016`: the clause that a NULL an expression node returns is not covered goes. A block's
-  graph checks every node's result, so a NULL from `ggml_mul`, `ggml_mul_mat`, `ggml_rms_norm` or
-  any other node is a line as a NULL from a tensor a build asks for by shape is; the maths handle's
-  own per-call builds keep the constants as their contract.
-- `12/FR-005`: a sequence's `reserve` is refused with nil and one line naming `reserve` and the
-  positions when the positions are above the geometry's `positions`, so a handle's single arena,
-  sized at the geometry's `positions` by FR-006, holds every graph the handle builds. `13`'s and
-  `14`'s handles have no caches and are unchanged.
-- `12/FR-014`: what `close` frees also covers the one arena FR-006 gives a handle built outside a
-  model, which is where `13`'s and `14`'s handles get theirs, and the device buffer FR-008 keeps for
-  that handle's graphs.
-- `14/FR-017`: one block call's arena sized from the shapes that call builds goes. A linear block's
-  graph is built in the arena of the model that built the handle, sized from the largest graph a
-  pass builds at the model's `positions`; a handle built on its own holds one arena of its own by
-  the same rule. The shapes this requirement enumerates are what that arena must hold for a linear
-  block.
-- `15/FR-016`: what `close` frees also covers the arena the model holds and every device buffer
-  FR-008 allocated for its blocks, so a closed model leaves neither behind.
-- `21/FR-003`: the clause that an attention block's graph only reads the cache out of host memory
-  goes. The graph appends that position's key and value rows, so the block copies back the rows it
-  appended, being that position's key and value rows for each key head, and leaves the rest of the
-  cache in host memory, which is where it stays.
-- `29/FR-009`: a pass also adds to `measure.graphs` the number of ggml graphs it built, so `measure`
-  carries a seventh field. No line of `bench`'s report and no count it prints changes.
+- None.

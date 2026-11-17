@@ -173,7 +173,9 @@ refusal lines through the second, and hands back the exit code. The `generation`
   cannot be written, THEN THE SYSTEM SHALL write one line naming FILE to the stderr writer, run no
   further length, and exit 1.
 - FR-009 (US-002) WHEN a model has passed a token, THE SYSTEM SHALL add that pass to its `measure`
-  with the seconds it took, WHEN a token has been chosen from those scores, THE SYSTEM SHALL add
+  with the seconds it took and the number of ggml graphs it built, so `measure` carries a seventh
+  field beside `passes` and no line of `bench`'s report and no count it prints changes, WHEN a token
+  has been chosen from those scores, THE SYSTEM SHALL add
   that choice's seconds and its clock mark to `measure`, and WHEN a pass has routed its experts,
   THE SYSTEM SHALL add their count and the bytes their three matrices hold and, only while
   `routing_sink` is held, hand it one record per layer, so a run with no sink keeps no routing.
