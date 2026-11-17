@@ -1072,3 +1072,140 @@ test.it(
     )
   end
 )
+
+test.it(
+  "a reply is cut at the stop string it completes",
+  function()
+    local handle = loaded(
+      pieces_meta(FOUR_PIECES), four_entries({0, 0, 1, 0, 2, 0, 3, 0})
+    )
+    local tokens = tokens_of(handle)
+
+    local answer, line = generate.text(
+      fresh(handle, 4),
+      tokens,
+      "a",
+      {
+        max_tokens = 3,
+        seed = 0,
+        stop = {"d"},
+      }
+    )
+    test.equal(line, nil)
+    test.equal((answer as generate.Text).text, "")
+    test.deepEqual((answer as generate.Text).sampled, {3})
+
+    answer, line = generate.text(
+      fresh(handle, 4),
+      tokens,
+      "a",
+      {
+        max_tokens = 3,
+        seed = 0,
+        stop = {"dd"},
+      }
+    )
+    test.equal(line, nil)
+    test.equal((answer as generate.Text).text, "")
+    test.deepEqual((answer as generate.Text).sampled, {3, 3})
+
+    answer, line = generate.text(
+      fresh(handle, 4),
+      tokens,
+      "d",
+      {
+        max_tokens = 3,
+        seed = 0,
+        stop = {"d"},
+      }
+    )
+    test.equal(line, nil)
+    test.equal((answer as generate.Text).text, "")
+    test.deepEqual((answer as generate.Text).sampled, {3})
+
+    local inside = loaded(
+      pieces_meta({"a", "b", "c", "da"}), four_entries({0, 0, 1, 0, 2, 0, 3, 0})
+    )
+    local inside_tokens = tokens_of(inside)
+    answer, line = generate.text(
+      fresh(inside, 4),
+      inside_tokens,
+      "a",
+      {
+        max_tokens = 2,
+        seed = 0,
+        stop = {"d"},
+      }
+    )
+    test.equal(line, nil)
+    test.equal((answer as generate.Text).text, "")
+    test.deepEqual((answer as generate.Text).sampled, {3})
+  end
+)
+
+test.it(
+  "a run holds back what a stop string could still complete",
+  function()
+    local handle = loaded(
+      pieces_meta(FOUR_PIECES), four_entries({0, 0, 1, 0, 2, 0, 3, 0})
+    )
+    local tokens = tokens_of(handle)
+
+    local model = fresh(handle, 4)
+    local run = opened(
+      model,
+      tokens,
+      "a",
+      {
+        max_tokens = 2,
+        seed = 0,
+        stop = {"ddx"},
+      }
+    )
+    local piece, line = advance(model, run)
+    test.equal(piece, nil)
+    test.equal(line, nil)
+    piece, line = advance(model, run)
+    test.equal(piece, "dd")
+    test.equal(line, nil)
+    test.equal(run.done, true)
+    test.deepEqual(run.produced, {3, 3})
+
+    local answer, answer_line = generate.text(
+      fresh(handle, 4),
+      tokens,
+      "a",
+      {
+        max_tokens = 2,
+        seed = 0,
+        stop = {"ddx"},
+      }
+    )
+    test.equal(answer_line, nil)
+    test.equal((answer as generate.Text).text, "dd")
+  end
+)
+
+test.it(
+  "a run holds back the shorter prefix of a longer stop string",
+  function()
+    local handle = loaded(
+      pieces_meta({"a", "b", "c", "xa"}), four_entries({0, 0, 1, 0, 2, 0, 3, 0})
+    )
+    local tokens = tokens_of(handle)
+    local model = fresh(handle, 4)
+    local run = opened(
+      model,
+      tokens,
+      "a",
+      {
+        max_tokens = 2,
+        seed = 0,
+        stop = {"abc"},
+      }
+    )
+    local piece, line = advance(model, run)
+    test.equal(line, nil)
+    test.equal(piece, nil)
+  end
+)

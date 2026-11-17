@@ -2711,3 +2711,141 @@ test.it(
     test.includes(line as string, "top_p")
   end
 )
+
+test.it(
+  "a run holds back what a stop string could still complete",
+  function()
+    local server = build(meta_file(t001_meta(), t001_entries()), "m")
+    local body = '{"messages":[{"role":"user","content":"a"}],"max_tokens":2,"stream":true,"stop":"aax"}'
+
+    local response, stream_fn = serve.stream(server, body)
+    test.equal(response.status, "OK")
+    test.truthy(stream_fn)
+    local payloads = driven(server, stream_fn as tltp.StreamFn)
+    test.equal(#payloads, 4)
+    local events = events_of(payloads)
+    test.deepEqual(events[1], ROLE_EVENT)
+    test.deepEqual(events[2], token_event("aa"))
+    test.deepEqual(events[3], finish_event("length"))
+    test.equal(payloads[4], "[DONE]")
+
+    local plain = '{"messages":[{"role":"user","content":"a"}],"max_tokens":2,"stop":"aax"}'
+    test.equal(answered(server, plain).choices[1].message.content, "aa")
+  end
+)
+
+test.it(
+  "the route carries stop strings and refuses what it cannot use",
+  function()
+    local server = build(meta_file(t001_meta(), t001_entries()), "m")
+
+    local cut = answered(
+      server,
+      '{"messages":[{"role":"user","content":"a"}],"max_tokens":3,"stop":"aa"}'
+    )
+    test.equal(cut.choices[1].message.content, "")
+    test.equal(cut.usage.prompt_tokens, 1)
+    test.equal(cut.usage.completion_tokens, 2)
+    test.equal(cut.usage.total_tokens, 3)
+
+    local listed = answered(
+      server,
+      '{"messages":[{"role":"user","content":"a"}],"max_tokens":2,"stop":["aax"]}'
+    )
+    local one = answered(
+      server,
+      '{"messages":[{"role":"user","content":"a"}],"max_tokens":2,"stop":"aax"}'
+    )
+    test.equal(listed.choices[1].message.content, "aa")
+    test.equal(
+      one.choices[1].message.content, listed.choices[1].message.content
+    )
+
+    local stored = answered(
+      server,
+      '{"messages":[{"role":"user","content":"a"}],"max_tokens":3,"stop":"aa","session_id":"s"}'
+    )
+    test.equal(stored.choices[1].message.content, "")
+    test.equal(held(server, "s").length, 2)
+
+    local cases: {{string, string}} = {
+      {"stop", '""'},
+      {"stop", "[]"},
+      {"stop", '["a","b","c","d","e"]'},
+      {"stop", "7"},
+    }
+    for _, entry in ipairs(cases) do
+      local body = body_with(entry[1], entry[2])
+      test.includes(rejected(server, body).error.message, entry[1], body)
+    end
+
+    local model = serve.model_of(server) as serve.Model
+    local refused_run, line = generate.open(
+      model.generation,
+      model.tokenizer,
+      "a",
+      {
+        max_tokens = 1,
+        seed = 0,
+        stop = {},
+      }
+    )
+    test.equal(refused_run, nil)
+    test.includes(line as string, "generate")
+    test.includes(line as string, "stop")
+
+    refused_run, line = generate.open(
+      model.generation,
+      model.tokenizer,
+      "a",
+      {
+        max_tokens = 0,
+        seed = 0,
+        stop = {},
+      }
+    )
+    test.equal(refused_run, nil)
+    test.includes(line as string, "max_tokens")
+
+    refused_run, line = generate.open(
+      model.generation,
+      model.tokenizer,
+      "a\255",
+      {
+        max_tokens = 1,
+        seed = 0,
+        stop = {},
+      }
+    )
+    test.equal(refused_run, nil)
+    test.includes(line as string, "stop")
+  end
+)
+
+test.it(
+  "a streamed reply that a stop string ends writes no cut text",
+  function()
+    local server = build(meta_file(t001_meta(), t001_entries()), "m")
+    local body = '{"messages":[{"role":"user","content":"a"}],"max_tokens":3,"stream":true,"stop":"aa"}'
+
+    local _, stream_fn = serve.stream(server, body)
+    local payloads = driven(server, stream_fn as tltp.StreamFn)
+    test.equal(#payloads, 3)
+    local events = events_of(payloads)
+    test.deepEqual(events[1], ROLE_EVENT)
+    test.deepEqual(events[2], finish_event("stop"))
+    test.equal(payloads[3], "[DONE]")
+
+    local plain = '{"messages":[{"role":"user","content":"a"}],"max_tokens":3,"stop":"aa"}'
+    test.equal(answered(server, plain).choices[1].message.content, "")
+
+    local at_count = '{"messages":[{"role":"user","content":"a"}],"max_tokens":2,"stream":true,"stop":"aa"}'
+    local _, count_fn = serve.stream(server, at_count)
+    local count_payloads = driven(server, count_fn as tltp.StreamFn)
+    test.equal(#count_payloads, 3)
+    local count_events = events_of(count_payloads)
+    test.deepEqual(count_events[1], ROLE_EVENT)
+    test.deepEqual(count_events[2], finish_event("length"))
+    test.equal(count_payloads[3], "[DONE]")
+  end
+)

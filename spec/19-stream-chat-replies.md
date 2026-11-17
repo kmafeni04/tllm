@@ -10,7 +10,7 @@ ships the transport: `Server:sse(fn)` answers `text/event-stream` and hands `fn`
 that writes every string it is given as one `data:` frame followed by a blank line.
 
 This spec makes that route answer a stream when the body says `"stream": true`: a first event
-naming the assistant role, one event per token as it is appended, one event saying why the reply
+naming the assistant role, one event per text the run releases, one event saying why the reply
 stopped, and `data: [DONE]`, the four shapes the OpenAI clients expect. A body that asks for no
 stream keeps answering what it answers today.
 
@@ -28,10 +28,11 @@ budget allows means the count stopped it, fewer means an end id did, `16/FR-007`
 being the two ways a generation ends. `tltp.json_encode` writes an empty Lua table as `[]`, not
 `{}`, so the event that reports why the reply stopped carries no `delta` member at all.
 
-A delta is one token's own text, `tokenizer:decode` of that single id; one token can hold a single
-byte of a multi-byte character, so a delta can be a fragment and the client is the one that joins
-them. A fragment is usually not valid UTF-8, and `tltp.json_encode` refuses such a string, which is
-why a stream whose event cannot be encoded ends early rather than writing a broken frame.
+A delta is the text a run releases for that step, which is `tokenizer:decode` of one id joined with
+any text the run held back before it; one token can hold a single byte of a multi-byte character, so
+a delta can be a fragment and the client is the one that joins them. A fragment is usually not valid
+UTF-8, and `tltp.json_encode` refuses such a string, which is why a stream whose event cannot be
+encoded ends early rather than writing a broken frame.
 
 ```teal
 local record serve
@@ -68,11 +69,11 @@ non-goals that nothing is streamed. The record `serve` builds from the body is u
 - FR-003 (US-001) WHEN the producer runs, THE SYSTEM SHALL write as its first event one whose data
   is a JSON object whose `choices` is an array holding one object whose `index` is 0 and whose
   `delta` is an object whose `role` is `assistant`.
-- FR-004 (US-001) WHEN `serve.step` appends a sampled token that is not the end id to a turn's
-  reply, and `tokenizer:decode` gives text for that one id, THE SYSTEM SHALL write, through that
-  turn's own emit, an event whose data is a JSON object whose `choices` is an array holding one
-  object whose `index` is 0 and whose `delta` is an object whose `content` is that text, one event
-  per such token; the producer writes no token event of its own.
+- FR-004 (US-001) WHEN a step of a turn releases text, THE SYSTEM SHALL write, through that turn's
+  own emit, an event whose data is a JSON object whose `choices` is an array holding one object
+  whose `index` is 0 and whose `delta` is an object whose `content` is that text, one event per
+  release and none for a token the run holds back, the event for a run's last release coming before
+  the event FR-005 writes; the producer writes no token event of its own.
 - FR-005 (US-002) WHEN the reply ends, THE SYSTEM SHALL have `serve.step` write, in this order, an
   event whose data is a JSON object whose `choices` is an array holding one object whose `index` is
   0, holding no `delta` member, whose `finish_reason` is `length` when as many tokens were appended

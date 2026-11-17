@@ -82,6 +82,7 @@ local tltp = require("tltp")
 local record generate
   record Run
     done: boolean
+    cut: boolean
     failure: string | nil
     produced: {integer}
     next: function(Run): compute.Input | nil
@@ -121,11 +122,14 @@ end
 - FR-003 (US-001) WHEN a row's scores are accepted, THE SYSTEM SHALL take the next token from them
   by the rules `16/FR-004`, `16/FR-005` and `16/FR-006` give, sampling happening when a row's
   scores are accepted and not after a forward of its own, and IF that token is not the end id, THEN
-  THE SYSTEM SHALL append it, return its decode as the step's text, and forward it as a row at the
-  next position unless that append reached `max_tokens`, and IF it is the end id, THEN THE SYSTEM
-  SHALL end the run without appending it, the run also ending when `max_tokens` ids are appended; a
-  run's `produced` SHALL hold the ids it appended, in the order it appended them, and its `done`
-  SHALL be true once it has ended, by the end id, by the count or by a failure. The end-id ending
+  THE SYSTEM SHALL append it, return the text the run releases as the step's text, that being the
+  text it had not yet released and no text at all for an id the run holds back, and forward it as a
+  row at the next position unless that append reached `max_tokens` or its text completed a stop
+  string, the run ending at the id whose text completed one, that id not being forwarded, and IF it
+  is the end id, THEN THE SYSTEM SHALL end the run without appending it, the run also ending when
+  `max_tokens` ids are appended; a run's `produced` SHALL hold the ids it appended, in the order it
+  appended them, its `cut` SHALL be true once a stop string ended it, and its `done` SHALL be true
+  once it has ended, by the end id, by the count or by a failure. The end-id ending
   is proven through `16/T-003`, which exercises a run once `text` loops over one.
 - FR-004 (US-005) IF a forward or a decode in a step returns nil, THEN THE SYSTEM SHALL end the run,
   return nil as that step's text and that line unchanged, and record that line as the run's
@@ -145,9 +149,9 @@ end
 - FR-007 (US-003) WHEN `serve.step(server)` is called, THE SYSTEM SHALL make one pass for every
   turn that has a row, step each turn that is still live exactly once, in the order the turns
   registered, and return how many turns are still registered after it, waiting ones included.
-- FR-008 (US-002) WHEN a step of a turn appends a token and `tokenizer:decode` gives text for that
-  one id, THE SYSTEM SHALL write, through that turn's own emit, the event `19/FR-004` names for that
-  text.
+- FR-008 (US-002) WHEN a step of a turn releases text, THE SYSTEM SHALL write, through that turn's
+  own emit, the event `19/FR-004` names for that text, and a step that releases nothing SHALL write
+  no event.
 - FR-009 (US-002) WHEN a step ends its turn, THE SYSTEM SHALL write, in this order, the event
   carrying `finish_reason` that `19/FR-005` names and then the `[DONE]` event, store the
   conversation as `23/FR-002` says, and drop that turn from the scheduler so its run, sequence

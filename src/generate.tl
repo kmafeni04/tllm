@@ -15,10 +15,12 @@ local record generate
     frequency_penalty: number | nil
     end_id: integer | nil
     start: integer | nil
+    stop: {string} | nil
   end
 
   record Run
     done: boolean
+    cut: boolean
     failure: string | nil
     produced: {integer}
     next: function(Run): compute.Input | nil
@@ -29,6 +31,7 @@ local record generate
   record Text
     text: string
     sampled: {integer}
+    cut: boolean
   end
 
   open: function(
@@ -63,6 +66,7 @@ local record Progress
   position: integer
   index: integer
   pending: integer | nil
+  unreleased: string
 end
 
 local function drawn(stream: Stream): number
@@ -364,7 +368,69 @@ local function faulted(options: Options): string | nil
       .. tostring(repetition)
       .. " is not above zero"
   end
+  local stop = options.stop
+  if stop is nil then
+    return nil
+  end
+  local usable = #stop >= 1 and #stop <= 4
+  local index = 1
+  while usable and index <= #stop do
+    if #stop[index] < 1 then
+      usable = false
+    end
+    index = index + 1
+  end
+  if not usable then
+    return "generate: stop is not one to four strings of one or more bytes"
+  end
   return nil
+end
+
+-- where the earliest stop string starts inside the text not yet released
+local function stop_start(text: string, stops: {string} | nil): integer | nil
+  if stops is nil then
+    return nil
+  end
+  local first: integer | nil = nil
+  for _, marker in ipairs(stops) do
+    local at = text:find(marker, 1, true)
+    if not (at is nil) and (first is nil or at < first) then
+      first = at
+    end
+  end
+  return first
+end
+
+-- the text ends in a proper prefix of a stop string, so no piece is given yet
+local function withheld(text: string, stops: {string} | nil): boolean
+  if stops is nil then
+    return false
+  end
+  for _, marker in ipairs(stops) do
+    local longest = #marker - 1
+    if #text < longest then
+      longest = #text
+    end
+    for length = longest, 1, -1 do
+      if text:sub(#text - length + 1) == marker:sub(1, length) then
+        return true
+      end
+    end
+  end
+  return false
+end
+
+-- the text a run gives as a piece, cut at the stop position when given
+local function released(progress: Progress, at: integer | nil): string | nil
+  local text = progress.unreleased
+  progress.unreleased = ""
+  if at is integer then
+    text = text:sub(1, at - 1)
+  end
+  if text == "" then
+    return nil
+  end
+  return text
 end
 
 -- a name the model already holds is the one refusal a caller can safely ignore
@@ -435,6 +501,7 @@ function generate.open(
     position = start,
     index = start + 1,
     pending = nil,
+    unreleased = "",
   }
 
   local produced: {integer} = {}
@@ -490,7 +557,7 @@ function generate.open(
     measure.ready = ended
     if token_id == progress.end_id then
       self.done = true
-      return nil, nil
+      return released(progress, nil), nil
     end
 
     produced[#produced + 1] = token_id
@@ -501,12 +568,24 @@ function generate.open(
       self.failure = piece_line
       return nil, piece_line
     end
+    progress.unreleased = progress.unreleased .. piece
+
+    local stops = progress.options.stop
+    local at = stop_start(progress.unreleased, stops)
+    if at is integer then
+      self.done = true
+      self.cut = true
+      return released(progress, at), nil
+    end
     if #produced >= progress.max_tokens then
       self.done = true
-      return piece, nil
+      return released(progress, nil), nil
     end
     progress.pending = token_id
-    return piece, nil
+    if withheld(progress.unreleased, stops) then
+      return nil, nil
+    end
+    return released(progress, nil), nil
   end
 
   local function fail(self: generate.Run, line: string)
@@ -516,6 +595,7 @@ function generate.open(
 
   local run: generate.Run = {
     done = false,
+    cut = false,
     failure = nil,
     produced = produced,
     next = next_input,
@@ -543,6 +623,7 @@ function generate.text(
     return nil, reserve_line
   end
 
+  local pieces: {string} = {}
   while not run.done do
     local input = run.next(run)
     if input is nil then
@@ -554,9 +635,12 @@ function generate.text(
       break
     end
     local scores = rows as {{number}}
-    local _, accept_line = run.accept(run, scores[1])
+    local piece, accept_line = run.accept(run, scores[1])
     if not (accept_line is nil) then
       break
+    end
+    if not (piece is nil) then
+      pieces[#pieces + 1] = piece
     end
   end
 
@@ -565,11 +649,8 @@ function generate.text(
     return nil, failure
   end
 
-  local answer, decode_line = tokens:decode(run.produced)
-  if answer is nil then
-    return nil, decode_line
-  end
-  return {text = answer, sampled = run.produced}, nil
+  return {text = table.concat(pieces), sampled = run.produced, cut = run.cut},
+    nil
 end
 
 return generate

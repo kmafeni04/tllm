@@ -93,6 +93,7 @@ local record Request
   seed: integer
   stream: boolean
   session_id: string | nil
+  stop: {string} | nil
 end
 
 local record Held
@@ -441,6 +442,35 @@ local function request_of(body: string): Request | nil, string | nil
     frequency_penalty = frequency_value
   end
 
+  local stop: {string} | nil = nil
+  local stop_value = fields.stop
+  if not (stop_value is nil) then
+    if stop_value is string then
+      if #stop_value < 1 then
+        return nil, "stop: not a string of one or more bytes"
+      end
+      stop = {stop_value}
+    elseif stop_value is LooseObject then
+      local given = stop_value as {Loose}
+      if #given < 1 or #given > 4 then
+        return nil,
+          "stop: not a string of one or more bytes or an array of one to four"
+      end
+      local markers: {string} = {}
+      for _, entry in ipairs(given) do
+        if not (entry is string) or #(entry as string) < 1 then
+          return nil,
+            "stop: not a string of one or more bytes or an array of one to four"
+        end
+        markers[#markers + 1] = entry as string
+      end
+      stop = markers
+    else
+      return nil,
+        "stop: not a string of one or more bytes or an array of one to four"
+    end
+  end
+
   return {
     messages = messages,
     temperature = temperature,
@@ -454,6 +484,7 @@ local function request_of(body: string): Request | nil, string | nil
     seed = seed,
     stream = stream,
     session_id = session_id,
+    stop = stop,
   }, nil
 end
 
@@ -958,12 +989,15 @@ local function options_of(ready: Prepared): generate.Options
     presence_penalty = request.presence_penalty,
     frequency_penalty = request.frequency_penalty,
     start = ready.cached,
+    stop = request.stop,
   }
 end
 
-local function forwarded(ready: Prepared, sampled: {integer}): {integer}
+local function forwarded(
+  ready: Prepared, sampled: {integer}, cut: boolean
+): {integer}
   local count = #sampled
-  if count == ready.request.max_tokens then
+  if cut or count == ready.request.max_tokens then
     count = count - 1
   end
   local ids: {integer} = {}
@@ -984,7 +1018,7 @@ local function released(ready: Prepared)
   end
 end
 
-local function kept(ready: Prepared, sampled: {integer})
+local function kept(ready: Prepared, sampled: {integer}, cut: boolean)
   local store = ready.store
   local id = ready.request.session_id
   if id is string and store is Store then
@@ -1000,7 +1034,7 @@ local function kept(ready: Prepared, sampled: {integer})
     if store.held[id] == nil and #store.order >= store.limit then
       evict_one(ready.server, store)
     end
-    local ids = forwarded(ready, sampled)
+    local ids = forwarded(ready, sampled, cut)
     store.held[id] = {
       ids = ids,
       session = {
@@ -1048,7 +1082,7 @@ local function finished(ready: Prepared): serve.Reply
 
   local sampled = answer.sampled
   local completion = #sampled
-  kept(ready, sampled)
+  kept(ready, sampled, answer.cut)
   return {
     status = "OK",
     body = tltp.json_encode(
@@ -1698,7 +1732,7 @@ function serve.step(server: tltp.Server): integer
             else
               turn.emit(ending)
               turn.emit("[DONE]")
-              kept(turn.ready, run.produced)
+              kept(turn.ready, run.produced, run.cut)
               dropped(server, turn)
             end
           end

@@ -1,6 +1,6 @@
 # 31: A reply that ends at a string the client names
 
-**Status**: pending   **Depends on**: 16, 18, 19, 23, 30
+**Status**: done   **Depends on**: 16, 18, 19, 23, 30
 
 ## Problem & context
 
@@ -31,7 +31,9 @@ forward took is not one of them, which is why a budget stop's last id is not sto
 whose text completed a stop string ends the run at itself for the same reason: no forward takes its
 position, so the next turn of that conversation does not read text the reply never showed. The id
 is still one the run sampled, so `sampled` holds it and `18/FR-004`'s counts stand, that id
-counting towards `completion_tokens`.
+counting towards `completion_tokens`. A run and its `Text` therefore carry a `cut` that is true
+when a stop string ended the run, which is how the route tells that last id from one an end id
+followed and forwarded.
 
 Why the reply stopped is `19/FR-005` unchanged: `length` when as many ids were appended as the
 budget allows and `stop` otherwise. So a reply a stop string ends reports `stop`, except when the
@@ -123,7 +125,8 @@ rows of `{1, 0}`, `output.weight` holding the rows `{0, 0}`, `{1, 0}`, `{2, 0}` 
 scores are 0, 1.4142136, 2.8284271 and 4.2426407, and `tokenizer.ggml.eos_token_id` removed, so
 every greedy sample is id 3, the piece `d`. T-002 uses that fixture and `18/T-001`'s, T-003 and
 T-004 use `18/T-001`'s, whose pieces are `a`, `b` and `c`, whose scores are 1.4142136, 0 and
-1.4142136, whose end id is 1 and whose greedy reply to the prompt `a` is `aa`.
+1.4142136, whose end id is 1 and whose greedy reply to the prompt `a` is `aa`. T-005 uses a copy of
+the four-piece fixture whose fourth piece is `xa` in place of `d`.
 
 - T-001 (FR-001, FR-002): `a reply is cut at the stop string it completes`, proves on the four-piece
   fixture that `generate.text(model, tokens, "a", {max_tokens = 3, seed = 0, stop = {"d"}})` returns
@@ -175,6 +178,12 @@ T-004 use `18/T-001`'s, whose pieces are `a`, `b` and `c`, whose scores are 1.41
   request with `"stream":true` removed carries the empty content; and that the same body with
   `"max_tokens":2` writes the same three payloads except that the `finish_reason` is `length`, the
   ids the run sampled reaching the budget the string completed on.
+- T-005 (FR-003): `a run holds back the shorter prefix of a longer stop string`, proves on that copy
+  of the four-piece fixture whose fourth piece is `xa` that the run `generate.open` gives for the
+  prompt `a` with `{max_tokens = 2, seed = 0, stop = {"abc"}}`, driven one pass at a time as
+  `25/T-001` does, answers no piece and no line from its first accept, `xa` ending in the `a` that is
+  a proper prefix of `abc` where a run testing only the longest such prefix would release `xa` and
+  then lose the start of a string whose first byte it had already released.
 
 ## Open questions
 
@@ -182,24 +191,4 @@ T-004 use `18/T-001`'s, whose pieces are `a`, `b` and `c`, whose scores are 1.41
 
 ## Amendments
 
-- `16/FR-001`: the `Text`'s text is the text the run released, so a run cut at a stop string
-  answers the text before the cut and not the decode of every id it sampled.
-- `16/FR-003`: a token whose text completed a stop string ends the run at its own position and is
-  not forwarded.
-- `16/FR-009`: its checks gain a `stop` one, after the `start` check and `30/FR-008`'s own, before
-  the prompt is encoded.
-- `16/FR-010`: the decode at fault is the one taken of an id as the run releases its text, there
-  being no decode of the whole sampled list at the end.
-- `18/FR-005`: `stop` leaves the ignored members and joins the members the body honours.
-- `18/FR-006`: `stop` is passed to the generation as `31/FR-005` reads it, a string being the list
-  of that one string.
-- `18/FR-008`: its refusals gain the `stop` one, after the checks `30/FR-008` names, as
-  `30/FR-008`'s own are placed.
-- `19/FR-004`: its event carries the text a run releases rather than one token's own text, one
-  event per release, and the event for a run's last release comes before the event `19/FR-005`
-  writes; a token the run holds back writes no event, and `19`'s non-goal about holding back a
-  token that is half a character is not this holdback.
-- `25/FR-003`: the step's text is the text the run releases, which is no text at all for an id it
-  holds back, and the id whose text completed a stop string ends the run and is not forwarded.
-- `25/FR-008`: the event is written for the text a step releases, and a step that releases nothing
-  writes no event.
+- None.

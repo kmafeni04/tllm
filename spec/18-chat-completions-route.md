@@ -110,13 +110,14 @@ end
   sum, and whose `prompt_tokens_details` is an object whose `cached_tokens` is the number of the
   prompt's ids the turn did not forward.
 - FR-005 (US-001) WHEN the body holds a member other than `messages`, `temperature`, `top_k`,
-  `max_tokens`, `seed`, `stream` and `session_id`, THE SYSTEM SHALL ignore it, and `stream`,
-  `session_id`, `top_p`, `min_p`, `repetition_penalty`, `presence_penalty` and
-  `frequency_penalty` are honoured rather than ignored, those five as `30/FR-007` says.
+  `max_tokens`, `seed` and `session_id`, THE SYSTEM SHALL ignore it, and `stream`,
+  `session_id`, `stop`, `top_p`, `min_p`, `repetition_penalty`, `presence_penalty` and
+  `frequency_penalty` are honoured rather than ignored, those five as `30/FR-007` says and `stop`
+  as `31/FR-005` reads it.
 - FR-006 (US-003) WHEN the body holds `temperature`, `top_k` or `seed`, or `top_p`, `min_p`,
-  `repetition_penalty`, `presence_penalty` or `frequency_penalty`, THE SYSTEM SHALL pass it to the
-  generation as given, an absent `temperature` leaving the sampler greedy and an absent `seed`
-  being 0.
+  `repetition_penalty`, `presence_penalty`, `frequency_penalty` or `stop`, THE SYSTEM SHALL pass it
+  to the generation as given, a `stop` string being the list of that one string as `31/FR-005`
+  reads it, an absent `temperature` leaving the sampler greedy and an absent `seed` being 0.
 - FR-007 (US-003) WHEN the body holds `max_tokens`, THE SYSTEM SHALL take it as the token budget,
   and 256 when it holds none, and the generation SHALL stop at that budget.
 - FR-008 (US-004) IF the body is empty, is not JSON, or decodes to anything but a JSON object, or
@@ -127,7 +128,8 @@ end
   or `stream` is present and is not a boolean (that check coming after `seed`), or `session_id` is
   present and is not a string (that check coming after `stream`), or `30/FR-008` names a member
   whose value it refuses (those checks coming after the `session_id` check, in the order
-  `30/FR-008` names them), THEN THE SYSTEM
+  `30/FR-008` names them), or `stop` is present and is neither a string of one or more bytes nor an
+  array of one to four such strings (that check coming after `30/FR-008`'s own), THEN THE SYSTEM
   SHALL answer `BadRequest` with a body decoding to an object whose single member is
   `error`, an object whose `type` is `invalid_request_error` and whose `message` names the first
   fault in the order this requirement names them: `body`; `messages` and, for an entry, its position
