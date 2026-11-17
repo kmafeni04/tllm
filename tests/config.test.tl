@@ -23,11 +23,17 @@ local function run(args: {string}, environment: {string: string}): Run
     return 0
   end
   result.code = cli.run(
-    args,
-    function(text: string) result.out[#result.out + 1] = text end,
-    function(text: string) result.err[#result.err + 1] = text end,
-    stub,
-    environment
+    {
+      args = args,
+      write_out = function(text: string)
+        result.out[#result.out + 1] = text
+      end,
+      write_err = function(text: string)
+        result.err[#result.err + 1] = text
+      end,
+      start = stub,
+      environment = environment,
+    }
   )
   return result
 end

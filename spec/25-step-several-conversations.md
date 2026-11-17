@@ -93,6 +93,10 @@ local record generate
   open: function(
     compute.Model, tokenizer.Tokenizer, string, Options, sequence?: string
   ): Run | nil, string | nil
+
+  open_ids: function(
+    compute.Model, tokenizer.Tokenizer, {integer}, Options, sequence?: string
+  ): Run | nil, string | nil
 end
 
 local record serve

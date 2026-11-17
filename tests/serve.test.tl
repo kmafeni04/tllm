@@ -410,11 +410,15 @@ local function run(args: {string}, environment: {string: string}): Run
     return 0
   end
   result.code = cli.run(
-    args,
-    function(_text: string) end,
-    function(line: string) result.err[#result.err + 1] = line end,
-    stub,
-    environment
+    {
+      args = args,
+      write_out = function(_text: string) end,
+      write_err = function(line: string)
+        result.err[#result.err + 1] = line
+      end,
+      start = stub,
+      environment = environment,
+    }
   )
   return result
 end
@@ -448,6 +452,12 @@ test.it(
 
     local maps = fs.read("/proc/self/maps") as string
     test.includes(maps, file_path)
+
+    -- a server that runs the model itself gives the mapping back on stop
+    serve.stop(server)
+    test.equal(serve.model_of(server), nil)
+    local after = fs.read("/proc/self/maps") as string
+    test.equal(after:find(file_path, 1, true), nil)
 
     local not_gguf = fixture("GGML" .. u32(3) .. u64(0) .. u64(0))
     local bad, reason = serve.build(
@@ -2372,6 +2382,36 @@ test.it(
       (tltp.json_decode(expected.body) as ChatReply).choices[1].message.content
     )
 
+    -- the replacement built its server, so its death is answered like any other
+    local replacement = holder(server, "s")
+    test.truthy(replacement)
+    local replacement_pid = (replacement as serve.Worker).pid
+    C.kill(replacement_pid, 9)
+    killed(replacement_pid)
+    tries = 0
+    while true do
+      serve.step(server)
+      tries = tries + 1
+      local victim_gone = true
+      local live = workers_of(server)
+      for _, worker in ipairs(live) do
+        if worker.pid == replacement_pid then
+          victim_gone = false
+        end
+      end
+      if victim_gone and #live == 2 then
+        break
+      end
+      if tries > 5000 then
+        test.equal(tries, 0, "the replacement's death was not answered")
+        break
+      end
+      pause()
+    end
+    for _, worker in ipairs(workers_of(server)) do
+      test.notEqual(worker.pid, replacement_pid)
+    end
+
     local copy = fixture(bytes)
     local second = pool_build(copy, temp_dir())
     local doomed = workers_of(second)[1].pid
@@ -2396,6 +2436,23 @@ test.it(
     end
     test.equal(#workers_of(second), 1)
     test.equal(workers_of(second)[1].pid, surviving)
+
+    serve.stop(second)
+    serve.stop(server)
+  end
+)
+
+test.it(
+  "a pool's scratch directory is private and made by this call",
+  function()
+    local bytes = meta_bytes(t001_meta(), t001_entries())
+    local server = pool_build(fixture(bytes), temp_dir())
+    local first = (serve.pool_of(server) as serve.Pool).dir
+    local details = fs.stat(first) as fs.Stat
+    test.equal((details.mode as number) % 512, 448)
+
+    local second = pool_build(fixture(bytes), temp_dir())
+    test.notEqual((serve.pool_of(second) as serve.Pool).dir, first)
 
     serve.stop(second)
     serve.stop(server)

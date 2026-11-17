@@ -193,9 +193,6 @@ local record compute
     version: string
     device: string | nil
     memory: function(Backend): integer | nil, integer | nil
-    matvec: function(
-      Backend, {{number}}, {number}
-    ): {number} | nil, string | nil
   end
 
   record Maths
@@ -215,6 +212,7 @@ local record compute
     sigmoid_gate: function(
       Maths, {number}, {number}
     ): {number} | nil, string | nil
+    close: function(Maths)
   end
 
   record Geometry
@@ -255,6 +253,7 @@ local record compute
       Attention, string, string, integer
     ): string | nil, string | nil
     restore: function(Attention, string, string, integer, string): string | nil
+    close: function(Attention)
   end
 
   record Measure
@@ -284,6 +283,7 @@ local record compute
       FeedForward, {Row}, string, watch?: Watch
     ): {{number}} | nil, string | nil
     scores: function(FeedForward, {{number}}): {{number}} | nil, string | nil
+    close: function(FeedForward)
   end
 
   record LinearAttention
@@ -297,6 +297,7 @@ local record compute
     restore: function(
       LinearAttention, string, string, integer, string
     ): string | nil
+    close: function(LinearAttention)
   end
 
   record Model
@@ -312,6 +313,7 @@ local record compute
     pass: function(Model, {Input}): {{number}} | nil, string | nil
     save: function(Model, string, {integer}, string): string | nil
     load: function(Model, string, string): {integer} | nil, string | nil
+    close: function(Model)
   end
 
   load: function(path?: string, offload?: boolean): Backend | nil, string | nil
@@ -329,9 +331,6 @@ local record compute
   model: function(
     Backend, weights.Handle, integer | nil, CacheType | nil, sequences?: integer
   ): Model | nil, string | nil
-  top_token: function(
-    Attention, FeedForward, {number}, {string}, integer
-  ): integer | nil, string | nil
 end
 
 local type Tensor = weights.Tensor
@@ -372,11 +371,20 @@ local record Graph
   pending: {function()}
 end
 
+local record Holder
+  hold: function()
+  close: function()
+end
+
 local record Mapped
   lib: Library
   tensors: {string: Tensor}
   descriptors: {string: ffi.CData}
   device: Copy | nil
+  arena: ffi.CData | nil
+  ctx: ffi.CData | nil
+  hold: function()
+  close: function()
 end
 
 -- one prefix's keys and values: two buffers of the geometry's cache type in
@@ -471,6 +479,9 @@ end
 
 local libc = ffi.C as Libc
 local DEFAULT_PATH = "target/tllm/libggml.so"
+-- the build struct ggml_tensor is mirrored from; another version's layout is
+-- not what this file reads and writes
+local EXPECTED_VERSION = "0.29.0"
 local F32_BYTES: integer = 4
 local I32_BYTES: integer = 4
 -- GGML_MEM_ALIGN in the pinned ggml source
@@ -603,8 +614,10 @@ end
 local function arena_for(
   lib: Library, tensors: integer, data_bytes: integer
 ): integer
-  local objects = lib.ggml_tensor_overhead() * (tensors + 8)
-  local bytes = lib.ggml_graph_overhead() + objects + data_bytes + ARENA_SLACK
+  local overhead = tonumber(lib.ggml_tensor_overhead()) as integer
+  local graph = tonumber(lib.ggml_graph_overhead()) as integer
+  local objects = overhead * (tensors + 8)
+  local bytes = graph + objects + data_bytes + ARENA_SLACK
   return round_up(bytes, ARENA_ALIGN)
 end
 
@@ -618,6 +631,16 @@ end
 -- that holds it
 local function finalised(block: ffi.CData): ffi.CData
   return ffi.gc(block, function(held: ffi.CData) libc.free(held) end)
+end
+
+-- ggml places the context inside the buffer it is given, so the buffer and the
+-- context go back together, the context first
+local function arena_finalised(
+  lib: Library, block: ffi.CData, ctx: ffi.CData
+): ffi.CData
+  return ffi.gc(
+    block, function(held: ffi.CData) lib.ggml_free(ctx); libc.free(held) end
+  )
 end
 
 -- the backends are modules loaded from the directory the library sits in, so a
@@ -637,104 +660,6 @@ local function cpu_backend(lib: Library): ffi.CData | nil
     return nil
   end
   return lib.ggml_backend_dev_init(device, nil)
-end
-
-local function shape_refusal(matrix: {{number}}, vector: {number}): string | nil
-  if #matrix == 0 then
-    return "matvec: empty matrix"
-  end
-  if #vector == 0 then
-    return "matvec: empty vector"
-  end
-  for index, row in ipairs(matrix) do
-    if #row == 0 then
-      return "matvec: row " .. index .. " is empty"
-    end
-  end
-  for index, row in ipairs(matrix) do
-    if #row ~= #vector then
-      return "matvec: row "
-        .. index
-        .. " holds "
-        .. #row
-        .. " numbers, the vector holds "
-        .. #vector
-    end
-  end
-  return nil
-end
-
-local function matvec(
-  lib: Library, matrix: {{number}}, vector: {number}
-): {number} | nil, string | nil
-  local refusal = shape_refusal(matrix, vector)
-  if refusal then
-    return nil, refusal
-  end
-
-  local rows = #matrix
-  local columns = #vector
-  local data_bytes = (rows * columns + columns + rows) * F32_BYTES
-  -- three tensors and a graph, plus one tensor overhead of slack
-  local overhead = 4 * lib.ggml_tensor_overhead() + lib.ggml_graph_overhead()
-  local mem_size = data_bytes + overhead
-
-  local arena_size = round_up(mem_size, ARENA_ALIGN)
-  local arena = libc.aligned_alloc(ARENA_ALIGN, arena_size)
-  if arena is nil then
-    return nil, "matvec: no context of " .. arena_size .. " bytes"
-  end
-
-  local params = arena_params(arena_size)
-  params.mem_buffer = arena
-  local ctx = lib.ggml_init(params)
-
-  local matrix_tensor = lib.ggml_new_tensor_2d(
-    ctx, GGML_TYPE_F32, columns, rows
-  )
-  local vector_tensor = lib.ggml_new_tensor_2d(ctx, GGML_TYPE_F32, columns, 1)
-  local product = lib.ggml_mul_mat(ctx, matrix_tensor, vector_tensor)
-  local graph = lib.ggml_new_graph(ctx)
-  lib.ggml_build_forward_expand(graph, product)
-
-  local cells = ffi.cast("float*", lib.ggml_get_data(matrix_tensor)) as Floats
-  local cell = 0
-  for _, row in ipairs(matrix) do
-    for _, value in ipairs(row) do
-      cells[cell] = value
-      cell = cell + 1
-    end
-  end
-
-  local vector_cells = ffi.cast("float*", lib.ggml_get_data(vector_tensor))
-    as Floats
-  for position, value in ipairs(vector) do
-    vector_cells[position - 1] = value
-  end
-
-  local backend = cpu_backend(lib)
-  local status: integer = GGML_STATUS_SUCCESS
-  if not (backend is nil) then
-    status = lib.ggml_backend_graph_compute(backend, graph)
-    lib.ggml_backend_free(backend)
-  end
-
-  local products = ffi.cast("float*", lib.ggml_get_data(product)) as Floats
-  local result: {number} = {}
-  for row = 0, rows - 1 do
-    result[row + 1] = products[row]
-  end
-
-  lib.ggml_free(ctx)
-  libc.free(arena)
-
-  if backend is nil then
-    return nil, "matvec: no backend"
-  end
-  if status ~= GGML_STATUS_SUCCESS then
-    return nil, "matvec: compute returned " .. status
-  end
-  return result
 end
 
 local function write_floats(cells: Floats, values: {number})
@@ -785,10 +710,28 @@ local function tensor_in(
   return lib.ggml_new_tensor_4d(ctx, code, ne[1], ne[2], ne[3], ne[4])
 end
 
+-- what a build raises when its context has no room for the tensor it asked for
+local record ArenaError
+  arena: string | nil
+end
+
+-- ggml answers a context with no room for one more tensor with NULL, and every
+-- later call in the same build would dereference it, so a short arena stops the
+-- build here and the operation's pcall turns the raise into one line
+local function graph_tensor(
+  graph: Graph, dims: {integer}, code: integer
+): ffi.CData
+  local tensor = tensor_in(graph.lib, graph.ctx, dims, code)
+  if tensor == nil then
+    error({arena = "no room for " .. tostring(dims[1] or 0) .. " numbers"}, 0)
+  end
+  return tensor
+end
+
 -- a tensor of f32 numbers, written into host memory now or into the device
 -- buffer once the graph's buffer exists
 local function vector_of(graph: Graph, values: {number}): ffi.CData
-  local tensor = tensor_in(graph.lib, graph.ctx, {#values}, GGML_TYPE_F32)
+  local tensor = graph_tensor(graph, {#values}, GGML_TYPE_F32)
   local device = graph.device
   if device is nil then
     write_floats(
@@ -807,7 +750,7 @@ local function vector_of(graph: Graph, values: {number}): ffi.CData
 end
 
 local function scalar_of(graph: Graph, value: integer): ffi.CData
-  local tensor = tensor_in(graph.lib, graph.ctx, {1}, GGML_TYPE_I32)
+  local tensor = graph_tensor(graph, {1}, GGML_TYPE_I32)
   local device = graph.device
   if device is nil then
     local cells = ffi.cast("int32_t*", graph.lib.ggml_get_data(tensor)) as Ints
@@ -833,7 +776,7 @@ local function host_tensor(
   location: ffi.CData,
   bytes: integer
 ): ffi.CData
-  local tensor = tensor_in(graph.lib, graph.ctx, dims, code)
+  local tensor = graph_tensor(graph, dims, code)
   local device = graph.device
   if device is nil then
     (tensor as TensorView).data = location
@@ -885,6 +828,10 @@ local function opened(
     params.no_alloc = true
   end
   local ctx = lib.ggml_init(params)
+  if ctx is nil then
+    libc.free(arena)
+    return nil, "no context of " .. arena_size .. " bytes"
+  end
 
   return {
     lib = lib,
@@ -958,9 +905,23 @@ local function gathered(
     return nil, operation .. ": " .. (open_line as string)
   end
 
-  local outputs = build(session.graph)
+  local ok, outputs = pcall(build, session.graph)
+  if not ok then
+    closed(session)
+    local reason = outputs
+    if type(reason) == "table" then
+      local held = reason as ArenaError
+      local line = held.arena
+      if line is string then
+        return nil, operation .. ": " .. line
+      end
+    end
+    error(reason, 0)
+  end
+  local made = outputs as {Output}
+
   local cgraph = session.lib.ggml_new_graph(session.ctx)
-  for _, output in ipairs(outputs) do
+  for _, output in ipairs(made) do
     session.lib.ggml_build_forward_expand(cgraph, output.tensor)
   end
 
@@ -968,7 +929,7 @@ local function gathered(
   local planes: {{number}} = {}
   if failure is nil then
     local device = device_of_copy(session.copy)
-    for index, output in ipairs(outputs) do
+    for index, output in ipairs(made) do
       planes[index] = read_floats(
         session.lib, output.tensor, output.count, device
       )
@@ -1038,6 +999,11 @@ local function device_copy(loaded: Loaded, handle: weights.Handle): Copy | nil
   params.mem_buffer = arena
   params.no_alloc = true
   local ctx = lib.ggml_init(params)
+  if ctx is nil then
+    libc.free(arena)
+    lib.ggml_backend_free(backend)
+    return nil
+  end
 
   local tensors: {string: ffi.CData} = {}
   for name, tensor in pairs(handle.tensors) do
@@ -1078,9 +1044,17 @@ local function release_copies(handle: weights.Handle)
 end
 
 -- the release a handle already carries gives the device copy back first, once
-local function freeing(handle: weights.Handle, plain: function(weights.Handle))
+local function freeing(
+  handle: weights.Handle, plain: function(weights.Handle): string | nil
+): string | nil
+  if handle.mappers > 0 then
+    return "release: " .. handle.mappers .. " still use it"
+  end
   release_copies(handle)
-  plain(handle)
+  -- the handle is a table key only while it holds something, so releasing it
+  -- keeps nothing alive
+  GUARDED[handle] = nil
+  return plain(handle)
 end
 
 local function guard_release(handle: weights.Handle)
@@ -1089,7 +1063,31 @@ local function guard_release(handle: weights.Handle)
   end
   GUARDED[handle] = true
   local plain = handle.release
-  handle.release = function(h: weights.Handle) freeing(h, plain) end
+  handle.release = function(h: weights.Handle): string | nil
+    return freeing(h, plain)
+  end
+end
+
+-- one holder's mark on a handle, taken when the record that reads the mapping
+-- exists and given back by its close, so the file outlives every reader
+local function holder(handle: weights.Handle): Holder
+  local attached = false
+  return {
+    hold = function()
+      if attached then
+        return
+      end
+      attached = true
+      weights.attach(handle)
+    end,
+    close = function()
+      if not attached then
+        return
+      end
+      attached = false
+      weights.detach(handle)
+    end,
+  }
 end
 
 local function mapped_of(
@@ -1100,6 +1098,7 @@ local function mapped_of(
 ): Mapped | nil, string | nil
   local lib = loaded.lib
   backend.device = nil
+  guard_release(handle)
   local found = loaded.device
   if loaded.offload and not (found is nil) then
     local held = COPIES[handle]
@@ -1115,16 +1114,18 @@ local function mapped_of(
           COPIES[handle] = held
         end
         held[backend] = copy
-        guard_release(handle)
       end
     end
     if not (copy is nil) then
       backend.device = ffi.string(lib.ggml_backend_dev_name(found as ffi.CData))
+      local mark = holder(handle)
       return {
         lib = lib,
         tensors = handle.tensors,
         descriptors = copy.tensors,
         device = copy,
+        hold = mark.hold,
+        close = mark.close,
       }
     end
   end
@@ -1135,15 +1136,22 @@ local function mapped_of(
   end
 
   local arena_size = arena_for(lib, count, 0)
-  local arena = libc.aligned_alloc(ARENA_ALIGN, arena_size)
-  if arena is nil then
+  local arena_block = libc.aligned_alloc(ARENA_ALIGN, arena_size)
+  if arena_block is nil then
+    return nil, operation .. ": no context of " .. arena_size .. " bytes"
+  end
+  local params = arena_params(arena_size)
+  params.mem_buffer = arena_block
+  params.no_alloc = true
+  local ctx = lib.ggml_init(params)
+  if ctx is nil then
+    libc.free(arena_block)
     return nil, operation .. ": no context of " .. arena_size .. " bytes"
   end
 
-  local params = arena_params(arena_size)
-  params.mem_buffer = arena
-  params.no_alloc = true
-  local ctx = lib.ggml_init(params)
+  -- the collector gives the arena and, with it, the context back once no
+  -- record reads either of them
+  local arena = arena_finalised(lib, arena_block, ctx)
 
   local descriptors: {string: ffi.CData} = {}
   for name, tensor in pairs(handle.tensors) do
@@ -1152,10 +1160,15 @@ local function mapped_of(
     descriptors[name] = descriptor
   end
 
+  local mark = holder(handle)
   return {
     lib = lib,
     tensors = handle.tensors,
     descriptors = descriptors,
+    arena = arena,
+    ctx = ctx,
+    hold = mark.hold,
+    close = mark.close,
   }
 end
 
@@ -1260,9 +1273,7 @@ end
 local function matrix_of(
   graph: Graph, rows: {{number}}, columns: integer
 ): ffi.CData
-  local tensor = tensor_in(
-    graph.lib, graph.ctx, {columns, #rows}, GGML_TYPE_F32
-  )
+  local tensor = graph_tensor(graph, {columns, #rows}, GGML_TYPE_F32)
   local count = columns * #rows
   local device = graph.device
   if device is nil then
@@ -1863,8 +1874,6 @@ local function cache_of(
     end
     return nil, "block: no cache of " .. (size * 2) .. " bytes"
   end
-  local keys = finalised(keys_block)
-  local values = finalised(values_block)
 
   local arena_size = arena_for(lib, 4, 0)
   local arena_block = libc.aligned_alloc(ARENA_ALIGN, arena_size)
@@ -1873,15 +1882,31 @@ local function cache_of(
     libc.free(values_block)
     return nil, "block: no cache of " .. (size * 2) .. " bytes"
   end
-  local arena = finalised(arena_block)
+
   local params = arena_params(arena_size)
-  params.mem_buffer = arena
+  params.mem_buffer = arena_block
   params.no_alloc = true
   local ctx = lib.ggml_init(params)
+  if ctx is nil then
+    libc.free(keys_block)
+    libc.free(values_block)
+    libc.free(arena_block)
+    return nil, "block: no cache of " .. (size * 2) .. " bytes"
+  end
+
+  -- every early return above gives the raw blocks back itself, so the
+  -- collector only takes them over once the context exists
+  local keys = finalised(keys_block)
+  local values = finalised(values_block)
+  local arena = finalised(arena_block)
 
   local keys_tensor = tensor_in(lib, ctx, {width, rows}, kind.code)
-  (keys_tensor as TensorView).data = keys
   local values_tensor = tensor_in(lib, ctx, {width, rows}, kind.code)
+  if keys_tensor == nil or values_tensor == nil then
+    lib.ggml_free(ctx)
+    return nil, "block: no room for the cache's " .. width .. " numbers"
+  end
+  (keys_tensor as TensorView).data = keys
   (values_tensor as TensorView).data = values
 
   local cache = {
@@ -1921,6 +1946,17 @@ local function attention_release(state: AttentionState, sequence: string)
   end
   state.caches[sequence] = nil
   state.capacities[sequence] = nil
+end
+
+local function attention_closed(state: AttentionState)
+  local sequences: {string} = {}
+  for sequence in pairs(state.caches) do
+    sequences[#sequences + 1] = sequence
+  end
+  for _, sequence in ipairs(sequences) do
+    attention_release(state, sequence)
+  end
+  state.mapped.close()
 end
 
 local function attention_reserve(
@@ -3037,6 +3073,17 @@ local function linear_release(state: LinearState, sequence: string)
   state.prefixes[sequence] = nil
 end
 
+local function linear_closed(state: LinearState)
+  local sequences: {string} = {}
+  for sequence in pairs(state.prefixes) do
+    sequences[#sequences + 1] = sequence
+  end
+  for _, sequence in ipairs(sequences) do
+    linear_release(state, sequence)
+  end
+  state.mapped.close()
+end
+
 local function linear_snapshot(
   state: LinearState, sequence: string, prefix: string, positions: integer
 ): string | nil, string | nil
@@ -3045,10 +3092,10 @@ local function linear_snapshot(
   if not (held is nil) then
     kept = held[prefix]
   end
+  if kept is nil and positions == 0 then
+    return "", nil
+  end
   if kept is nil then
-    if positions == 0 then
-      return "", nil
-    end
     return nil, prefix .. " holds no history"
   end
   local active = kept as LinearKept
@@ -3163,11 +3210,15 @@ local function linear_press(
   local value_head_bytes = value_length * F32_BYTES
   local head_scale = 1 / math.sqrt(key_length)
 
-  -- four copies of the state, the convolution window and the heads' vectors,
-  -- each with room to spare
-  local vector_floats = count + kernel * rows + 2 * channels
+  -- what the graph holds at once, read off the shapes above: the state the
+  -- graph reads (a host tensor ggml still allocates a buffer for), the state
+  -- it decays, the product that corrects it and the state it writes, each a
+  -- full state tensor, then the convolution window, the heads' vectors and
+  -- the one-row tensors between them, the last of them with room to spare
+  local head_rows = key_heads * key_length
   local head_floats = key_length * value_heads
-  local data_floats = 4 * state_floats + 8 * vector_floats + 8 * head_floats
+  local row_floats = 5 * count + 4 * rows + kernel * rows + 4 * head_rows + 3 * head_floats + 9 * channels + 10 * value_heads
+  local data_floats = 4 * state_floats + 3 * row_floats
   local session, open_line = opened(mapped, 96, data_floats * F32_BYTES)
   if session is nil then
     return nil, "block: " .. (open_line as string)
@@ -3175,166 +3226,193 @@ local function linear_press(
   local ctx = session.ctx
   local device = device_of_copy(session.copy)
 
-  local normalised = lib.ggml_mul(
-    ctx,
-    lib.ggml_rms_norm(ctx, vector_of(session.graph, hidden), eps),
-    descriptors[prefix .. "attn_norm.weight"]
-  )
-  local projected = lib.ggml_mul_mat(
-    ctx, descriptors[prefix .. "attn_qkv.weight"], normalised
-  )
-  local gates = lib.ggml_mul_mat(
-    ctx, descriptors[prefix .. "attn_gate.weight"], normalised
-  )
-  local betas = lib.ggml_sigmoid(
-    ctx,
-    lib.ggml_mul_mat(ctx, descriptors[prefix .. "ssm_beta.weight"], normalised)
-  )
-  local decay = lib.ggml_exp(
-    ctx,
-    lib.ggml_mul(
+  local built_output: ffi.CData = nil as ffi.CData
+  local built_updated: ffi.CData = nil as ffi.CData
+  local built_projected: ffi.CData = nil as ffi.CData
+  local built_graph: ffi.CData = nil as ffi.CData
+  local build_linear = function(): (boolean | string | ArenaError)
+    local normalised = lib.ggml_mul(
       ctx,
-      lib.ggml_softplus(
+      lib.ggml_rms_norm(ctx, vector_of(session.graph, hidden), eps),
+      descriptors[prefix .. "attn_norm.weight"]
+    )
+    local projected = lib.ggml_mul_mat(
+      ctx, descriptors[prefix .. "attn_qkv.weight"], normalised
+    )
+    local gates = lib.ggml_mul_mat(
+      ctx, descriptors[prefix .. "attn_gate.weight"], normalised
+    )
+    local betas = lib.ggml_sigmoid(
+      ctx,
+      lib.ggml_mul_mat(
+        ctx, descriptors[prefix .. "ssm_beta.weight"], normalised
+      )
+    )
+    local decay = lib.ggml_exp(
+      ctx,
+      lib.ggml_mul(
         ctx,
-        lib.ggml_add(
+        lib.ggml_softplus(
           ctx,
-          lib.ggml_mul_mat(
-            ctx, descriptors[prefix .. "ssm_alpha.weight"], normalised
-          ),
-          descriptors[prefix .. "ssm_dt.bias"]
-        )
-      ),
-      descriptors[prefix .. "ssm_a"]
+          lib.ggml_add(
+            ctx,
+            lib.ggml_mul_mat(
+              ctx, descriptors[prefix .. "ssm_alpha.weight"], normalised
+            ),
+            descriptors[prefix .. "ssm_dt.bias"]
+          )
+        ),
+        descriptors[prefix .. "ssm_a"]
+      )
     )
-  )
 
-  local current = lib.ggml_reshape_3d(ctx, projected, 1, rows, 1)
-  local window = current
-  if kernel > 1 then
-    local past = host_tensor(
-      session.graph,
-      {kernel - 1, rows, 1},
-      GGML_TYPE_F32,
-      active.history,
-      (kernel - 1) * rows * F32_BYTES
-    )
-    window = lib.ggml_concat(ctx, past, current, 0)
-  end
-  local convolved = lib.ggml_silu(
-    ctx,
-    lib.ggml_ssm_conv(ctx, window, descriptors[prefix .. "ssm_conv1d.weight"])
-  )
-
-  local queries = lib.ggml_scale(
-    ctx,
-    lib.ggml_rms_norm(
+    local current = lib.ggml_reshape_3d(ctx, projected, 1, rows, 1)
+    local window = current
+    if kernel > 1 then
+      local past = host_tensor(
+        session.graph,
+        {kernel - 1, rows, 1},
+        GGML_TYPE_F32,
+        active.history,
+        (kernel - 1) * rows * F32_BYTES
+      )
+      window = lib.ggml_concat(ctx, past, current, 0)
+    end
+    local convolved = lib.ggml_silu(
       ctx,
-      lib.ggml_view_2d(ctx, convolved, key_length, key_heads, head_bytes, 0),
-      eps / key_length
-    ),
-    head_scale
-  )
-  local reads = lib.ggml_scale(
-    ctx,
-    lib.ggml_rms_norm(
+      lib.ggml_ssm_conv(ctx, window, descriptors[prefix .. "ssm_conv1d.weight"])
+    )
+
+    local queries = lib.ggml_scale(
+      ctx,
+      lib.ggml_rms_norm(
+        ctx,
+        lib.ggml_view_2d(ctx, convolved, key_length, key_heads, head_bytes, 0),
+        eps / key_length
+      ),
+      head_scale
+    )
+    local reads = lib.ggml_scale(
+      ctx,
+      lib.ggml_rms_norm(
+        ctx,
+        lib.ggml_view_2d(
+          ctx,
+          convolved,
+          key_length,
+          key_heads,
+          head_bytes,
+          key_heads * head_bytes
+        ),
+        eps / key_length
+      ),
+      head_scale
+    )
+    local values = lib.ggml_reshape_3d(
       ctx,
       lib.ggml_view_2d(
         ctx,
         convolved,
-        key_length,
-        key_heads,
-        head_bytes,
-        key_heads * head_bytes
+        value_length,
+        value_heads,
+        value_head_bytes,
+        2 * key_heads * head_bytes
       ),
-      eps / key_length
-    ),
-    head_scale
-  )
-  local values = lib.ggml_reshape_3d(
-    ctx,
-    lib.ggml_view_2d(
-      ctx,
-      convolved,
       value_length,
-      value_heads,
-      value_head_bytes,
-      2 * key_heads * head_bytes
-    ),
-    value_length,
-    1,
-    value_heads
-  )
-
-  local shapes = lib.ggml_new_tensor_2d(
-    ctx, GGML_TYPE_F32, key_length, value_heads
-  )
-  local head_queries = lib.ggml_reshape_3d(
-    ctx, lib.ggml_repeat(ctx, queries, shapes), key_length, 1, value_heads
-  )
-  local head_reads = lib.ggml_reshape_3d(
-    ctx, lib.ggml_repeat(ctx, reads, shapes), key_length, 1, value_heads
-  )
-
-  local stored_state = host_tensor(
-    session.graph,
-    {key_length, value_length, value_heads},
-    GGML_TYPE_F32,
-    active.state,
-    state_floats * F32_BYTES
-  )
-  local decayed = lib.ggml_mul(
-    ctx, stored_state, lib.ggml_reshape_3d(ctx, decay, 1, 1, value_heads)
-  )
-  local corrections = lib.ggml_mul(
-    ctx,
-    lib.ggml_sub(ctx, values, lib.ggml_mul_mat(ctx, decayed, head_reads)),
-    lib.ggml_reshape_3d(ctx, betas, 1, 1, value_heads)
-  )
-  local updated = lib.ggml_add(
-    ctx,
-    decayed,
-    lib.ggml_mul_mat(
-      ctx,
-      lib.ggml_reshape_3d(ctx, head_reads, 1, key_length, value_heads),
-      lib.ggml_reshape_3d(ctx, corrections, 1, value_length, value_heads)
+      1,
+      value_heads
     )
-  )
-  local scanned = lib.ggml_scale(
-    ctx, lib.ggml_mul_mat(ctx, updated, head_queries), head_scale
-  )
-  local gated = lib.ggml_mul(
-    ctx,
-    lib.ggml_mul(
-      ctx,
-      lib.ggml_rms_norm(ctx, scanned, eps),
-      descriptors[prefix .. "ssm_norm.weight"]
-    ),
-    lib.ggml_silu(
-      ctx, lib.ggml_reshape_3d(ctx, gates, value_length, 1, value_heads)
+
+    local shapes = graph_tensor(
+      session.graph, {key_length, value_heads}, GGML_TYPE_F32
     )
-  )
-  local output = lib.ggml_mul_mat(
-    ctx,
-    descriptors[prefix .. "ssm_out.weight"],
-    lib.ggml_reshape_2d(ctx, gated, channels, 1)
-  )
+    local head_queries = lib.ggml_reshape_3d(
+      ctx, lib.ggml_repeat(ctx, queries, shapes), key_length, 1, value_heads
+    )
+    local head_reads = lib.ggml_reshape_3d(
+      ctx, lib.ggml_repeat(ctx, reads, shapes), key_length, 1, value_heads
+    )
 
-  local cgraph = lib.ggml_new_graph(ctx)
-  lib.ggml_build_forward_expand(cgraph, output)
-  lib.ggml_build_forward_expand(cgraph, updated)
+    local stored_state = host_tensor(
+      session.graph,
+      {key_length, value_length, value_heads},
+      GGML_TYPE_F32,
+      active.state,
+      state_floats * F32_BYTES
+    )
+    local decayed = lib.ggml_mul(
+      ctx, stored_state, lib.ggml_reshape_3d(ctx, decay, 1, 1, value_heads)
+    )
+    local corrections = lib.ggml_mul(
+      ctx,
+      lib.ggml_sub(ctx, values, lib.ggml_mul_mat(ctx, decayed, head_reads)),
+      lib.ggml_reshape_3d(ctx, betas, 1, 1, value_heads)
+    )
+    local updated = lib.ggml_add(
+      ctx,
+      decayed,
+      lib.ggml_mul_mat(
+        ctx,
+        lib.ggml_reshape_3d(ctx, head_reads, 1, key_length, value_heads),
+        lib.ggml_reshape_3d(ctx, corrections, 1, value_length, value_heads)
+      )
+    )
+    local scanned = lib.ggml_scale(
+      ctx, lib.ggml_mul_mat(ctx, updated, head_queries), head_scale
+    )
+    local gated = lib.ggml_mul(
+      ctx,
+      lib.ggml_mul(
+        ctx,
+        lib.ggml_rms_norm(ctx, scanned, eps),
+        descriptors[prefix .. "ssm_norm.weight"]
+      ),
+      lib.ggml_silu(
+        ctx, lib.ggml_reshape_3d(ctx, gates, value_length, 1, value_heads)
+      )
+    )
+    local output = lib.ggml_mul_mat(
+      ctx,
+      descriptors[prefix .. "ssm_out.weight"],
+      lib.ggml_reshape_2d(ctx, gated, channels, 1)
+    )
 
-  local failure = computed(session, "block", cgraph)
+    built_graph = lib.ggml_new_graph(ctx)
+    lib.ggml_build_forward_expand(built_graph, output)
+    lib.ggml_build_forward_expand(built_graph, updated)
+    built_output = output
+    built_updated = updated
+    built_projected = projected
+    return true
+  end
+  local ok, raised = pcall(build_linear)
+  if not ok then
+    closed(session)
+    local reason = raised
+    if type(reason) == "table" then
+      local arena = reason as ArenaError
+      local line = arena.arena
+      if line is string then
+        return nil, "block: " .. line
+      end
+    end
+    error(reason, 0)
+  end
+
+  local failure = computed(session, "block", built_graph)
   local numbers: {number} = {}
   if failure is nil then
-    numbers = read_floats(lib, output, count, device)
+    numbers = read_floats(lib, built_output, count, device)
 
-    read_bytes(lib, updated, active.state, state_floats * F32_BYTES, device)
+    read_bytes(
+      lib, built_updated, active.state, state_floats * F32_BYTES, device
+    )
     if kernel > 1 then
       -- the past tensor reads a channel's taps consecutively, oldest first
       local slots = kernel - 1
       local history = ffi.cast("float*", active.history) as Floats
       local fresh_bytes = ffi.new("float[?]", rows) as ffi.CData
-      read_bytes(lib, projected, fresh_bytes, rows * F32_BYTES, device)
+      read_bytes(lib, built_projected, fresh_bytes, rows * F32_BYTES, device)
       local fresh = fresh_bytes as Floats
       for channel = 0, rows - 1 do
         for slot = 0, slots - 2 do
@@ -3383,6 +3461,16 @@ function compute.load(
   if not known then
     return nil, refusal_line(location, version as string)
   end
+  if (version as string) ~= EXPECTED_VERSION then
+    return nil,
+      refusal_line(
+        location,
+        "version "
+          .. (version as string)
+          .. " is not the pinned "
+          .. EXPECTED_VERSION
+      )
+  end
 
   find_backends(handle, location)
 
@@ -3394,11 +3482,6 @@ function compute.load(
     path = location,
     version = version as string,
   } as compute.Backend
-  backend.matvec = function(
-    _: compute.Backend, matrix: {{number}}, vector: {number}
-  ): {number} | nil, string | nil
-    return matvec(handle, matrix, vector)
-  end
   backend.memory = function(_: compute.Backend): integer | nil, integer | nil
     if found is nil then
       return nil, nil
@@ -3434,21 +3517,43 @@ function compute.attach(
   if mapped is nil then
     return nil, map_failure
   end
+  local attached: Mapped = mapped
+  attached.hold()
+
+  local finished = false
+  local function shut(operation: string): string | nil
+    if finished then
+      return operation .. ": the maths are closed"
+    end
+    return nil
+  end
 
   local maths = {} as compute.Maths
   maths.matvec = function(
     _: compute.Maths, name: string, vector: {number}, index?: integer
   ): {number} | nil, string | nil
+    local line = shut("matvec")
+    if not (line is nil) then
+      return nil, line
+    end
     return matrix_vector(mapped, name, vector, index)
   end
   maths.row = function(
     _: compute.Maths, name: string, id: integer
   ): {number} | nil, string | nil
+    local line = shut("row")
+    if not (line is nil) then
+      return nil, line
+    end
     return row(mapped, name, id)
   end
   maths.norm = function(
     _: compute.Maths, vector: {number}, gain: string, eps: number
   ): {number} | nil, string | nil
+    local line = shut("norm")
+    if not (line is nil) then
+      return nil, line
+    end
     return normalise(mapped, vector, gain, eps)
   end
   maths.rope = function(
@@ -3458,27 +3563,54 @@ function compute.attach(
     dimensions: integer,
     base: number
   ): {number} | nil, string | nil
+    local line = shut("rope")
+    if not (line is nil) then
+      return nil, line
+    end
     return rotary(mapped, vector, position, dimensions, base)
   end
   maths.softmax = function(
     _: compute.Maths, vector: {number}
   ): {number} | nil, string | nil
+    local line = shut("softmax")
+    if not (line is nil) then
+      return nil, line
+    end
     return softmax(mapped, vector)
   end
   maths.add = function(
     _: compute.Maths, left: {number}, right: {number}
   ): {number} | nil, string | nil
+    local line = shut("add")
+    if not (line is nil) then
+      return nil, line
+    end
     return add(mapped, left, right)
   end
   maths.swiglu = function(
     _: compute.Maths, gate: {number}, up: {number}
   ): {number} | nil, string | nil
+    local line = shut("swiglu")
+    if not (line is nil) then
+      return nil, line
+    end
     return swiglu(mapped, gate, up)
   end
   maths.sigmoid_gate = function(
     _: compute.Maths, gate: {number}, values: {number}
   ): {number} | nil, string | nil
+    local line = shut("sigmoid_gate")
+    if not (line is nil) then
+      return nil, line
+    end
     return sigmoid_gate(mapped, gate, values)
+  end
+  maths.close = function(_: compute.Maths)
+    if finished then
+      return
+    end
+    finished = true
+    attached.close()
   end
   return maths
 end
@@ -3499,6 +3631,7 @@ function compute.attend(
   if mapped is nil then
     return nil, map_failure
   end
+  mapped.hold()
 
   local state: AttentionState = {
     mapped = mapped,
@@ -3507,15 +3640,30 @@ function compute.attend(
     capacities = {},
     scratch = ffi.new("float[?]", geometry.head_length) as ffi.CData,
   }
+  local finished = false
+  local function shut(operation: string): string | nil
+    if finished then
+      return operation .. ": the attention is closed"
+    end
+    return nil
+  end
+
   local attention = {} as compute.Attention
   attention.block = function(
     _: compute.Attention, rows: {compute.Row}, prefix: string
   ): {{number}} | nil, string | nil
+    local line = shut("block")
+    if not (line is nil) then
+      return nil, line
+    end
     return attention_block(state, rows, prefix)
   end
   attention.cache_bytes = function(
     _: compute.Attention, sequence: string, prefix: string
   ): integer | nil
+    if finished then
+      return nil
+    end
     local held = state.caches[sequence]
     if held is nil then
       return nil
@@ -3532,14 +3680,25 @@ function compute.attend(
     positions: integer,
     prefixes: {string}
   ): string | nil
+    local line = shut("reserve")
+    if not (line is nil) then
+      return line
+    end
     return attention_reserve(state, sequence, positions, prefixes)
   end
   attention.release = function(_: compute.Attention, sequence: string)
+    if finished then
+      return
+    end
     attention_release(state, sequence)
   end
   attention.snapshot = function(
     _: compute.Attention, sequence: string, prefix: string, positions: integer
   ): string | nil, string | nil
+    local line = shut("snapshot")
+    if not (line is nil) then
+      return nil, line
+    end
     return attention_snapshot(state, sequence, prefix, positions)
   end
   attention.restore = function(
@@ -3549,7 +3708,18 @@ function compute.attend(
     positions: integer,
     payload: string
   ): string | nil
+    local line = shut("restore")
+    if not (line is nil) then
+      return line
+    end
     return attention_restore(state, sequence, prefix, positions, payload)
+  end
+  attention.close = function(_: compute.Attention)
+    if finished then
+      return
+    end
+    finished = true
+    attention_closed(state)
   end
   return attention
 end
@@ -3572,11 +3742,13 @@ function compute.feed_forward(
   if mapped is nil then
     return nil, map_failure
   end
+  mapped.hold()
 
   local state: FeedForwardState = {
     mapped = mapped,
     geometry = geometry,
   }
+  local finished = false
   local feed_forward = {} as compute.FeedForward
   feed_forward.block = function(
     _: compute.FeedForward,
@@ -3584,12 +3756,25 @@ function compute.feed_forward(
     prefix: string,
     watch?: compute.Watch
   ): {{number}} | nil, string | nil
+    if finished then
+      return nil, "block: the feed forward is closed"
+    end
     return feed_forward_block(state, rows, prefix, watch)
   end
   feed_forward.scores = function(
     _: compute.FeedForward, hidden: {{number}}
   ): {{number}} | nil, string | nil
+    if finished then
+      return nil, "scores: the feed forward is closed"
+    end
     return feed_forward_scores(state, hidden)
+  end
+  feed_forward.close = function(_: compute.FeedForward)
+    if finished then
+      return
+    end
+    finished = true
+    state.mapped.close()
   end
   return feed_forward
 end
@@ -3612,6 +3797,7 @@ function compute.linear_attention(
   if mapped is nil then
     return nil, map_failure
   end
+  mapped.hold()
 
   local state: LinearState = {
     mapped = mapped,
@@ -3619,13 +3805,28 @@ function compute.linear_attention(
     eps = geometry.eps,
     prefixes = {},
   }
+  local finished = false
+  local function shut(operation: string): string | nil
+    if finished then
+      return operation .. ": the linear attention is closed"
+    end
+    return nil
+  end
+
   local linear = {} as compute.LinearAttention
   linear.block = function(
     _: compute.LinearAttention, rows: {compute.Row}, prefix: string
   ): {{number}} | nil, string | nil
+    local line = shut("block")
+    if not (line is nil) then
+      return nil, line
+    end
     return linear_block(state, rows, prefix)
   end
   linear.release = function(_: compute.LinearAttention, sequence: string)
+    if finished then
+      return
+    end
     linear_release(state, sequence)
   end
   linear.snapshot = function(
@@ -3634,6 +3835,10 @@ function compute.linear_attention(
     prefix: string,
     positions: integer
   ): string | nil, string | nil
+    local line = shut("snapshot")
+    if not (line is nil) then
+      return nil, line
+    end
     return linear_snapshot(state, sequence, prefix, positions)
   end
   linear.restore = function(
@@ -3643,7 +3848,18 @@ function compute.linear_attention(
     positions: integer,
     payload: string
   ): string | nil
+    local line = shut("restore")
+    if not (line is nil) then
+      return line
+    end
     return linear_restore(state, sequence, prefix, positions, payload)
+  end
+  linear.close = function(_: compute.LinearAttention)
+    if finished then
+      return
+    end
+    finished = true
+    linear_closed(state)
   end
   return linear
 end
@@ -4050,6 +4266,7 @@ local function model_plan(
   if has_full then
     local made, line = compute.attend(backend, handle, geometry)
     if made is nil then
+      feed_forward:close()
       return nil, "model: " .. (line as string)
     end
     attention = made
@@ -4059,11 +4276,17 @@ local function model_plan(
   if has_linear then
     local made, line = compute.linear_attention(backend, handle, geometry)
     if made is nil then
+      feed_forward:close()
+      local blocked = attention
+      if not (blocked is nil) then
+        blocked:close()
+      end
       return nil, "model: " .. (line as string)
     end
     linear = made
   end
 
+  mapped.hold()
   return {
     mapped = mapped,
     kinds = kinds,
@@ -4387,9 +4610,21 @@ function compute.model(
   }
   local measure = model.measure
   model.routing_sink = nil
+  local finished = false
+  local function shut(operation: string): string | nil
+    if finished then
+      return operation .. ": the model is closed"
+    end
+    return nil
+  end
+
   model.forward = function(
     _: compute.Model, token_id: integer, position: integer
   ): {number} | nil, string | nil
+    local closed_line = shut("forward")
+    if not (closed_line is nil) then
+      return nil, closed_line
+    end
     if state.sequences[""] == nil then
       local line = sequence_reserve(state, "", state.positions)
       if not (line is nil) then
@@ -4415,14 +4650,24 @@ function compute.model(
   model.reserve = function(
     _: compute.Model, sequence: string, capacity: integer
   ): string | nil
+    local closed_line = shut("reserve")
+    if not (closed_line is nil) then
+      return closed_line
+    end
     return sequence_reserve(state, sequence, capacity)
   end
   model.release = function(_: compute.Model, sequence: string)
+    if finished then
+      return
+    end
     sequence_release(state, sequence)
   end
   model.cache_bytes = function(
     _: compute.Model, sequence: string, prefix: string
   ): integer | nil
+    if finished then
+      return nil
+    end
     if state.sequences[sequence] == nil then
       return nil
     end
@@ -4433,15 +4678,40 @@ function compute.model(
     return attention:cache_bytes(sequence, prefix)
   end
   model.capacity = function(_: compute.Model, sequence: string): integer | nil
+    if finished then
+      return nil
+    end
     local held = state.sequences[sequence]
     if held is nil then
       return nil
     end
     return held.capacity
   end
+  -- gives the caches, the arenas and the handle back: nothing of this model
+  -- outlives it, and the handle can be released once it is closed
+  model.close = function(_: compute.Model)
+    if finished then
+      return
+    end
+    finished = true
+    local attention = state.attention
+    if not (attention is nil) then
+      attention:close()
+    end
+    local linear = state.linear
+    if not (linear is nil) then
+      linear:close()
+    end
+    state.feed_forward:close()
+    state.mapped.close()
+  end
   model.save = function(
     _: compute.Model, sequence: string, ids: {integer}, path: string
   ): string | nil
+    local closed_line = shut("save")
+    if not (closed_line is nil) then
+      return closed_line
+    end
     local held = state.sequences[sequence]
     if held is nil then
       return "save: sequence " .. sequence .. " is not reserved"
@@ -4457,19 +4727,35 @@ function compute.model(
         .. " ids"
     end
 
-    local chunks: {string} = {}
-    chunks[#chunks + 1] = packed_u32(CONTEXT_MAGIC)
-    chunks[#chunks + 1] = packed_u32(CONTEXT_VERSION)
-    chunks[#chunks + 1] = packed_u32(#ids)
-    for _, id in ipairs(ids) do
-      chunks[#chunks + 1] = packed_u32(id)
+    local partial = path .. ".part"
+    local made_file = io.open(partial, "wb")
+    if made_file is nil then
+      return "save: cannot write " .. path
     end
-    chunks[#chunks + 1] = packed_u32(state.fingerprint)
-    chunks[#chunks + 1] = packed_u32(state.cache_code)
-    chunks[#chunks + 1] = packed_u32(held.capacity)
-    chunks[#chunks + 1] = packed_u32(taken)
-    chunks[#chunks + 1] = packed_u32(state.count)
+    local file = made_file
+    local function failed(line: string): string
+      file:close()
+      os.remove(partial)
+      return line
+    end
 
+    local header: {string} = {}
+    header[#header + 1] = packed_u32(CONTEXT_MAGIC)
+    header[#header + 1] = packed_u32(CONTEXT_VERSION)
+    header[#header + 1] = packed_u32(#ids)
+    for _, id in ipairs(ids) do
+      header[#header + 1] = packed_u32(id)
+    end
+    header[#header + 1] = packed_u32(state.fingerprint)
+    header[#header + 1] = packed_u32(state.cache_code)
+    header[#header + 1] = packed_u32(held.capacity)
+    header[#header + 1] = packed_u32(taken)
+    header[#header + 1] = packed_u32(state.count)
+    if not file:write(table.concat(header)) then
+      return failed("save: cannot write " .. path)
+    end
+
+    -- one block at a time, so a turn's cache never stands in memory twice
     for index = 0, state.count - 1 do
       local prefix = "blk." .. index .. "."
       local full = state.kinds[index + 1]
@@ -4489,16 +4775,19 @@ function compute.model(
         )
       end
       if payload is nil then
-        return "save: sequence " .. sequence .. ": " .. (line as string)
+        return failed("save: sequence " .. sequence .. ": " .. (line as string))
       end
       local bytes = payload as string
-      chunks[#chunks + 1] = packed_u32(kind)
-      chunks[#chunks + 1] = packed_u32(taken)
-      chunks[#chunks + 1] = packed_u32(#bytes)
-      chunks[#chunks + 1] = bytes
+      if not file:write(
+        packed_u32(kind), packed_u32(taken), packed_u32(#bytes), bytes
+      ) then
+        return failed("save: cannot write " .. path)
+      end
     end
 
-    if not fs.write(path, table.concat(chunks)) then
+    file:close()
+    if not os.rename(partial, path) then
+      os.remove(partial)
       return "save: cannot write " .. path
     end
     return nil
@@ -4506,6 +4795,10 @@ function compute.model(
   model.load = function(
     _: compute.Model, sequence: string, path: string
   ): {integer} | nil, string | nil
+    local closed_line = shut("load")
+    if not (closed_line is nil) then
+      return nil, closed_line
+    end
     local source = fs.read(path)
     if source is nil then
       return nil, "load: cannot read " .. path
@@ -4641,61 +4934,13 @@ function compute.model(
   model.pass = function(
     _: compute.Model, inputs: {compute.Input}
   ): {{number}} | nil, string | nil
+    local closed_line = shut("pass")
+    if not (closed_line is nil) then
+      return nil, closed_line
+    end
     return model_pass(state, inputs, measure, model.routing_sink)
   end
   return model
-end
-
-function compute.top_token(
-  attention: compute.Attention,
-  feed_forward: compute.FeedForward,
-  hidden: {number},
-  prefixes: {string},
-  position: integer
-): integer | nil, string | nil
-  if #prefixes == 0 then
-    return nil, "top_token: no prefixes"
-  end
-
-  local running = hidden
-  for _, prefix in ipairs(prefixes) do
-    local attended, attend_line = attention:block(
-      {{sequence = "", hidden = running, position = position}}, prefix
-    )
-    if attended is nil then
-      return nil, attend_line
-    end
-    local blocked, block_line = feed_forward:block(
-      {
-        {
-          sequence = "",
-          hidden = summed(running, attended[1]),
-          position = position,
-        },
-      },
-      prefix
-    )
-    if blocked is nil then
-      return nil, block_line
-    end
-    running = blocked[1]
-  end
-
-  local planes, score_line = feed_forward:scores({running})
-  if planes is nil then
-    return nil, score_line
-  end
-  local values = planes[1]
-
-  local best = 0
-  local largest = values[1]
-  for index = 2, #values do
-    if values[index] > largest then
-      largest = values[index]
-      best = index - 1
-    end
-  end
-  return best
 end
 
 return compute

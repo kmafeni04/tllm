@@ -32,14 +32,11 @@ before `post_attention_norm`; `output_norm` and `output` come after the last blo
 states no expert weight scale.
 
 This spec adds `compute.feed_forward(backend, handle, geometry)` and one record,
-`FeedForward`, with two operations, `block` and `scores`, and
-`compute.top_token(attention, feed_forward, hidden, prefixes, position)`, which carries a
-hidden through a list of attention blocks at one position and returns the highest scoring
-token. `12`'s `Geometry` record gains one number, `experts_used`, because no tensor stores
-how many experts one token keeps. `top_token` uses `12`'s `Attention` handle as it is, so
-the cache the attention blocks keep is the cache the stack reads. This makes a token through
-a stack of attention-only blocks possible before spec 14 adds the linear-attention block and
-spec 15 runs the whole model and serves it.
+`FeedForward`, with two operations, `block` and `scores`. `12`'s `Geometry` record gains one
+number, `experts_used`, because no tensor stores how many experts one token keeps. A block is
+read over `12`'s `Attention` handle as it is, so the cache the attention blocks keep is the
+cache spec 15's stack reads; carrying a hidden through that stack and picking its best token
+is `15`'s model pass, and this spec stops at one block's numbers.
 
 Refusals keep the shape `11` and `12` use: nil and one line, so a mistake in the next spec's
 wiring is a return value and the process stays up. These belong in the core for the reason
@@ -58,17 +55,18 @@ local record compute
     scores: function(
       FeedForward, {{number}}
     ): {{number}} | nil, string | nil
+    close: function(FeedForward)
   end
 
   feed_forward: function(
     Backend, weights.Handle, Geometry
   ): FeedForward | nil, string | nil
-
-  top_token: function(
-    Attention, FeedForward, {number}, {string}, integer
-  ): integer | nil, string | nil
 end
 ```
+
+A `FeedForward` handle's `close` gives back its hold on the weights mapping and refuses every
+operation afterwards; `12/FR-014` states that contract and the refusal line, and it is the same for
+this handle with no caches of its own to free.
 
 ## User stories
 
@@ -120,16 +118,6 @@ end
   row in order, each holding one number per row of `output.weight`, being `11/FR-002`'s matrix
   product of `output.weight` with that hidden row normalised by `output_norm.weight` by
   `11/FR-004`'s norm and the geometry's `eps`.
-- FR-009 (US-003) WHEN `compute.top_token(attention, feed_forward, hidden, prefixes, position)`
-  is called with a non-empty `prefixes`, THE SYSTEM SHALL call `attention:block` and
-  `feed_forward:block` with a list holding one `compute.Row` whose sequence is `""` and whose
-  position is the argument, and `feed_forward:scores` with a list holding one hidden, and SHALL
-  return the index, counting from zero, of the largest number `feed_forward:scores` returns for
-  `running`, where `running` starts as `hidden` and, for each prefix in list order, becomes the
-  numbers of that prefix's `feed_forward:block` applied to the result of adding that prefix's
-  `attention:block` numbers to `running` position by position, and nil as its second value.
-- FR-010 (US-003) WHEN two or more of the scores are equal and largest, THE SYSTEM SHALL
-  return the lowest of their indices.
 - FR-011 (US-004) IF `compute.feed_forward` is given a backend that `compute.load` did not
   return, or a `geometry` whose `experts_used` is below one or whose `eps` is below zero,
   THEN THE SYSTEM SHALL return nil and one line naming `feed_forward` and, the geometry
@@ -166,11 +154,6 @@ end
   first dimension is not the number of `hidden`'s positions, or it holds no rows, THEN THE
   SYSTEM SHALL return nil and one line naming the operation, the tensor and the numbers at
   fault. The shape checks are made against each row of the batch's hidden.
-- FR-014 (US-004) IF `compute.top_token` is given an empty `prefixes`, or a call it makes on
-  `attention:block`, `feed_forward:block` or `feed_forward:scores` returns nil, THEN THE
-  SYSTEM SHALL return nil and one line naming `top_token` for the empty list and the refusing
-  call's line otherwise; a refused call `top_token` makes is refused through that one-row batch,
-  its line unchanged.
 - FR-015 (US-004) IF more than one refusal applies to a `block` or `scores` call, THEN THE
   SYSTEM SHALL report a missing tensor before a tensor of a type the operation does not read,
   a type fault before a shape that does not fit, and of two faults in FR-013's list the earlier
@@ -226,26 +209,7 @@ end
 - T-003 (FR-008): `the final norm gives one score per token`, proves on T-001's fixture that
   `scores({3,4})` returns `{0.8485281, 1.1313708, 1.9798990}` to within 1e-5 and that on the
   `eps` 1 handle `scores({3,4})` returns `{0.8164966, 1.0886621, 1.9051587}` to within 1e-5.
-- T-004 (FR-009, FR-010, FR-014): `a stack of attention blocks gives the top token`, proves
-  with a fixture holding, under `blk.0.` and `blk.1.`, 12's T-001 attention tensors and the
-  block's f32 feed-forward tensors: `post_attention_norm.weight` 4 numbers of 1;
-  `ffn_gate_inp.weight` 4 numbers per row over 2 rows, the rows counting from one, row 1
-  `{1,0,0,0}` and row 2 four zeros;
-  `ffn_gate_inp_shexp.weight` 4 zeros; `ffn_up_shexp.weight`, `ffn_gate_shexp.weight` and
-  `ffn_down_shexp.weight` 4 by 4 zeros; `ffn_up_exps.weight` 4 by 4 by 2 with the 4 by 4
-  identity at expert 0 and zeros at expert 1; `ffn_gate_exps.weight` 4 by 4 by 2 with 100
-  times the identity at expert 0 and zeros at expert 1; `ffn_down_exps.weight` 4 by 4 by 2
-  with the identity at expert 0 and zeros at expert 1; and, at the root, `output_norm.weight`
-  4 numbers of 1; and `output.weight` 4 numbers per row over 3 rows, `{1,0,0,0}`, `{0,1,0,0}`
-  and `{1,1,1,1}`, and with a geometry of 2 heads, 1 key/value head, heads of 2 numbers, rope
-  over 2 numbers at base 10000, `eps` 0, 4 positions and 1 expert used, that
-  `compute.top_token(attention, feed_forward, {1,1,1,1}, {"blk.0.","blk.1."}, 0)` returns 2
-  and nil, that on a second fixture with the same tensors and `output.weight` 4 numbers per
-  row over 2 rows, both `{1,0,0,0}`, `top_token` returns 0 and nil, the two scores tying at
-  the largest and the lower index winning, and that on a fresh attention handle
-  `top_token(attention, feed_forward, {1,1,1,1}, {"blk.0.","blk.1."}, 1)` returns nil and one
-  line holding `blk.0.` and `1`.
-- T-005 (FR-011, FR-012, FR-013, FR-014, FR-015): `a name, type, shape or number that does
+- T-005 (FR-011, FR-012, FR-013, FR-015): `a name, type, shape or number that does
   not fit is refused with one line`, proves on T-001's fixture that a backend built by hand is
   refused with one line holding `feed_forward`; that a geometry with `experts_used` 0 and one
   with `eps` -1 are refused with one line holding `feed_forward`, 0 and -1; that
@@ -270,11 +234,7 @@ end
   that with `blk.0.ffn_down_exps.weight` removed and an f16 `ffn_gate_inp.weight` the line
   holds `ffn_down_exps.weight`, with an f16 `ffn_gate_inp.weight` and a two-dimensional
   `ffn_down_exps.weight` the line holds `ffn_gate_inp` and `f16`, and with a two-dimensional
-  `ffn_down_exps.weight` the line holds `ffn_down_exps.weight`; that
-  `top_token` with an empty prefix list is refused with one line holding `top_token`; and
-  that on T-004's fixture with `blk.1.ffn_gate_inp.weight` removed and with
-  `blk.1.attn_norm.weight` removed, `top_token` is refused with one line holding
-  `blk.1.ffn_gate_inp.weight` and `blk.1.attn_norm.weight` respectively.
+  `ffn_down_exps.weight` the line holds `ffn_down_exps.weight`.
 
 ## Open questions
 

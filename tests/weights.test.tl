@@ -208,6 +208,25 @@ test.it(
 )
 
 test.it(
+  "release waits for its holders",
+  function()
+    local table_bytes = header(1, 0) .. tensor("a", {2, 3}, 0, 0)
+    local file_path = fixture(table_bytes .. string.rep("\0", 56))
+
+    local handle = load_file(file_path)
+    weights.attach(handle)
+    weights.attach(handle)
+    test.includes(handle.release(handle) as string, "2")
+    test.truthy(mapped(file_path), file_path)
+
+    weights.detach(handle)
+    weights.detach(handle)
+    test.equal(handle.release(handle), nil)
+    test.equal(mapped(file_path), false)
+  end
+)
+
+test.it(
   "a file the reader refuses is refused with its line",
   function()
     local missing = ROOT .. "/missing.gguf"

@@ -428,7 +428,7 @@ on_device(
     test.greaterEqual(bytes, 134217728)
 
     local before = device_free()
-    attached(backend, handle)
+    local maths = attached(backend, handle)
     local after = device_free()
     test.greaterEqual(before - after, math.floor(bytes * 9 / 10))
 
@@ -443,12 +443,14 @@ on_device(
     test.includes(maps, "target/tllm/libggml-cuda")
 
     local feed_before = device_free()
-    forwarded(backend, handle)
+    local feed = forwarded(backend, handle)
     local feed_after = device_free()
     test.less(feed_before - feed_after, math.floor(bytes / 10))
     test.equal(backend.device, name)
 
-    handle.release(handle)
+    maths:close()
+    feed:close()
+    test.equal(handle.release(handle), nil)
   end
 )
 
@@ -569,7 +571,17 @@ on_device(
     )
     test.equal(backend.device, name)
 
-    handle.release(handle)
+    maths:close()
+    cpu_maths:close()
+    attention:close()
+    cpu_attention:close()
+    feed:close()
+    cpu_feed:close()
+    linear:close()
+    cpu_linear:close()
+    model:close()
+    cpu_model:close()
+    test.equal(handle.release(handle), nil)
   end
 )
 
@@ -616,9 +628,12 @@ test.it(
         other_maths:norm({3, 4}, "gain", 0),
         {0.8485281467437744, 2.262741804122925}
       )
+      other_maths:close()
     end
 
-    loaded.release(loaded)
+    test.includes(loaded.release(loaded) as string, "still use it")
+    maths:close()
+    test.equal(loaded.release(loaded), nil)
   end
 )
 
@@ -628,9 +643,10 @@ on_device(
     local handle = large_handle()
     local bytes = bytes_of(handle)
 
-    attached(backend, handle)
+    local maths = attached(backend, handle)
     local loaded = device_free()
-    handle.release(handle)
+    maths:close()
+    test.equal(handle.release(handle), nil)
     local released = device_free()
     test.greaterEqual(released - loaded, math.floor(bytes * 9 / 10))
 

@@ -105,6 +105,14 @@ local record generate
     compute.Model, tokenizer.Tokenizer, string, Options, string | nil
   ): Run | nil, string | nil
 
+  open_ids: function(
+    compute.Model,
+    tokenizer.Tokenizer,
+    {integer},
+    Options,
+    string | nil
+  ): Run | nil, string | nil
+
   record Text
     text: string
     sampled: {integer}

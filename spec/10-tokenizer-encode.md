@@ -25,7 +25,9 @@ local record tokenizer
     encode: function(Tokenizer, string): {integer} | nil, string | nil
   end
 
-  load: function(path: string): Tokenizer | nil, string | nil
+  load: function(
+    path: string, info?: gguf.Info
+  ): Tokenizer | nil, string | nil
 end
 ```
 
@@ -102,6 +104,9 @@ model cannot be a test input.
 - FR-007 (US-001) WHEN a word's bytes have become codepoints, THE SYSTEM SHALL join the adjacent
   pair whose left and right texts appear as an entry of `tokenizer.ggml.merges`, taking the pair
   whose entry comes first in that array at each step, until no adjacent pair appears in it.
+- FR-013 (US-001) THE SYSTEM SHALL cost one word's joining no more than its merges times the
+  logarithm of the word's length, so that a word with no separator in it, a run of Han characters
+  or a long identifier, costs what its merges cost and not a scan of the word per merge.
 - FR-008 (US-001) WHEN the joining ends, THE SYSTEM SHALL append, for each surviving symbol from
   left to right, the id of the first entry of `tokenizer.ggml.tokens` whose stored text equals that
   symbol.
@@ -157,6 +162,10 @@ model cannot be a test input.
   whose pieces are `e`, `Ì`, `ģ`, `eÌ` and `5`, all type 1, and whose only merge is `e Ì`, that
   `encode("e\204\1295")` returns `{3, 2, 4}` and nil, the mark joining the letter word instead of
   forming one of its own.
+- T-005 (FR-013): `one long word costs its merges, not a scan per merge`, proves on a file whose
+  pieces and merges chain `a` and `b` into `ab`, `abab` and so on that a word of 8192 codepoints
+  encodes to the one id of its whole text in under four tenths of a second, which a scan of the
+  word per merge does not.
 
 ## Open questions
 

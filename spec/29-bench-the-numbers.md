@@ -153,9 +153,13 @@ refusal lines through the second, and hands back the exit code. The `generation`
   write the line `skipped L: M` where L is the length and M is what the refusal body holds, and
   run the next length; IF a length's body is answered with any other status than `OK`, or with a
   nil producer, THEN THE SYSTEM SHALL write one line naming the length and that status or the
-  fact that no producer came back to the stderr writer, write no `prompt`, `decode`, `token` or
+  fact that no producer came back to the stderr writer, or one naming the length and the error a
+  producer that raised on its first step reported, write no `prompt`, `decode`, `token` or
   `experts` line for it, and run the next length; and IF any length failed that way or no length
   ran, THEN THE SYSTEM SHALL exit 1, and exit 0 otherwise.
+  Not testable: a producer that raises cannot be made from the command line, where `serve` is what
+  builds it; a reader confirms `src/bench.tl` checks the result of resuming the producer's
+  coroutine and writes the line it raises with.
 - FR-007 (US-004) IF MODEL is neither a path nor a name the config file holds, or the model cannot
   be loaded, THEN THE SYSTEM SHALL write one line naming MODEL and the reason to the stderr writer
   and exit 1, having written no length's lines.

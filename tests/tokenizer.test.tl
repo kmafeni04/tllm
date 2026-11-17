@@ -1,5 +1,6 @@
 local fs = require("fs")
 local test = require("lde-test")
+local clock = require("tllm.clock")
 local gguf = require("tllm.gguf")
 local tokenizer = require("tllm.tokenizer")
 
@@ -367,6 +368,32 @@ test.it(
     ids, failure = valid:encode("\255")
     test.equal(ids, nil)
     test.includes(failure as string, "not valid UTF-8")
+  end
+)
+
+test.it(
+  "one long word costs its merges, not a scan per merge",
+  function()
+    local pairs_wanted = 4096
+    local pieces = {"a", "b"}
+    local merges = {"a b"}
+    local size: integer = 2
+    while size <= pairs_wanted do
+      pieces[#pieces + 1] = string.rep("ab", size)
+      merges[#merges + 1] = string.rep("ab", math.floor(size / 2))
+        .. " "
+        .. string.rep("ab", math.floor(size / 2))
+      size = size * 2
+    end
+    local built = loaded(encoding_file("gpt2", pieces, {merges_entry(merges)}))
+
+    local started = clock.now()
+    local ids, failure = built:encode(string.rep("ab", pairs_wanted))
+    local spent = clock.now() - started
+
+    test.equal(failure, nil)
+    test.deepEqual(ids, {#pieces - 1})
+    test.less(spent, 0.4)
   end
 )
 

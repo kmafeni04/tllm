@@ -35,7 +35,9 @@ possible: a socket from a registry or luarocks library, or files in a scratch di
 file the worker takes, an output file the parent reads as it grows, a tick the parent writes to
 give the worker one step and a done file that ends the turn. This spec takes the files, so the
 pool's only new dependency is lde's `process` (the `fs` it also uses is already carried), at the
-cost of a poll interval of a few milliseconds per payload. It is also the shape lde's own
+cost of a poll interval of a few milliseconds per payload. The parent reads only the bytes the
+worker has written past the offset it has already read, so a streamed reply costs the bytes it
+carries and not the whole file again per step. It is also the shape lde's own
 `childPool` uses to hand work to children
 (`packages/lde-core/src/util/childpool.lua` in the lde repository).
 
@@ -177,11 +179,28 @@ rather than in `serve`.
   another worker which restores the conversation as `27/FR-002` restores one the server does not
   hold; IF the replacement cannot be started, THEN THE SYSTEM SHALL leave that slot with no worker,
   so `pool_of` gives one worker fewer, start no further replacement for it and write nothing, that
-  loss being what `pool_of` shows.
+  loss being what `pool_of` shows. A replacement that reports its server built is a worker like any
+  other: its own death starts a replacement in its slot, so a pool that loses one worker per slot
+  over its life does not shrink one slot at a time.
+- FR-014 (US-002) IF a held turn cannot be admitted when a worker frees, THEN THE SYSTEM SHALL end
+  its stream with `19/FR-010`'s `error` and `[DONE]` events, so the wait ends with a reply rather
+  than with a stream that stops mid-frame.
+  Not testable: reachable through `19/FR-010`'s narrow branch only; a reader confirms `abandoned` in
+  `src/serve.tl`.
 - FR-009 (US-005) WHEN `serve.stop(server)` is called, THE SYSTEM SHALL stop every worker that
   server started and remove the directory it made for them, so `pool_of` gives nil afterwards and
-  no worker process outlives the call; `serve.start` SHALL call it when the loop it runs ends, and
-  SHALL take an optional third argument, the spawn function it passes to `serve.build`.
+  no worker process outlives the call, and for a server that runs the model itself SHALL also give
+  back what `serve.build` took: the model's caches, its hold on the mapping, the mapping itself and
+  the library the backend opened, forgetting the server's model, store, turns, reservations and
+  held names, so a server built and stopped leaves nothing behind; `serve.start` SHALL call it when
+  the loop it runs ends, and SHALL take an optional third argument, the spawn function it passes to
+  `serve.build`.
+- FR-013 (US-005) WHEN `serve.build` makes the pool's scratch directory, THE SYSTEM SHALL make it
+  with a name this call chose, an atomic create, so a directory another user had already made at
+  that path is not adopted, and the mode 0700, so only the process that made it can list or read
+  the request bodies and replies the workers keep there; IF the create or the mode fails, THEN THE
+  SYSTEM SHALL remove what it made and return nil and one line naming the directory, rather than
+  letting the workers write into someone else's path or a world-readable one.
 - FR-010 (US-005) IF a worker cannot build its server, or its process cannot be started, THEN THE
   SYSTEM SHALL return nil and one line naming that worker's slot as `slot` and the number, and the
   fault, after stopping every worker already started and removing the directory, so a pool either
@@ -215,8 +234,9 @@ rather than in `serve`.
 ## Tests
 
 T-001, T-002, T-003, T-005 and the first half of T-006 build `18/T-001`'s fixture through the serve
-cases' `build` helper with the endpoint each case names; T-006's second half, T-007 and T-008 name
-that fixture's endpoint directly because each needs its own spawn function or its own failure line.
+cases' `build` helper with the endpoint each case names; T-006's second half, T-008, T-009 and
+T-010 name that fixture's endpoint directly because each needs its own spawn function, its own
+failure line or its own directory.
 Every case takes "the in-process server" to be a server built from the same bytes by `27`'s path,
 with `workers` absent. Every case that builds a pool gives that endpoint a context directory and a
 budget. A case that drives a pool repeats `serve.step` with a 2 ms wait until it returns 0, up to
@@ -273,9 +293,12 @@ built a pool. FR-008's non-streamed branch is not asserted: a case cannot kill a
   workers neither of whose pids is the killed one and no worker whose `sessions` hold `s`; that the
   same three-message body naming `s` then answers `OK` with `cached_tokens` 2 and the text the
   in-process server gives for it, so the conversation came back from its file on another worker;
-  and that, on a second pool of a fresh copy built with `workers` 2 over a context directory and a
-  budget, after the case replaces that copy's file with text that is not a GGUF and kills one of its
-  workers, `pool_of` holds one worker whose pid is the same a hundred steps later.
+  that the worker that answered `s` the second time is killed, and the steps run until `pool_of`
+  holds two workers again, none of them the killed pid, so a replacement that built its server earns
+  a replacement of its own; and that, on a second pool of a fresh copy built with `workers` 2 over a
+  context directory and a budget, after the case replaces that copy's file with text that is not a
+  GGUF and kills one of its workers, `pool_of` holds one worker whose pid is the same a hundred
+  steps later.
 - T-006 (FR-009): `a stop and a loop that ends leave nothing behind`, proves on a pool built as
   T-001's is that the directory `pool_of(server).dir` names exists, and that after `serve.stop(server)` it does
   not, each pid `pool_of` gave before the stop has no `/proc` entry and `pool_of(server)` is nil;
@@ -298,6 +321,15 @@ built a pool. FR-008's non-streamed branch is not asserted: a case cannot kill a
   `floor(f / t) + 1`, where `t` is that file's tensor byte sum, returns nil and one line holding
   that number and a byte count no larger than `f`, with no worker process started; on a machine
   where `memory` gives nil and nil it skips with the line `no CUDA device`, as `21/T-001` does.
+
+- T-009 (FR-009): `a gguf is mapped at build and a bad file is refused`, proves over a server that
+  runs the model itself that its file's path appears in `/proc/self/maps` after `serve.build`, and
+  that after `serve.stop` the server holds no model and the path is gone from the process's
+  mappings.
+- T-010 (FR-013): `a pool's scratch directory is private and made by this call`, proves that the
+  directory `pool_of(server).dir` names has the mode 0700 after `serve.build`, so `fs.stat` reports
+  no group or other permission, and that a second pool built in the same second gets a different
+  directory.
 
 ## Open questions
 

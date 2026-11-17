@@ -11,17 +11,19 @@ story (attention, a sampler, `bench`) sits on that.
 
 This spec adds a build step and one module. `build.lua` fetches ggml v0.29.0 and builds its CPU
 backend, leaving shared libraries in the package's target directory. `tllm.compute` loads that
-library through `ffi` and offers exactly one operation: a matrix by a vector product.
+library through `ffi`, checks it is the pinned build, and hands the loaded library to the specs that
+run graphs over it, starting with `11`.
 
 ```teal
 local record compute
   record Backend
     path: string
     version: string
-    matvec: function(Backend, {{number}}, {number}): {number} | nil, string | nil
+    memory: function(Backend): integer | nil, integer | nil
   end
 
-  load: function(path?: string): Backend | nil, string | nil
+  load: function(path?: string, offload?: boolean): Backend | nil, string | nil
+  unload: function(Backend)
 end
 ```
 
@@ -33,7 +35,9 @@ plugin would need this contract in the core before it could be written.
 The pin is the tag `v0.29.0`, commit `57e2c2ca2a7cae756b1c4dfafa0cdfef9051d234`
 (github.com/ggml-org/ggml). Its `CMakeLists.txt` sets `GGML_VERSION` to `0.29.0` and
 `ggml_version()` returns that string, so the version the engine reports is the library's own, not a
-second copy of the constant in this project. The flags are in FR-001 rather than prose because each
+second copy of the constant in this project. That version is also the gate: `compute` mirrors
+`struct ggml_tensor` field by field and writes through it, so a library whose layout is another
+build's is refused rather than read through the wrong offsets. The flags are in FR-001 rather than prose because each
 one is load bearing: shared libraries or there is nothing to load, tests and examples off for time,
 Metal, Accelerate and BLAS off so CUDA is the only other backend built, and backends as modules the
 library loads at run time, so a machine without a driver still opens it.
@@ -79,32 +83,20 @@ is the package root whenever lde runs the engine or its tests. Started from anyw
 way FR-005 describes, and the caller passes the path instead. That optional path also gives FR-005 a
 file that is not a library to refuse, and a build that left the file elsewhere something to point at.
 
-The multiplication maps onto ggml's own product. A ggml tensor has its first dimension contiguous, so
-the matrix becomes a tensor of `row length` by `row count` and the vector a tensor of `row length` by
-one; `ggml_mul_mat` returns `row count` numbers in contiguous memory, one per matrix row, each the dot
-product of that row with the vector. The call creates its own ggml context, tensor data, graph and CPU
-backend, computes, reads the numbers back and frees everything it made, on the computing path and on
-every refusing one. The arena the context runs in is allocated by the module and sized from the
-element counts, so no matrix is silently capped at an arena size this document does not state, and
-an allocation that fails comes back as a line instead of ggml's abort. A CPU backend that cannot
-be created or a graph compute whose status is not success leaves no numbers to return, so that case
-also frees what it made and returns nil with one line.
+ggml's context is placed inside the memory buffer it is given, so the module allocates a buffer of a
+size it counts itself, and an allocation that fails comes back as a line instead of ggml's abort.
+`ggml_init` returning NULL is that same refusal. A CPU backend that cannot be created, or a graph
+compute whose status is not success, leaves no numbers to return and also frees what it made.
 
-The shapes are checked before ggml is called, not after. `ggml_mul_mat` asserts that the first
-dimensions match and aborts the process when they do not, so a plugin that passes a two element
-vector would take the server down, and a zero length dimension is not something this contract lets
-through either. Refusing first is what makes `US-005` true.
-
-Nothing here knows a model, a token or a layer, and the only type involved is f32, because that is
-what ggml returns from this operation.
+Nothing here knows a model, a token or a layer. The operations over the mapped weights, the arena
+each graph runs in and the numbers it gives back are `11`'s contract.
 
 ## User stories
 
 - US-001 (P1) As the engine author, I want ggml's CPU library built from a pinned source and placed where the engine looks, so that a fresh checkout can compute without me installing a C library by hand.
 - US-002 (P1) As the engine author, I want one call that opens that library and says which file and which ggml version I am using, so that a bug report and a model run name the same maths.
 - US-003 (P2) As the engine author, I want a load that fails to return one line holding the path, so that a missing or half-built library is a message rather than a crash.
-- US-004 (P1) As the engine author, I want a matrix by vector product through ggml with numbers I can work out by hand, sized from its inputs and leaving nothing behind, so that a forward pass has a proven path to sit on.
-- US-005 (P2) As the engine author, I want a malformed shape refused with one line, so that a plugin's mistake is a return value and the process stays up.
+- US-004 (P1) As the engine author, I want the library this project pinned and nothing else read through the mirrored struct, so that a stale or foreign `libggml` is a message rather than heap corruption.
 
 ## Functional requirements
 
@@ -114,34 +106,22 @@ what ggml returns from this operation.
 - FR-002 (US-001) WHEN the build finishes, THE SYSTEM SHALL place `libggml` and `libggml-base`, with the versioned names and symlinks the build produces, and the backend modules the build produces, `libggml-cpu-*` and `libggml-cuda`, in the package's target directory, so that loading the placed `libggml` maps `libggml-base` from that directory and not from the build cache and loads its backends from there too.
 - FR-003 (US-002) THE SYSTEM SHALL set a handle's `path` to the library file it opened: the string `target/tllm/libggml.so`, relative to the current directory, when `compute.load` is given no path, and the argument unchanged when one is given.
 - FR-004 (US-002) WHEN `compute.load` returns a handle, THE SYSTEM SHALL set `version` to the version string the library reports for itself, which is `0.29.0` for the pinned source.
+- FR-014 (US-004) IF the version the library reports is not `0.29.0`, THEN THE SYSTEM SHALL return nil and one line holding the path, the version it reported and the version this project mirrors.
+  Not testable: the only library the suite has is the pinned build, so no case can reach the refusal;
+  a reader confirms the comparison in `src/compute.tl`.
 - FR-005 (US-003) IF the file to open cannot be loaded, THEN THE SYSTEM SHALL return nil and one line holding that path.
-- FR-006 (US-004) WHEN a handle's `matvec(matrix, vector)` is called with a matrix holding at least one row and every row holding as many numbers as the vector, THE SYSTEM SHALL return one number per matrix row, in row order, each the sum over the row's positions of the row's number times the vector's number at that position.
-- FR-007 (US-004) THE SYSTEM SHALL compute each returned number in single precision, so that the row `0.1`, `0.2` with the vector `1`, `1` returns `0.30000001192092896` rather than the number `0.1 + 0.2` gives in Lua.
-- FR-008 (US-004) THE SYSTEM SHALL size the ggml context it creates from the matrix's and vector's element counts, so that the size of a matrix this operation accepts is bounded by memory and not by a constant.
-  Not testable: telling an arena sized from the element counts from a fixed one that is large enough
-  for the cases above needs a matrix past every constant worth choosing; one that does, 4096 by 4096
-  f32, is 64 MiB of element data, a slow, memory-heavy call `## Tests` does not spend; a reader
-  confirms the size is computed from the element counts instead.
-- FR-009 (US-004) IF no ggml context can be created for that size, THEN THE SYSTEM SHALL return nil and one line holding `context`.
-  Not testable: making an allocation of that size fail needs a memory limit the suite cannot set portably; the branch returns nil and one line, which a reader confirms by inspection.
-- FR-010 (US-004) WHEN `matvec` returns, THE SYSTEM SHALL free every ggml context, tensor, graph and backend it created, on the computing path and on every refusing path.
-  Not testable: a leak shows only as growth across many calls, which no portable assertion catches; a reader confirms one free of each object created.
-- FR-011 (US-005) IF the matrix holds no row, or the vector holds no number, or any row holds no number, THEN THE SYSTEM SHALL return nil and one line holding `empty`.
-- FR-012 (US-005) IF a row holds a different count of numbers than the vector, THEN THE SYSTEM SHALL return nil and one line holding that row's length, for the first such row in order, and the vector's length.
-- FR-013 (US-005) IF more than one refusal applies to a call, THEN THE SYSTEM SHALL report an empty shape before a row length that differs.
+
 
 ## Non-goals
 
 - Linux x86_64 only: no macOS, no Windows, no other architecture, no prebuilt download; the source is compiled.
-- No other operation, type or backend: no add, normalise, rope, softmax or row gather, no quantised tensor, no attention, no Metal, Vulkan or BLAS, no thread count, no buffer reuse between calls. The CUDA backend is built and placed by the flags `21` adds, and this spec computes nothing on it.
+- No operation of its own: no add, normalise, rope, softmax, row gather or product, no quantised tensor, no attention, no Metal, Vulkan or BLAS, no thread count, no buffer reuse between calls. The CUDA backend is built and placed by the flags `21` adds, and this spec computes nothing on it.
 - No model: `serve` loads a GGUF through `weights.load` under `08`, and nothing reads a weight through this library.
 
 ## Tests
 
-- T-001 (FR-002, FR-003, FR-004): `the placed ggml loads, resolves its sibling and reports its version`, proves that with no library search path variable set, `compute.load()` returns a handle whose `path` is `target/tllm/libggml.so` and whose `version` is `0.29.0`, that `/proc/self/maps` then holds `target/tllm/libggml-base`, and that `compute.load(handle.path)` returns a handle whose `path` is that same string.
+- T-001 (FR-002, FR-003, FR-004): `the placed ggml loads, resolves its sibling and reports its version`, proves that with no library search path variable set, `compute.load()` returns a handle whose `path` is `target/tllm/libggml.so`, that `/proc/self/maps` then holds `target/tllm/libggml-base`, and that `compute.load(handle.path)` returns a handle whose `path` is that same string. The version itself needs no assertion: FR-014 refuses any other, so reaching this case already proves it.
 - T-002 (FR-005): `a library that cannot be loaded is refused`, proves a path that does not exist, and a file `not-a-library.so` written with the line `this is not a library`, each return nil and one line holding that path.
-- T-003 (FR-006, FR-007): `a matrix times a vector comes back in single precision`, proves a handle's `matvec` gives `{6, 15}` for `{{1, 2, 3}, {4, 5, 6}}` with `{1, 1, 1}`, `{0.5}` for `{{1, -2, 0.5}}` with `{4, 2, 1}`, and `{0.30000001192092896}` for `{{0.1, 0.2}}` with `{1, 1}`.
-- T-004 (FR-011, FR-012, FR-013): `a matrix of the wrong shape is refused`, proves `matvec({}, {1})` and `matvec({{}}, {1})` each return nil and one line holding `empty`, that `matvec({{1, 2}, {3}}, {1, 1})` returns nil and one line holding `1` and `2`, and that the same handle still gives `{6, 15}` for `{{1, 2, 3}, {4, 5, 6}}` with `{1, 1, 1}` afterwards.
 
 ## Open questions
 

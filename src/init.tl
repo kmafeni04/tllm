@@ -8,4 +8,6 @@ local function write_err(text: string)
   io.stderr:write(text)
 end
 
-os.exit(cli.run(arg, write_out, write_err), true)
+os.exit(
+  cli.run({args = arg, write_out = write_out, write_err = write_err}), true
+)

@@ -27,10 +27,13 @@ local record weights
     alignment: integer
     data_start: integer
     tensors: {string: Tensor}
-    release: function(Handle)
+    mappers: integer
+    release: function(Handle): string | nil
   end
 
-  load: function(path: string): Handle | nil, string | nil
+  load: function(path: string, info?: gguf.Info): Handle | nil, string | nil
+  attach: function(Handle)
+  detach: function(Handle)
 end
 
 local type Tensor = weights.Tensor
@@ -112,10 +115,18 @@ local function plan(
   }
 end
 
-function weights.load(path: string): Handle | nil, string | nil
-  local info, read_failure = gguf.read(path)
-  if info is nil then
-    return nil, read_failure
+function weights.load(
+  path: string, given_info?: gguf.Info
+): Handle | nil, string | nil
+  local info: gguf.Info
+  if given_info is nil then
+    local read, read_failure = gguf.read(path)
+    if read is nil then
+      return nil, read_failure
+    end
+    info = read
+  else
+    info = given_info
   end
 
   local alignment, alignment_failure = alignment_of(info)
@@ -177,12 +188,17 @@ function weights.load(path: string): Handle | nil, string | nil
   end
 
   local released = false
-  local function release(_: Handle)
+  local function release(handle: Handle): string | nil
     if released then
-      return
+      return nil
+    end
+    -- the tensors point into the mapping, so it outlives every holder
+    if handle.mappers > 0 then
+      return "release: " .. handle.mappers .. " still use it"
     end
     released = true
     C.munmap(mapping, size)
+    return nil
   end
 
   return {
@@ -190,8 +206,19 @@ function weights.load(path: string): Handle | nil, string | nil
     alignment = alignment,
     data_start = data_start,
     tensors = tensors,
+    mappers = 0,
     release = release,
   }
+end
+
+function weights.attach(handle: Handle)
+  handle.mappers = handle.mappers + 1
+end
+
+function weights.detach(handle: Handle)
+  if handle.mappers > 0 then
+    handle.mappers = handle.mappers - 1
+  end
 end
 
 return weights

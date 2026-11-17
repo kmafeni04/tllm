@@ -204,7 +204,23 @@ local record ContextFile
   name: string
   size: integer
   modifyTime: number
-  written: integer
+end
+
+-- a file name is at most 255 bytes, so a long id is stored under a digest of
+-- itself rather than a name that cannot be written
+local LONGEST_NAME: integer = 100
+
+-- two 32-bit hashes over the same id, so a name collision needs one in 2^64
+-- rather than one in 2^32, which a client choosing its own ids could reach
+local function digest(text: string): string
+  local first: integer = 5381
+  local second: integer = 2166136261
+  for index = 1, #text do
+    local byte = text:byte(index) as integer
+    first = (first * 33 + byte) % 4294967296
+    second = ((second * 131 + byte) % 4294967296 + index) % 4294967296
+  end
+  return string.format("%08x%08x", first, second)
 end
 
 -- the session id as text a file name can hold, so no id reaches another path
@@ -504,7 +520,7 @@ end
 
 local function is_held(server: tltp.Server, name: string): boolean
   local marks = held[server]
-  return marks ~= nil and marks[name] == true
+  return not (marks is nil) and marks[name] == true
 end
 
 local function mark_held(server: tltp.Server, name: string)
@@ -526,7 +542,7 @@ end
 
 local function is_reserved(server: tltp.Server, name: string): boolean
   local marks = reservations[server]
-  return marks ~= nil and marks[name] == true
+  return not (marks is nil) and marks[name] == true
 end
 
 local function free_slots(server: tltp.Server): integer
@@ -564,25 +580,12 @@ local function begins_with(ids: {integer}, prefix: {integer}): boolean
   return true
 end
 
-local writes: {tltp.Server: {string: integer}} = {}
-local write_count: integer = 0
-
-local function recorded_write(server: tltp.Server, name: string)
-  local order = writes[server]
-  if order is nil then
-    order = {}
-    writes[server] = order
+local function file_name(id: string): string
+  local escaped_id = escaped(id)
+  if #escaped_id <= LONGEST_NAME then
+    return escaped_id .. CONTEXT_SUFFIX
   end
-  write_count = write_count + 1
-  order[name] = write_count
-end
-
-local function write_order(server: tltp.Server, name: string): integer
-  local order = writes[server]
-  if order is nil then
-    return 0
-  end
-  return order[name] or 0
+  return "long-" .. digest(id) .. CONTEXT_SUFFIX
 end
 
 local function context_file(model: serve.Model, id: string): string | nil
@@ -590,10 +593,10 @@ local function context_file(model: serve.Model, id: string): string | nil
   if dir is nil then
     return nil
   end
-  return dir .. "/" .. escaped(id) .. CONTEXT_SUFFIX
+  return dir .. "/" .. file_name(id)
 end
 
-local function context_files(server: tltp.Server, dir: string): {ContextFile}
+local function context_files(dir: string): {ContextFile}
   local files: {ContextFile} = {}
   local next_entry = fs.readdir(dir)
   if next_entry is nil then
@@ -615,7 +618,6 @@ local function context_files(server: tltp.Server, dir: string): {ContextFile}
             name = name,
             size = math.floor(tonumber(info.size) as number),
             modifyTime = tonumber(info.modifyTime) as number,
-            written = write_order(server, name),
           }
         end
       end
@@ -626,13 +628,13 @@ end
 
 -- the directory holds no more than the budget: the oldest files go first,
 -- and a file that alone holds more than the budget goes alone
-local function trimmed(server: tltp.Server, model: serve.Model, name: string)
+local function trimmed(model: serve.Model, name: string)
   local dir = model.context_path
   local budget = model.context_bytes
   if dir is nil or budget is nil then
     return
   end
-  local files = context_files(server, dir)
+  local files = context_files(dir)
   local total = 0
   local fresh: ContextFile | nil = nil
   for _, file in ipairs(files) do
@@ -658,9 +660,6 @@ local function trimmed(server: tltp.Server, model: serve.Model, name: string)
       if left.modifyTime ~= right.modifyTime then
         return left.modifyTime < right.modifyTime
       end
-      if left.written ~= right.written then
-        return left.written < right.written
-      end
       return left.name < right.name
     end
   )
@@ -681,11 +680,7 @@ end
 
 -- the conversation's file, written for a turn that stored it
 local function stored(
-  server: tltp.Server,
-  model: serve.Model,
-  sequence: string,
-  ids: {integer},
-  id: string
+  model: serve.Model, sequence: string, ids: {integer}, id: string
 )
   local path = context_file(model, id)
   if path is nil then
@@ -695,9 +690,7 @@ local function stored(
   if not (line is nil) then
     return
   end
-  local name = escaped(id) .. CONTEXT_SUFFIX
-  recorded_write(server, name)
-  trimmed(server, model, name)
+  trimmed(model, file_name(id))
 end
 
 local function free_name(server: tltp.Server, base: string): string
@@ -945,10 +938,11 @@ local function prepared(
     evict_one(server, store)
   end
 
-  if free_slots(server) < 1 then
-    if not request.stream then
-      return nil, too_many(server)
-    end
+  local slots = free_slots(server)
+  if slots < 1 and not request.stream then
+    return nil, too_many(server)
+  end
+  if slots < 1 then
     waiting = true
     sequence = id or ""
   else
@@ -1045,7 +1039,7 @@ local function kept(ready: Prepared, sampled: {integer}, cut: boolean)
       },
     }
     used(store, id)
-    stored(ready.server, ready.model, ready.sequence, ids, id)
+    stored(ready.model, ready.sequence, ids, id)
     unmark_held(ready.server, ready.sequence)
     ready.reserved = false
     return
@@ -1068,10 +1062,10 @@ local function lost(ready: Prepared)
 end
 
 local function finished(ready: Prepared): serve.Reply
-  local answer, text_line = generate.text(
+  local answer, text_line = generate.text_ids(
     ready.model.generation,
     ready.model.tokenizer,
-    ready.prompt,
+    ready.ids,
     options_of(ready),
     ready.sequence
   )
@@ -1157,28 +1151,39 @@ local function producer(
   end
 end
 
+-- a turn a slot never took ends the stream it has already opened, so a client
+-- waiting for its ending sees one instead of a reply that stops mid-frame
+local function abandoned(server: tltp.Server, turn: Turn)
+  local ending = event_data({index = 0, finish_reason = "error"})
+  if ending is string then
+    turn.emit(ending)
+    turn.emit("[DONE]")
+  end
+  dropped(server, turn)
+end
+
 local function admit(server: tltp.Server, turn: Turn): boolean
   local ready = turn.ready
   local name = reserve_sequence(server, ready.sequence, ready.positions)
   if name is nil then
     lost(ready)
-    dropped(server, turn)
+    abandoned(server, turn)
     return false
   end
   ready.sequence = name
   ready.reserved = true
   mark_held(server, name)
 
-  local run = generate.open(
+  local run = generate.open_ids(
     ready.model.generation,
     ready.model.tokenizer,
-    ready.prompt,
+    ready.ids,
     options_of(ready),
     name
   )
   if run is nil then
     lost(ready)
-    dropped(server, turn)
+    abandoned(server, turn)
     return false
   end
   turn.run = run
@@ -1295,6 +1300,7 @@ local function pool_built(state: PoolState): string | nil
     while not worker.ready do
       if fs.isfile(worker.dir .. "/ready") then
         worker.ready = true
+        worker.replacement = false
         break
       end
       local line = failed_line(worker)
@@ -1384,17 +1390,33 @@ local function dispatched(state: PoolState, worker: PoolWorker, turn: PoolTurn)
   end
 end
 
+-- what the worker has written past the offset this turn has read, so a step
+-- reads the new frame and not the whole turn again
+local function tail_of(path: string, offset: integer): string | nil
+  local made_file = io.open(path, "rb")
+  if made_file is nil then
+    return nil
+  end
+  local file = made_file
+  if not file:seek("set", offset) then
+    file:close()
+    return nil
+  end
+  local rest = file:read("a")
+  file:close()
+  return rest
+end
+
 -- one frame off the worker's output file, leaving the rest for later steps
 local function next_frame(worker: PoolWorker): string | nil
   local job = worker.job
   if job is nil then
     return nil
   end
-  local text = fs.read(worker.dir .. "/" .. job .. ".out")
-  if text is nil then
+  local rest = tail_of(worker.dir .. "/" .. job .. ".out", worker.offset)
+  if rest is nil then
     return nil
   end
-  local rest = text:sub(worker.offset + 1)
   local colon = rest:find(":", 1, true)
   if colon is nil then
     return nil
@@ -1429,11 +1451,11 @@ local function drained(worker: PoolWorker): boolean
   if job is nil then
     return true
   end
-  local text = fs.read(worker.dir .. "/" .. job .. ".out")
-  if text is nil then
+  local rest = tail_of(worker.dir .. "/" .. job .. ".out", worker.offset)
+  if rest is nil then
     return true
   end
-  return worker.offset >= #text
+  return rest == ""
 end
 
 local function pool_advance(state: PoolState, worker: PoolWorker)
@@ -1522,6 +1544,9 @@ local function pool_ready(state: PoolState)
   for _, worker in ipairs(state.workers) do
     if not worker.ready and fs.isfile(worker.dir .. "/ready") then
       worker.ready = true
+      -- it built its server, so this slot is healthy again and its next death
+      -- is answered with a replacement like any other
+      worker.replacement = false
     end
   end
 end
@@ -1794,32 +1819,31 @@ function serve.stream(
   end
 
   if not ready.request.stream then
-    if ready.waiting then
-      local reply = as_reply(too_many(server))
+    local reply = as_reply(too_many(server))
+    if not ready.waiting then
+      reply = finished(ready)
+    end
+    return server:json(reply.status, reply.body), nil
+  end
+
+  -- a turn that has to wait builds its run when a slot frees, not now
+  local run: generate.Run | nil = nil
+  if not ready.waiting then
+    local run_line: string | nil = nil
+    run, run_line = generate.open_ids(
+      ready.model.generation,
+      ready.model.tokenizer,
+      ready.ids,
+      options_of(ready),
+      ready.sequence
+    )
+    if run is nil then
+      released(ready)
+      local reply = as_reply(internal(run_line as string))
       return server:json(reply.status, reply.body), nil
     end
-    local reply = finished(ready)
-    return server:json(reply.status, reply.body), nil
   end
-
-  local run, open_line = generate.open(
-    ready.model.generation,
-    ready.model.tokenizer,
-    ready.prompt,
-    options_of(ready),
-    ready.sequence
-  )
-  if run is nil then
-    released(ready)
-    local reply = as_reply(internal(open_line as string))
-    return server:json(reply.status, reply.body), nil
-  end
-
-  local held_run: generate.Run | nil = run
-  if ready.waiting then
-    held_run = nil
-  end
-  local stream_fn = producer(server, ready, held_run)
+  local stream_fn = producer(server, ready, run)
   return server:sse(stream_fn), stream_fn
 end
 
@@ -1903,6 +1927,27 @@ local function model_bytes(info: gguf.Info): integer | nil, string | nil
   return total, nil
 end
 
+-- the pool's scratch directory: made by this call or not at all, and readable
+-- only by this process, because every request body and reply passes through it
+local function scratch_directory(): string | nil, string | nil
+  local base = os.getenv("XDG_RUNTIME_DIR") or os.getenv("TMPDIR") or "/tmp"
+  for _ = 1, 32 do
+    local made = os.tmpname()
+    os.remove(made)
+    local dir = base .. "/" .. (made:match("[^/]+$") as string)
+    if fs.mkdir(dir) then
+      -- 0700: fs.mkdir applies the umask, which leaves the directory readable
+      -- by every local user on a machine with no runtime directory
+      if not fs.chmod(dir, 448) then
+        fs.rmdir(dir)
+        return nil, "build: cannot restrict " .. dir
+      end
+      return dir, nil
+    end
+  end
+  return nil, "build: cannot make a scratch directory under " .. base
+end
+
 local function pool_build(
   endpoint: serve.Endpoint, count: integer, spawn: process.Spawn
 ): tltp.Server | nil, string | nil
@@ -1943,9 +1988,10 @@ local function pool_build(
     end
   end
 
-  local dir = os.tmpname()
-  os.remove(dir)
-  fs.mkdirAll(dir)
+  local dir, dir_line = scratch_directory()
+  if dir is nil then
+    return nil, dir_line as string
+  end
   for slot = 0, count - 1 do
     fs.mkdirAll(dir .. "/w" .. tostring(slot))
   end
@@ -2004,23 +2050,36 @@ function serve.pool_of(server: tltp.Server): serve.Pool | nil
   return {dir = state.dir, workers = workers}
 end
 
+-- gives every process, mapping and cache the server owns back, whether it runs
+-- the model itself or behind a pool
 function serve.stop(server: tltp.Server)
   local state = pools[server]
-  if state is nil then
-    return
+  if not (state is nil) then
+    pools[server] = nil
+    local watcher = state.watcher
+    if not (watcher is nil) then
+      watcher:close()
+    end
+    for _, worker in ipairs(state.workers) do
+      worker.child:kill()
+    end
+    for _, worker in ipairs(state.workers) do
+      worker.child:wait()
+    end
+    fs.rmdir(state.dir)
   end
-  pools[server] = nil
-  local watcher = state.watcher
-  if not (watcher is nil) then
-    watcher:close()
+
+  local model = models[server]
+  if not (model is nil) then
+    model.generation:close()
+    model.handle.release(model.handle)
+    compute.unload(model.backend)
   end
-  for _, worker in ipairs(state.workers) do
-    worker.child:kill()
-  end
-  for _, worker in ipairs(state.workers) do
-    worker.child:wait()
-  end
-  fs.rmdir(state.dir)
+  models[server] = nil
+  stores[server] = nil
+  turns[server] = nil
+  reservations[server] = nil
+  held[server] = nil
 end
 
 function serve.build(
@@ -2042,12 +2101,18 @@ function serve.build(
     end
   end
 
-  local handle, failure = weights.load(endpoint.path)
+  -- one walk of the metadata, shared by the weights and the vocabulary
+  local info, info_failure = gguf.read(endpoint.path)
+  if info is nil then
+    return nil, info_failure
+  end
+
+  local handle, failure = weights.load(endpoint.path, info)
   if handle is nil then
     return nil, failure
   end
 
-  local tokens, token_failure = tokenizer.load(endpoint.path)
+  local tokens, token_failure = tokenizer.load(endpoint.path, info)
   if tokens is nil then
     return nil, token_failure
   end

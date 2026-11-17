@@ -480,6 +480,68 @@ test.it(
 )
 
 test.it(
+  "a model that is closed refuses every call and closes once",
+  function()
+    local handle = loaded(t001_meta(), t001_entries())
+    local model = model_of(handle, 2)
+    close(forward(model, 0, 0), {1.4142136, 0, 1.4142136}, 1e-5)
+
+    model:close()
+    model:close()
+    test.includes(refused_forward(model, 1, 0), "closed")
+    test.includes(model:reserve("a", 2) as string, "closed")
+    test.includes(model:save("a", {}, "/tmp/never") as string, "closed")
+
+    local loaded_back, load_line = model:load("a", "/tmp/never")
+    test.equal(loaded_back, nil)
+    test.includes(load_line as string, "closed")
+
+    -- the same refusals on the three block handles, which a build holds too
+    local shape: compute.Geometry = {
+      heads = 1,
+      kv_heads = 1,
+      head_length = 2,
+      rope_dimensions = 2,
+      rope_base = 10000,
+      eps = 0,
+      positions = 2,
+      experts_used = 1,
+      linear_key_heads = 1,
+      linear_key_length = 2,
+      linear_value_heads = 1,
+      linear_value_length = 2,
+      linear_conv_kernel = 2,
+      cache_type = "f32",
+    }
+    local row = {{sequence = "", hidden = {1, 1}, position = 0}}
+    local attention = compute.attend(backend, handle, shape)
+      as compute.Attention
+    local feed = compute.feed_forward(backend, handle, shape)
+      as compute.FeedForward
+    local linear = compute.linear_attention(backend, handle, shape)
+      as compute.LinearAttention
+
+    attention:close()
+    attention:close()
+    feed:close()
+    feed:close()
+    linear:close()
+    linear:close()
+    local attended, attend_line = attention:block(row, "blk.0.")
+    test.equal(attended, nil)
+    test.includes(attend_line as string, "closed")
+    local blocked, block_line = feed:block(row, "blk.0.")
+    test.equal(blocked, nil)
+    test.includes(block_line as string, "closed")
+    local pressed, press_line = linear:block(row, "blk.0.")
+    test.equal(pressed, nil)
+    test.includes(press_line as string, "closed")
+
+    test.equal(handle.release(handle), nil)
+  end
+)
+
+test.it(
   "a token and a position that do not fit are refused",
   function()
     local short = model_of(loaded(t001_meta(), t001_entries()), 2)

@@ -70,6 +70,7 @@ local record compute
     ): {{number}} | nil, string | nil
     cache_bytes: function(Attention, string, string): integer | nil
     release: function(Attention, string)
+    close: function(Attention)
   end
 
   attend: function(
@@ -83,6 +84,7 @@ end
 - US-001 (P1) As the engine author, I want one block's attention for a token computed by ggml over the mapped weights, so that a block's attention half needs no maths of my own.
 - US-002 (P1) As the engine author, I want each block's keys and values kept from the tokens before it, so that the next token attends over everything it should and nothing it should not see.
 - US-003 (P2) As the engine author, I want a name, type, shape or position that does not fit back as one line, so that a wiring mistake is a return value and not a crash.
+- US-004 (P2) As the engine author, I want a handle's `close` to give its caches and its hold on the mapped file back, so that a mapping can be released and a closed handle cannot read it.
 
 ## Functional requirements
 
@@ -154,6 +156,14 @@ end
   THE SYSTEM SHALL return nil and one line naming `block`.
   Not testable: making that allocation fail needs a memory limit the suite cannot set portably; the
   branch returns nil and one line, which a reader confirms by inspection.
+- FR-014 (US-004) WHEN an attention handle's `close` is called, THE SYSTEM SHALL free every prefix's
+  cache it holds and give back the handle's hold on the weights mapping, so the weights file can be
+  released; a second `close` SHALL change nothing, and IF `block`, `cache_bytes`, `reserve`,
+  `snapshot` or `restore` is called after `close`, THEN THE SYSTEM SHALL return nil and one line
+  naming the operation and saying the attention is closed, `reserve` and `restore` returning that
+  line as their only value, `cache_bytes` returning nil, and `release` returning without doing
+  anything. `13`'s `FeedForward` and `14`'s `LinearAttention` carry the same `close` with the same
+  refusals, naming themselves.
 - FR-013 (US-003) IF more than one refusal applies to a block call, THEN THE SYSTEM SHALL report a
   missing tensor before a tensor of a type `block` does not read, a type fault before a shape that
   does not fit, a shape fault before a position that does not fit, and a cache type of `q8_0` or
@@ -240,6 +250,12 @@ Every case's geometry sets `cache_type` `f32`, so the numbers below stand as rec
   `{1,2,3,4}`: heads 0 and 1
   reading key/value head 0's value `{2,4}`, heads 2 and 3 reading key/value head 1's value
   `{6,8}`, where heads alternating between the key/value heads instead give `{1,2,1,2}`.
+
+- T-005 (FR-014): the case is `a model that is closed refuses every call and closes once`, which
+  also builds an `Attention`, a `FeedForward` and a `LinearAttention` handle over the same weights,
+  closes each twice, proves that one `block` per handle returns nil and one line holding `closed`
+  and that the weights handle then releases, so `13` and `14`'s copies of this contract are covered
+  once rather than by a case each.
 
 ## Open questions
 

@@ -84,6 +84,18 @@ local record Chosen
   path: string
 end
 
+local type Starter = function(
+  endpoint: serve.Endpoint, write_err: function(string), spawn?: process.Spawn
+): integer
+
+local record Settings
+  args: {string}
+  write_out: function(string)
+  write_err: function(string)
+  start: Starter | nil
+  environment: {string: string} | nil
+end
+
 local function chosen_model(
   command: string,
   models: {string: string},
@@ -91,18 +103,18 @@ local function chosen_model(
   path_word: boolean,
   write_err: function(string)
 ): Chosen | nil
-  if word is string then
-    if path_word then
-      if not config.has_file(word) then
-        write_err(
-          one_line(
-            command .. ": model path " .. word .. " is not a readable file"
-          )
+  if word is string and path_word then
+    if not config.has_file(word) then
+      write_err(
+        one_line(
+          command .. ": model path " .. word .. " is not a readable file"
         )
-        return nil
-      end
-      return {name = word, path = word}
+      )
+      return nil
     end
+    return {name = word, path = word}
+  end
+  if word is string then
     local configured = models[word]
     if configured is nil then
       write_err(one_line(command .. ": unknown model " .. word))
@@ -329,15 +341,12 @@ local function bench_code(
   )
 end
 
-function cli.run(
-  args: {string},
-  write_out: function(string),
-  write_err: function(string),
-  start?: (function(
-    endpoint: serve.Endpoint, write_err: function(string), spawn?: process.Spawn
-  ): integer),
-  environment?: {string: string}
-): integer
+function cli.run(settings: Settings): integer
+  local args = settings.args
+  local write_out = settings.write_out
+  local write_err = settings.write_err
+  local start = settings.start
+  local environment = settings.environment
   local parser = build()
   local ok, failure = parser:pparse(args)
   if not ok then

@@ -46,10 +46,23 @@ needs; positions that differ per section are a later spec, and the next spec's r
 model is what confirms the equivalence end to end.
 
 Refusals keep the shape `06` and `07` use: nil and one line, so a mistake in the next spec's wiring
-is a return value and the process stays up. `attach` allocates a small arena for tensor descriptors,
-and it refuses a backend `compute.load` did not return, because the library it needs is kept under
-that handle. Only the arena failure is not in `## Tests`, because making that allocation fail needs
-a memory limit the suite cannot set.
+is a return value and the process stays up. `attach` allocates an arena for tensor descriptors and a
+ggml context inside it, and it refuses a backend `compute.load` did not return, because the library
+it needs is kept under that handle. Both are given back with the last maths handle that reads them,
+and `close` is what drops that handle's hold on the mapping, so the weights file can be released.
+Only the arena failure is not in `## Tests`, because making that allocation fail needs a memory
+limit the suite cannot set.
+
+The arena each operation runs in is sized by a constant beside the operation, and a constant can be
+one tensor short. ggml answers a context with no room for one more tensor with NULL rather than
+placing a short one, and every later call in the same build would dereference that NULL, so the
+tensor request raises at once and the operation catches the raise around its build and returns it as
+one line. That covers the tensors an operation asks its context for by shape, `vector_of`,
+`scalar_of`, `host_tensor`, `matrix_of` and the linear block's `shapes`; a NULL an expression node
+returns, from `ggml_mul`, `ggml_mul_mat`, `ggml_rms_norm` and the rest, is ggml's own allocation and
+is not caught, so for those the constant remains the contract and `32`'s graph rework is where they
+are wrapped. `ggml_used_mem` cannot serve as this guard: it reports what ggml placed, and ggml never
+places past the buffer, so a comparison against the buffer's size can never fire.
 
 ```teal
 local weights = require("tllm.weights")
@@ -58,9 +71,7 @@ local record compute
   record Backend
     path: string
     version: string
-    matvec: function(
-      Backend, {{number}}, {number}
-    ): {number} | nil, string | nil
+    memory: function(Backend): integer | nil, integer | nil
   end
 
   record Maths
@@ -82,9 +93,10 @@ local record compute
     sigmoid_gate: function(
       Maths, {number}, {number}
     ): {number} | nil, string | nil
+    close: function(Maths)
   end
 
-  load: function(path?: string): Backend | nil, string | nil
+  load: function(path?: string, offload?: boolean): Backend | nil, string | nil
   attach: function(Backend, weights.Handle): Maths | nil, string | nil
 end
 ```
@@ -162,6 +174,19 @@ end
   shape or number that does not fit.
 - FR-015 (US-003) IF `compute.attach` is given a backend that `compute.load` did not return, THEN THE
   SYSTEM SHALL return nil and one line naming `attach`.
+- FR-016 (US-001) IF a tensor an operation asks its graph's context for by shape comes back NULL,
+  THEN THE SYSTEM SHALL stop that operation's build at that tensor and return nil and one line
+  naming the operation and the number of numbers the tensor asked for, so no later call in the same
+  build reads through the NULL; a NULL an expression node returns is not covered, that being `32`'s
+  graph rework.
+  Not testable: reaching the branch needs an operation whose constant is wrong, which the suite
+  would have to ship; a reader confirms the raise in `graph_tensor` and the `pcall` around the build
+  in `gathered` and `linear_press` in `src/compute.tl`.
+- FR-017 (US-001) WHEN a maths handle's `close` is called, THE SYSTEM SHALL give back its hold on the
+  weights handle, so that a handle whose last maths handle is closed can be released, and a second
+  `close` SHALL return without doing it again; IF an operation is called on a closed handle, THEN
+  THE SYSTEM SHALL return nil and one line naming the operation and saying the handle is closed,
+  so a closed handle can never read a released mapping.
 
 ## Non-goals
 
@@ -169,10 +194,9 @@ end
   and no layer name, head count or model family is known here.
 - No SSM operations, no M-RoPE section positions and no vision: conv1d, softplus, the delta-net
   scan, and positions that differ between rope sections are later specs.
-- No other type, no prefill batch, no release and no lifetime check: weights are f32, q8_0, q4_K
-  or q5_K, every operation takes one vector, and a maths handle reads the weights handle's mapping,
-  so it is used only while that handle stays mapped; releasing it first is the caller's mistake and
-  is not refused.
+- No other type and no prefill batch: weights are f32, q8_0, q4_K or q5_K and every operation takes
+  one vector. A maths handle reads the weights handle's mapping and `close` is the only lifetime
+  step it takes; `06` owns what `release` refuses while a handle is still held.
 
 ## Tests
 
@@ -217,6 +241,10 @@ end
   `rope({1,2,3,4}, -1, 4, 10000)`, `rope({1,2,3,4}, 0, 0, 10000)` and
   `rope({1,2,3,4}, 0, 4, 0)` returns nil and one line with no newline, and that the line
   `add({1}, {1,2})` returns holds `add`, `1` and `2`.
+- T-006 (FR-017): `releasing the model gives the device memory back`, proves that a weights handle
+  with a maths handle over it refuses `release` with one line while the maths handle lives, that
+  the same `release` after `close` returns nil and gives the device memory back, and that a second
+  `close` changes nothing.
 - T-005 (FR-015): `a backend compute.load did not return is refused`, proves that
   `compute.attach` given a backend built by hand returns nil and one line holding `attach`.
 

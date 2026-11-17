@@ -99,6 +99,7 @@ local record compute
       LinearAttention, {Row}, string
     ): {{number}} | nil, string | nil
     release: function(LinearAttention, string)
+    close: function(LinearAttention)
   end
 
   linear_attention: function(
@@ -106,6 +107,10 @@ local record compute
   ): LinearAttention | nil, string | nil
 end
 ```
+
+A `LinearAttention` handle's `close` frees the histories and states it holds and gives back its hold
+on the weights mapping, refusing every operation afterwards; `12/FR-014` states that contract and
+the refusal line.
 
 ## User stories
 
@@ -196,6 +201,12 @@ end
   history and state start as zeros, and a refused block call stores nothing: every refusal of
   FR-012 to FR-015 happens before those numbers are written. The history and state are kept under
   a sequence and a prefix, and are freed with that sequence as `26/FR-005` says.
+- FR-017 (US-002) THE SYSTEM SHALL size one block call's arena from the shapes that call builds in:
+  four state-sized tensors, being the host tensor the call hands ggml for the stored state, whose
+  own buffer ggml still allocates before the caller's pointer replaces it, the state it decays, the
+  product that corrects it and the state it writes, plus the convolution window, the heads'
+  vectors and the one-row tensors between them with room to spare, so that a block's arena follows
+  its geometry rather than a multiplier of it.
 - FR-011 (US-003) IF `compute.linear_attention` is given a backend that `compute.load`
   did not return, or a `geometry` missing any of the five numbers FR-001 names or
   holding `linear_key_heads`, `linear_key_length`, `linear_value_heads`,
@@ -251,8 +262,8 @@ end
 
 - No mixed stack, no embedding lookup, no 40-block pass, no sampling, no prompt and no
   serving: spec 15 runs the whole model and serves it.
-- No change to full attention, to the feed-forward tail or to `top_token`: `12` and `13`
-  stay as they are, and a stack that mixes both block kinds is spec 15's.
+- No change to full attention or to the feed-forward tail: `12` and `13` stay as they are,
+  and a stack that mixes both block kinds is spec 15's.
 - No batch, no M-RoPE positions, no vision, no expert cache and no reuse or release of a
   state: one token per call, and a `LinearAttention` handle keeps its states for its
   life.

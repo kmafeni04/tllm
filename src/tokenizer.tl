@@ -11,7 +11,7 @@ local record tokenizer
     encode: function(Tokenizer, string): {integer} | nil, string | nil
   end
 
-  load: function(path: string): Tokenizer | nil, string | nil
+  load: function(path: string, info?: gguf.Info): Tokenizer | nil, string | nil
 end
 
 local type Tokenizer = tokenizer.Tokenizer
@@ -79,14 +79,17 @@ local function printable(value: string): string
 end
 
 local function described(entry: gguf.Value): string
-  if entry.text ~= nil then
-    return printable(entry.text as string)
+  local entry_text = entry.text
+  if not (entry_text is nil) then
+    return printable(entry_text)
   end
-  if entry.scalar ~= nil then
-    return tostring(entry.scalar)
+  local entry_scalar = entry.scalar
+  if not (entry_scalar is nil) then
+    return tostring(entry_scalar)
   end
-  if entry.flag ~= nil then
-    return tostring(entry.flag)
+  local entry_flag = entry.flag
+  if not (entry_flag is nil) then
+    return tostring(entry_flag)
   end
   return entry.kind
 end
@@ -503,31 +506,145 @@ local function split_qwen35(codepoints: {integer}): {{integer}}
   return words
 end
 
-local function merged(symbols: {string}, ranks: {string: integer}): {string}
-  local current = symbols
-  while true do
-    local best = math.huge
-    local chosen: integer | nil = nil
-    for index = 1, #current - 1 do
-      local rank = ranks[current[index] .. " " .. current[index + 1]]
-      if not (rank is nil) and rank < best then
-        best = rank
-        chosen = index
-      end
-    end
-    if chosen is nil then
-      return current
-    end
-    local next_symbols: {string} = {}
-    for index = 1, chosen - 1 do
-      next_symbols[#next_symbols + 1] = current[index]
-    end
-    next_symbols[#next_symbols + 1] = current[chosen] .. current[chosen + 1]
-    for index = chosen + 2, #current do
-      next_symbols[#next_symbols + 1] = current[index]
-    end
-    current = next_symbols
+local record Candidate
+  rank: integer
+  at: integer
+  left_stamp: integer
+  right_stamp: integer
+end
+
+local function sooner(left: Candidate, right: Candidate): boolean
+  if left.rank ~= right.rank then
+    return left.rank < right.rank
   end
+  return left.at < right.at
+end
+
+local function offered(heap: {Candidate}, item: Candidate)
+  local at = #heap + 1
+  heap[at] = item
+  while at > 1 do
+    local parent = math.floor(at / 2)
+    if not sooner(heap[at], heap[parent]) then
+      break
+    end
+    heap[at], heap[parent] = heap[parent], heap[at]
+    at = parent
+  end
+end
+
+local function taken(heap: {Candidate}): Candidate | nil
+  local count = #heap
+  if count == 0 then
+    return nil
+  end
+  local top = heap[1]
+  heap[1] = heap[count]
+  heap[count] = nil
+  count = count - 1
+  local at = 1
+  while true do
+    local left = at * 2
+    local right = left + 1
+    local next_at = at
+    if left <= count and sooner(heap[left], heap[next_at]) then
+      next_at = left
+    end
+    if right <= count and sooner(heap[right], heap[next_at]) then
+      next_at = right
+    end
+    if next_at == at then
+      break
+    end
+    heap[at], heap[next_at] = heap[next_at], heap[at]
+    at = next_at
+  end
+  return top
+end
+
+-- the pairs still worth merging sit in a heap, so one word costs its merges
+-- times log of its length rather than a scan of the word per merge: a
+-- paragraph with no space, or a long identifier, is one word
+local function merged(symbols: {string}, ranks: {string: integer}): {string}
+  local count = #symbols
+  if count < 2 then
+    return symbols
+  end
+
+  local texts: {string} = {}
+  local nexts: {integer} = {}
+  local prevs: {integer} = {}
+  local stamps: {integer} = {}
+  local alive: {boolean} = {}
+  for index = 1, count do
+    texts[index] = symbols[index]
+    nexts[index] = index + 1
+    prevs[index] = index - 1
+    stamps[index] = 0
+    alive[index] = true
+  end
+
+  local heap: {Candidate} = {}
+  local function offered_pair(at: integer)
+    if at < 1 or not alive[at] then
+      return
+    end
+    local partner = nexts[at]
+    if partner > count or not alive[partner] then
+      return
+    end
+    local rank = ranks[texts[at] .. " " .. texts[partner]]
+    if rank is nil then
+      return
+    end
+    offered(
+      heap,
+      {
+        rank = rank as integer,
+        at = at,
+        left_stamp = stamps[at],
+        right_stamp = stamps[partner],
+      }
+    )
+  end
+  for index = 1, count - 1 do
+    offered_pair(index)
+  end
+
+  while true do
+    local item = taken(heap)
+    if item is nil then
+      break
+    end
+    local held = item as Candidate
+    local at = held.at
+    local partner = nexts[at]
+    local fresh = alive[at]
+      and partner <= count
+      and alive[partner]
+      and stamps[at] == held.left_stamp
+      and stamps[partner] == held.right_stamp
+    if fresh then
+      texts[at] = texts[at] .. texts[partner]
+      stamps[at] = stamps[at] + 1
+      alive[partner] = false
+      local after = nexts[partner]
+      nexts[at] = after
+      if after <= count then
+        prevs[after] = at
+      end
+      offered_pair(at)
+      offered_pair(prevs[at])
+    end
+  end
+
+  local kept: {string} = {}
+  local at = 1
+  while at <= count do
+    kept[#kept + 1] = texts[at]
+    at = nexts[at]
+  end
+  return kept
 end
 
 local function append_word(
@@ -591,10 +708,18 @@ local function encode_text(
   return ids, nil
 end
 
-function tokenizer.load(path: string): Tokenizer | nil, string | nil
-  local info, read_failure = gguf.read(path)
-  if info is nil then
-    return nil, read_failure
+function tokenizer.load(
+  path: string, given_info?: gguf.Info
+): Tokenizer | nil, string | nil
+  local info: gguf.Info
+  if given_info is nil then
+    local read, read_failure = gguf.read(path)
+    if read is nil then
+      return nil, read_failure
+    end
+    info = read
+  else
+    info = given_info
   end
 
   local model = info.metadata[MODEL_KEY]

@@ -280,16 +280,21 @@ end
 
 local function run(args: {string}, environment?: {string: string}): Result
   local result: Result = {code = 0, out = {}, err = {}}
+  local given_environment = environment
+  if given_environment is nil then
+    given_environment = empty_environment()
+  end
   result.code = cli.run(
-    args,
-    function(given: string)
-      result.out[#result.out + 1] = (given:gsub("\n$", ""))
-    end,
-    function(given: string)
-      result.err[#result.err + 1] = (given:gsub("\n$", ""))
-    end,
-    nil,
-    environment or empty_environment()
+    {
+      args = args,
+      write_out = function(given: string)
+        result.out[#result.out + 1] = (given:gsub("\n$", ""))
+      end,
+      write_err = function(given: string)
+        result.err[#result.err + 1] = (given:gsub("\n$", ""))
+      end,
+      environment = given_environment,
+    }
   )
   return result
 end

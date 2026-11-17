@@ -108,6 +108,9 @@ tests here use hand-made fixtures, because a 23 GB file cannot be a test input.
   the text of the file's `tokenizer.chat_template` entry when that entry is a string and to nil
   otherwise, refusing neither its absence nor its kind, so that `FR-008` is answered by `render`
   alone.
+- FR-012 (US-001) THE SYSTEM SHALL read and parse a template's text once and keep the tree under
+  that text, so that a request renders the same template without lexing or parsing it again, and
+  SHALL keep its refusal under that text too when the template cannot be read.
 - FR-011 (US-003) WHEN an expression is evaluated, THE SYSTEM SHALL make reachable only `messages`,
   `add_generation_prompt`, `tools` from the tool list `22/FR-001` binds, the name a `{% for %}` in
   scope binds, `loop`, the names `{% set %}` binds, macro names, `namespace(...)`,

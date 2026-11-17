@@ -38,8 +38,16 @@ local record generate
     compute.Model, tokenizer.Tokenizer, string, Options, sequence?: string
   ): Run | nil, string | nil
 
+  open_ids: function(
+    compute.Model, tokenizer.Tokenizer, {integer}, Options, sequence?: string
+  ): Run | nil, string | nil
+
   text: function(
     compute.Model, tokenizer.Tokenizer, string, Options, sequence?: string
+  ): Text | nil, string | nil
+
+  text_ids: function(
+    compute.Model, tokenizer.Tokenizer, {integer}, Options, sequence?: string
   ): Text | nil, string | nil
 end
 
@@ -447,10 +455,13 @@ local function ensure_reserved(
   return line
 end
 
-function generate.open(
+-- a caller that already encoded its prompt hands the ids in, so one turn pays
+-- for one encoding; the two entry points keep the text and the ids apart rather
+-- than taking both and trusting them to agree
+function generate.open_ids(
   model: compute.Model,
   tokens: tokenizer.Tokenizer,
-  prompt: string,
+  ids: {integer},
   options: Options,
   sequence?: string
 ): generate.Run | nil, string | nil
@@ -459,10 +470,6 @@ function generate.open(
     return nil, fault
   end
 
-  local ids, encode_line = tokens:encode(prompt)
-  if ids is nil then
-    return nil, encode_line
-  end
   if #ids == 0 then
     return nil, "generate: prompt holds no token ids"
   end
@@ -605,14 +612,34 @@ function generate.open(
   return run, nil
 end
 
-function generate.text(
+function generate.open(
   model: compute.Model,
   tokens: tokenizer.Tokenizer,
   prompt: string,
   options: Options,
   sequence?: string
+): generate.Run | nil, string | nil
+  local fault = faulted(options)
+  if not (fault is nil) then
+    return nil, fault
+  end
+  local ids, encode_line = tokens:encode(prompt)
+  if ids is nil then
+    return nil, encode_line
+  end
+  return generate.open_ids(model, tokens, ids, options, sequence)
+end
+
+function generate.text_ids(
+  model: compute.Model,
+  tokens: tokenizer.Tokenizer,
+  ids: {integer},
+  options: Options,
+  sequence?: string
 ): generate.Text | nil, string | nil
-  local run, open_line = generate.open(model, tokens, prompt, options, sequence)
+  local run, open_line = generate.open_ids(
+    model, tokens, ids, options, sequence
+  )
   if run is nil then
     return nil, open_line
   end
@@ -651,6 +678,24 @@ function generate.text(
 
   return {text = table.concat(pieces), sampled = run.produced, cut = run.cut},
     nil
+end
+
+function generate.text(
+  model: compute.Model,
+  tokens: tokenizer.Tokenizer,
+  prompt: string,
+  options: Options,
+  sequence?: string
+): generate.Text | nil, string | nil
+  local fault = faulted(options)
+  if not (fault is nil) then
+    return nil, fault
+  end
+  local ids, encode_line = tokens:encode(prompt)
+  if ids is nil then
+    return nil, encode_line
+  end
+  return generate.text_ids(model, tokens, ids, options, sequence)
 end
 
 return generate

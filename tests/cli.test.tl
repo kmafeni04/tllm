@@ -9,10 +9,12 @@ local function run_with(
   local out: {string} = {}
   local err: {string} = {}
   local code = cli.run(
-    args,
-    function(text: string) out[#out + 1] = text end,
-    function(text: string) err[#err + 1] = text end,
-    start
+    {
+      args = args,
+      write_out = function(text: string) out[#out + 1] = text end,
+      write_err = function(text: string) err[#err + 1] = text end,
+      start = start,
+    }
   )
   return code, out, err
 end
@@ -136,11 +138,13 @@ test.it(
     local environment = {XDG_CONFIG_HOME = base}
 
     local code = cli.run(
-      {"serve", "--host", "127.0.0.1", "--port", "9090"},
-      write_out,
-      write_err,
-      stub,
-      environment
+      {
+        args = {"serve", "--host", "127.0.0.1", "--port", "9090"},
+        write_out = write_out,
+        write_err = write_err,
+        start = stub,
+        environment = environment,
+      }
     )
 
     test.equal(code, 7)
@@ -152,7 +156,15 @@ test.it(
     test.equal(endpoint.name, "m")
     test.equal(received_err, write_err)
 
-    cli.run({"serve", "m"}, write_out, write_err, stub, environment)
+    cli.run(
+      {
+        args = {"serve", "m"},
+        write_out = write_out,
+        write_err = write_err,
+        start = stub,
+        environment = environment,
+      }
+    )
 
     endpoint = received as serve.Endpoint
     test.equal(endpoint.host, "127.0.0.1")

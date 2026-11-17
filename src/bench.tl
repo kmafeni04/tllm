@@ -95,7 +95,7 @@ local function driven(
   stream_fn: tltp.StreamFn,
   measure: compute.Measure,
   started: number
-): Report
+): Report | nil, string | nil
   local frames: {Frame} = {}
   local function emit(payload: string): string | nil, string | nil
     local at = clock.now()
@@ -127,8 +127,14 @@ local function driven(
     return nil, nil
   end
 
-  local thread = coroutine.create(stream_fn as function(...: any): any)
-  coroutine.resume(thread, emit)
+  local entry = stream_fn as function(tltp.EmitFn): boolean | nil
+  local thread = coroutine.create(entry)
+  -- a producer that raises never registers its turn, so nothing would be
+  -- measured and the zeros would read as a pass
+  local resumed, why = coroutine.resume(thread, emit)
+  if not resumed then
+    return nil, tostring(why)
+  end
   while serve.step(server) > 0 do
   end
   local ended = clock.now()
@@ -279,11 +285,11 @@ function bench.run(
         ran = ran + 1
         local lines: {string} | nil = nil
         local routing_path = settings.routing_path
+        if routing_path is string and not fs.write(routing_path, "") then
+          write_err(one_line("bench: cannot write " .. routing_path))
+          return 1
+        end
         if routing_path is string then
-          if not fs.write(routing_path, "") then
-            write_err(one_line("bench: cannot write " .. routing_path))
-            return 1
-          end
           lines = {}
           generation.routing_sink = function(record: compute.Routing)
             local held = lines
@@ -300,7 +306,7 @@ function bench.run(
           end
         end
 
-        local report = driven(
+        local report, report_line = driven(
           server, stream_fn as tltp.StreamFn, measure, started
         )
         generation.routing_sink = nil
@@ -312,7 +318,14 @@ function bench.run(
           end
           fs.write(routing_path as string, text)
         end
-        reported(length, report, write_out)
+        if report is nil then
+          write_err(
+            one_line("bench: " .. length .. ": " .. (report_line as string))
+          )
+          failed = true
+        else
+          reported(length, report, write_out)
+        end
       end
     end
   end

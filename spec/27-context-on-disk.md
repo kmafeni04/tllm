@@ -107,6 +107,9 @@ would pass the next position past the window it restored.
   fingerprint the engine takes over the model's tensor entries and their metadata, the numbers'
   cache type, the sequence's capacity and taken positions, each full-attention block's keys and
   values for those positions, and each linear block's history, state and count, and return nil.
+  The file is written block by block as the model goes, so the whole conversation's bytes are never
+  held twice, and it is written under a temporary name and renamed onto `path`, so a write that
+  fails leaves the file that was there and no partial one.
 - FR-004 (US-002) IF `save` is called for a sequence the model has not reserved, or a block of the
   run took other than its taken positions, or `ids` is not as many as those positions, THEN THE
   SYSTEM SHALL return one line naming `save` and the sequence and write no file.
@@ -140,7 +143,11 @@ would pass the next position past the window it restored.
   leaves one.
 - FR-009 (US-004) WHEN a file is named for a session id, THE SYSTEM SHALL place it directly in the
   context directory as that id's escaped text followed by `.context`, so that two different ids get
-  two different files whatever text the ids hold.
+  two different files whatever text the ids hold, except that an id whose escaped text is longer
+  than a file name allows SHALL be named by a digest of the id instead, so that a long id still
+  has a file and never a name the file system refuses; that digest SHALL be wide enough that two
+  ids a client chooses colliding needs more than one in 2^32, so two long conversations are two
+  files.
 - FR-010 (US-005) WHEN a conversation is saved to a file and loaded back from it, THE SYSTEM SHALL
   take no more than ten times the wall time `fs.write` takes for a string of that file's byte length
   and no more than ten times the wall time `fs.read` takes for one, each the shortest of five runs

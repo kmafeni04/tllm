@@ -92,6 +92,13 @@ non-goals that nothing is streamed. The record `serve` builds from the body is u
   event's data, THEN THE SYSTEM SHALL have `serve.step` end that turn without writing the
   `finish_reason` event or the `[DONE]` event; a streamed turn carrying a `session_id` whose step
   fails SHALL discard that conversation, so the next turn cannot answer from a half-read context.
+- FR-010 (US-002) IF a streamed turn held for a free sequence cannot be admitted when a sequence
+  frees, because no name is free or the run it needs cannot be opened, THEN THE SYSTEM SHALL end
+  that stream with the `finish_reason` event holding `error` and then the `[DONE]` event, so a
+  client waiting for an ending receives one.
+  Not testable: the branch needs the reservation or the run to fail for a turn `prepared` already
+  accepted, which no case can bring about without a model whose positions run out mid-turn; a
+  reader confirms `abandoned` in `src/serve.tl`.
 
 ## Non-goals
 

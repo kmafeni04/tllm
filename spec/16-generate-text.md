@@ -7,8 +7,8 @@
 `10` turns text into ids, `09` turns ids into text, and `15` turns a token id at a position into
 one score per vocabulary entry. Nothing joins the three: there is no way to hand the engine a
 prompt and get an answer back, so nothing in the project can be shown to anyone, and the chat route
-of the next spec has nothing to call. The sampler, too, does not exist anywhere: `compute` only
-has `top_token`, which reads the highest score and is not exported from the model.
+of the next spec has nothing to call. The sampler, too, does not exist anywhere: a model pass hands
+back one score per vocabulary entry and nothing turns those into a token.
 
 This spec adds one module, `tllm.generate`, whose first operation, `text(model, tokenizer, prompt,
 options)`, encodes the prompt, forwards every prompt id at its own position, samples the next token
@@ -52,6 +52,16 @@ local record generate
   text: function(
     compute.Model, tokenizer.Tokenizer, string, Options, sequence?: string
   ): Text | nil, string | nil
+
+  -- the same, for a caller that already holds the prompt's ids, so the text
+  -- and the ids never travel together and disagree
+  text_ids: function(
+    compute.Model,
+    tokenizer.Tokenizer,
+    {integer},
+    Options,
+    sequence?: string
+  ): Text | nil, string | nil
 end
 ```
 
@@ -76,6 +86,7 @@ a sample takes are worked out by hand from `15/T-001`'s scores.
 ## Functional requirements
 
 - FR-001 (US-001) WHEN `generate.text(model, tokenizer, prompt, options, sequence)` is called with options FR-009 accepts, THE SYSTEM SHALL take the optional sequence name, `""` when it is absent, and drive a run through its rows, returning a `Text` whose `text` is the text the run released, `tokenizer:decode` of each sampled id joined in the order it sampled them unless a stop string cut it, whose `sampled` is those ids in the order it appended them, whose `cut` is true when a stop string ended the run, nil as the second value, and holding no part of the prompt. Its tests build their models with `f32`, so the numbers and reply they record stand.
+- FR-010 (US-005) WHEN `generate.text_ids` or `generate.open_ids` is given a list of ids instead of a prompt, THE SYSTEM SHALL use that list as the prompt's ids, so a caller that encoded the prompt once pays for one encoding and never hands in text and ids that disagree; the prompt-taking `text` and `open` SHALL encode the prompt and delegate to them, with `FR-009`'s option checks running before the encode.
 - FR-002 (US-002) WHEN a call begins, THE SYSTEM SHALL take the prompt's ids from `tokenizer:encode(prompt)`, forward each id from the options' `start` on as a one-row pass at its position on the run's sequence, in list order, and take the first sampled token from the scores the last of those rows returns, `start` absent being 0, so a call may begin at a position the model has already reached.
 - FR-003 (US-002) WHEN a token is sampled that is neither the end id nor the last `max_tokens` allows and whose text completes no stop string, THE SYSTEM SHALL forward it as a one-row pass at the next position and sample the next token from the scores that row returns, a token whose text completed a stop string ending the run at its own position instead, so it is not forwarded.
 - FR-004 (US-003) WHEN `temperature` is absent or zero, THE SYSTEM SHALL take the sampled token as the id of the highest score, the lowest id among equal highest scores, that score being the one `30/FR-006`'s penalties leave.

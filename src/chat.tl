@@ -302,10 +302,7 @@ json_written = function(held: Val): string
     return tostring(held.num)
   end
   if kind == "boolean" then
-    if held.truth then
-      return "true"
-    end
-    return "false"
+    return held.truth and "true" or "false"
   end
   if kind == "list" then
     local pieces: {string} = {}
@@ -639,13 +636,11 @@ local function read_items(parser: Parser): Expr | nil, string | nil
       return nil, failure
     end
     held.parts[#held.parts + 1] = item
-    if take_sign(parser, ",") then
-      if take_sign(parser, "]") then
-        return held, nil
-      end
-    elseif take_sign(parser, "]") then
+    local comma = take_sign(parser, ",")
+    if take_sign(parser, "]") then
       return held, nil
-    else
+    end
+    if not comma then
       return nil, fault("a list is not closed")
     end
   end
@@ -732,13 +727,11 @@ local function read_arguments(parser: Parser): Arguments | nil, string | nil
     end
     args[#args + 1] = value
     labels[#labels + 1] = label
-    if take_sign(parser, ",") then
-      if take_sign(parser, ")") then
-        return {args = args, labels = labels}, nil
-      end
-    elseif take_sign(parser, ")") then
+    local comma = take_sign(parser, ",")
+    if take_sign(parser, ")") then
       return {args = args, labels = labels}, nil
-    else
+    end
+    if not comma then
       return nil, fault("a call is not closed")
     end
   end
@@ -1201,10 +1194,10 @@ local function read_macro(body: string): Macro | nil, string | nil
     for piece in (inner as string):gmatch("[^,]+") do
       local text = bare(piece)
       local name, default = text:match("^(%a[%w_]*)%s*=%s*(.+)$")
+      if name is nil and text:match("^%a[%w_]*$") == nil then
+        return nil, fault("a macro parameter holds an unusable name")
+      end
       if name is nil then
-        if text:match("^%a[%w_]*$") == nil then
-          return nil, fault("a macro parameter holds an unusable name")
-        end
         held.params[#held.params + 1] = text
       else
         local expression, failure = parse_source(bare(default as string))
@@ -1377,10 +1370,7 @@ local function written(held: Val): string
     return tostring(held.num)
   end
   if held.kind == "boolean" then
-    if held.truth then
-      return "true"
-    end
-    return "false"
+    return held.truth and "true" or "false"
   end
   if held.kind == "list" then
     local pieces: {string} = {}
@@ -2281,6 +2271,9 @@ walk_nodes = function(run: Runner, nodes: {Node}): string | nil
   return nil
 end
 
+local templates: {string: Block} = {}
+local template_failures: {string: string} = {}
+
 function chat.render(
   built: tokenizer.Tokenizer, messages: {Msg}, tools?: json.Value
 ): string | nil, string | nil
@@ -2308,18 +2301,33 @@ function chat.render(
     end
   end
 
-  local pieces, lex_failure = split_pieces(template as string)
-  if pieces is nil then
-    return nil, lex_failure
+  -- the template is a constant of the file, so its tree is lexed and parsed
+  -- once and read again for every request that renders it
+  local block = templates[template as string]
+  if block is nil then
+    local refused_template = template_failures[template as string]
+    if not (refused_template is nil) then
+      return nil, refused_template
+    end
+    local pieces, lex_failure = split_pieces(template as string)
+    if pieces is nil then
+      template_failures[template as string] = lex_failure as string
+      return nil, lex_failure
+    end
+
+    local walk: Cursor = {at = 1}
+    local stops: {string: boolean} = {}
+    local read, parse_failure = read_block(pieces as {Piece}, walk, stops)
+    if read is nil then
+      template_failures[template as string] = parse_failure as string
+      return nil, parse_failure
+    end
+    block = read
+    templates[template as string] = block
   end
 
-  local walk: Cursor = {at = 1}
-  local stops: {string: boolean} = {}
-  local block, parse_failure = read_block(pieces as {Piece}, walk, stops)
-  if block is nil then
-    return nil, parse_failure
-  end
-  local stop = block.stop
+  local held_block = block as Block
+  local stop = held_block.stop
   if not (stop is nil) then
     return nil, fault("tag '" .. tostring(stop.name) .. "' is out of place")
   end
@@ -2344,7 +2352,7 @@ function chat.render(
     broken = false,
     depth = 0,
   }
-  local failure = walk_nodes(run, block.nodes)
+  local failure = walk_nodes(run, held_block.nodes)
   if not (failure is nil) then
     return nil, failure
   end
