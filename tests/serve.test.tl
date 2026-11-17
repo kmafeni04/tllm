@@ -4,6 +4,7 @@ local test = require("lde-test")
 local process = require("process")
 local cli = require("tllm.cli")
 local compute = require("tllm.compute")
+local generate = require("tllm.generate")
 local ggml = require("tllm.ggml")
 local gguf = require("tllm.gguf")
 local serve = require("tllm.serve")
@@ -1141,7 +1142,7 @@ test.it(
     local seeded = answered(
       server,
       '{"messages":[{"role":"user","content":"a"}],"max_tokens":2,'
-        .. '"temperature":1,"seed":7,"session_id":"v"}'
+        .. '"temperature":1,"seed":2,"session_id":"v"}'
     )
     test.equal(seeded.usage.completion_tokens, 1)
     test.equal(held(server, "v").length, 2)
@@ -2612,5 +2613,101 @@ on_device(
     test.truthy(shown, why)
     test.truthy((shown as number) <= free)
     test.equal(calls, 0)
+  end
+)
+
+test.it(
+  "the route carries the narrowing options and refuses bad values",
+  function()
+    local server = build(meta_file(t001_meta(), t001_entries()), "m")
+
+    local function content(extra: string): string
+      local reply = answered(
+        server,
+        '{"messages":[{"role":"user","content":"a"}],"max_tokens":1'
+          .. extra
+          .. "}"
+      )
+      return reply.choices[1].message.content
+    end
+
+    test.equal(content(""), "a")
+    test.equal(content(',"temperature":1,"seed":1791'), "c")
+    test.equal(content(',"temperature":1,"seed":1791,"top_p":0.01'), "a")
+    test.equal(content(',"temperature":1,"seed":682'), "")
+    test.equal(content(',"temperature":1,"seed":682,"min_p":0.5'), "c")
+    test.equal(content(',"presence_penalty":2'), "c")
+    test.equal(content(',"repetition_penalty":2'), "c")
+
+    local function twin(extra: string): string
+      local reply = answered(
+        server,
+        '{"messages":[{"role":"user","content":"aa"}],"max_tokens":1'
+          .. extra
+          .. "}"
+      )
+      return reply.choices[1].message.content
+    end
+
+    test.equal(twin(',"frequency_penalty":1'), "c")
+    test.equal(twin(',"presence_penalty":2'), "c")
+
+    local cases: {{string, string}} = {
+      {"top_p", '"x"'},
+      {"min_p", '"x"'},
+      {"repetition_penalty", '"x"'},
+      {"top_p", "0"},
+      {"top_p", "1.5"},
+      {"min_p", "-1"},
+      {"min_p", "1.5"},
+      {"repetition_penalty", "0"},
+      {"presence_penalty", '"x"'},
+      {"frequency_penalty", '"x"'},
+    }
+    for _, entry in ipairs(cases) do
+      local body = body_with(entry[1], entry[2])
+      test.includes(rejected(server, body).error.message, entry[1], body)
+    end
+
+    local model = serve.model_of(server) as serve.Model
+    local refused_run, line = generate.open(
+      model.generation,
+      model.tokenizer,
+      "a",
+      {
+        max_tokens = 1,
+        seed = 0,
+        top_p = 0,
+      }
+    )
+    test.equal(refused_run, nil)
+    test.includes(line as string, "generate")
+    test.includes(line as string, "top_p")
+
+    refused_run, line = generate.open(
+      model.generation,
+      model.tokenizer,
+      "a",
+      {
+        max_tokens = 0,
+        seed = 0,
+        top_p = 0,
+      }
+    )
+    test.equal(refused_run, nil)
+    test.includes(line as string, "max_tokens")
+
+    refused_run, line = generate.open(
+      model.generation,
+      model.tokenizer,
+      "a\255",
+      {
+        max_tokens = 1,
+        seed = 0,
+        top_p = 0,
+      }
+    )
+    test.equal(refused_run, nil)
+    test.includes(line as string, "top_p")
   end
 )

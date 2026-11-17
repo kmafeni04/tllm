@@ -1,6 +1,6 @@
 # 30: Sampling that does not sort the vocabulary, and the options that narrow it
 
-**Status**: pending   **Depends on**: 16, 18, 23, 25, 26, 29
+**Status**: done   **Depends on**: 16, 18, 23, 25, 26, 29
 
 ## Problem & context
 
@@ -64,7 +64,7 @@ end
 
 The record `serve` builds from a body is unexported, so those five members join it in the code and
 no snippet gains a field: `18`'s wording about the members it ignores and the shape it refuses is
-what names them, and the amendments below carry it.
+what names them.
 
 `16`'s non-goal "No sampler beyond the three shapes above: no top-p, no repetition or presence
 penalty, no stop strings, and no bias or logit list" no longer holds: FR-004, FR-005 and FR-006 are
@@ -195,7 +195,7 @@ gives, and every other clause of every other spec's case stands.
   the first id of the increasing id order would threshold at 0.0054571, keep all four and draw
   `{2}` as T-002's rule does.
 - T-004 (FR-006): `the penalties steer off what the run already holds`, proves on the four-piece
-  fixture, every call greedy and taking one token, that the prompt `d` with no penalty samples
+  fixture, every call taking one token, that the prompt `d` with no penalty samples
   `{3}`; that with `repetition_penalty = 1.6` the prompt `d` and the prompt `dd` both sample `{2}`,
   the score divided once; that with `presence_penalty = 1` the prompts `d` and `dd` both sample
   `{3}`, the score lowered once; that with `frequency_penalty = 1` the prompt `d` samples `{3}` and
@@ -240,17 +240,4 @@ gives, and every other clause of every other spec's case stands.
 
 ## Amendments
 
-- `16/FR-004`: the highest score a greedy run takes is the highest score after `30/FR-006`'s
-  penalties.
-- `16/FR-005`: the candidates are the `top_k` highest-scoring ids ordered by descending score with
-  equal scores in increasing id order, or, when `top_k` is absent, every id of the vocabulary in
-  increasing id order, and the draw walks whichever order that is; the reply `16/T-002` records for
-  `{max_tokens = 1, seed = 1791, temperature = 1}` becomes `c`.
-- `16/FR-009`: its checks gain `30/FR-008`'s, run after the `start` check and before the prompt is
-  encoded.
-- `18/FR-005`: `top_p`, `min_p`, `repetition_penalty`, `presence_penalty` and `frequency_penalty`
-  leave the ignored members and are honoured as `30/FR-007` says.
-- `18/FR-006`: it passes those five members to the generation as well as `temperature`, `top_k` and
-  `seed`.
-- `18/FR-008`: its refusals gain `30/FR-008`'s, checked after the `session_id` check in the order
-  `30/FR-008` names them.
+- None.

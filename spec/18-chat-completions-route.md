@@ -110,10 +110,12 @@ end
   sum, and whose `prompt_tokens_details` is an object whose `cached_tokens` is the number of the
   prompt's ids the turn did not forward.
 - FR-005 (US-001) WHEN the body holds a member other than `messages`, `temperature`, `top_k`,
-  `max_tokens`, `seed`, `stream` and `session_id`, THE SYSTEM SHALL ignore it, and `stream` and
-  `session_id` are honoured rather than ignored.
-- FR-006 (US-003) WHEN the body holds `temperature`, `top_k` or `seed`, THE SYSTEM SHALL pass it to
-  the generation as given, an absent `temperature` leaving the sampler greedy and an absent `seed`
+  `max_tokens`, `seed`, `stream` and `session_id`, THE SYSTEM SHALL ignore it, and `stream`,
+  `session_id`, `top_p`, `min_p`, `repetition_penalty`, `presence_penalty` and
+  `frequency_penalty` are honoured rather than ignored, those five as `30/FR-007` says.
+- FR-006 (US-003) WHEN the body holds `temperature`, `top_k` or `seed`, or `top_p`, `min_p`,
+  `repetition_penalty`, `presence_penalty` or `frequency_penalty`, THE SYSTEM SHALL pass it to the
+  generation as given, an absent `temperature` leaving the sampler greedy and an absent `seed`
   being 0.
 - FR-007 (US-003) WHEN the body holds `max_tokens`, THE SYSTEM SHALL take it as the token budget,
   and 256 when it holds none, and the generation SHALL stop at that budget.
@@ -123,7 +125,9 @@ end
   below zero, or `top_k` is present and is not a whole number or is below one, or `max_tokens` is
   present and is not a whole number or is below one, or `seed` is present and is not a whole number,
   or `stream` is present and is not a boolean (that check coming after `seed`), or `session_id` is
-  present and is not a string (that check coming after `stream`), THEN THE SYSTEM
+  present and is not a string (that check coming after `stream`), or `30/FR-008` names a member
+  whose value it refuses (those checks coming after the `session_id` check, in the order
+  `30/FR-008` names them), THEN THE SYSTEM
   SHALL answer `BadRequest` with a body decoding to an object whose single member is
   `error`, an object whose `type` is `invalid_request_error` and whose `message` names the first
   fault in the order this requirement names them: `body`; `messages` and, for an entry, its position

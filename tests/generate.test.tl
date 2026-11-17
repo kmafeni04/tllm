@@ -256,6 +256,59 @@ local function t001_entries(): {Entry}
   )
 end
 
+local function with_meta(meta: {Meta}, entry: Meta): {Meta}
+  local result = without_meta(meta, entry.name)
+  result[#result + 1] = entry
+  return result
+end
+
+local function pieces_meta(pieces: {string}): {Meta}
+  local kinds: {integer} = {}
+  for index = 1, #pieces do
+    kinds[index] = 1
+  end
+  local meta = with_meta(t001_meta(), mstrings("tokenizer.ggml.tokens", pieces))
+  meta = with_meta(meta, mint_array("tokenizer.ggml.token_type", kinds))
+  return without_meta(meta, "tokenizer.ggml.eos_token_id")
+end
+
+local FOUR_PIECES: {string} = {"a", "b", "c", "d"}
+
+local function four_entries(output: {number}): {Entry}
+  return both(
+    full_block("blk.0."),
+    {
+      f32("token_embd.weight", {2, 4}, {1, 0, 1, 0, 1, 0, 1, 0}),
+      f32("output_norm.weight", {2}, ones(2)),
+      f32("output.weight", {2, 4}, output),
+    }
+  )
+end
+
+local function wide_pieces(): {string}
+  local pieces: {string} = {"a", "b", "c"}
+  for id = 3, 199999 do
+    pieces[#pieces + 1] = tostring(id)
+  end
+  return pieces
+end
+
+local function wide_entries(): {Entry}
+  local rows: {number} = {}
+  for _ = 1, 200000 do
+    rows[#rows + 1] = 1
+    rows[#rows + 1] = 0
+  end
+  return both(
+    full_block("blk.0."),
+    {
+      f32("token_embd.weight", {2, 200000}, rows),
+      f32("output_norm.weight", {2}, ones(2)),
+      f32("output.weight", {2, 200000}, rows),
+    }
+  )
+end
+
 -- the numbers below are the CPU backend's, so these stay on the CPU
 local backend = compute.load(nil, false) as compute.Backend
 
@@ -371,7 +424,7 @@ test.it(
       }
     )
     test.equal(line, nil)
-    test.equal((answer as generate.Text).text, "b")
+    test.equal((answer as generate.Text).text, "c")
 
     answer, line = generate.text(
       fresh(handle, 4),
@@ -737,5 +790,285 @@ test.it(
     )
     test.equal(refused, nil)
     test.includes(refused_line as string, "prompt")
+  end
+)
+
+local function picked(
+  handle: weights.Handle,
+  tokens: tokenizer.Tokenizer,
+  prompt: string,
+  options: generate.Options
+): {integer}
+  local answer, line = generate.text(fresh(handle, 4), tokens, prompt, options)
+  test.equal(line, nil)
+  return (answer as generate.Text).sampled
+end
+
+test.it(
+  "a wide row is sampled without ordering it",
+  function()
+    local handle = loaded(pieces_meta(wide_pieces()), wide_entries())
+    local tokens = tokens_of(handle)
+
+    local narrow = fresh(handle, 2)
+    local answer, line = generate.text(
+      narrow,
+      tokens,
+      "a",
+      {
+        max_tokens = 1,
+        seed = 0,
+        temperature = 1,
+        top_k = 40,
+      }
+    )
+    test.equal(line, nil)
+    test.deepEqual((answer as generate.Text).sampled, {9})
+    test.truthy(narrow.measure.sampling < 0.05)
+
+    local wide = fresh(handle, 2)
+    answer, line = generate.text(
+      wide,
+      tokens,
+      "a",
+      {
+        max_tokens = 1,
+        seed = 0,
+        temperature = 1,
+      }
+    )
+    test.equal(line, nil)
+    test.deepEqual((answer as generate.Text).sampled, {47213})
+    test.truthy(wide.measure.sampling < 0.10)
+  end
+)
+
+test.it(
+  "a run with no top_k walks the ids in order",
+  function()
+    local handle = loaded(
+      pieces_meta(FOUR_PIECES), four_entries({0, 0, 1, 0, 2, 0, 3, 0})
+    )
+    local tokens = tokens_of(handle)
+
+    test.deepEqual(
+      picked(
+        handle,
+        tokens,
+        "a",
+        {
+          max_tokens = 1,
+          seed = 2178,
+          temperature = 1,
+        }
+      ),
+      {2}
+    )
+    test.deepEqual(
+      picked(
+        handle,
+        tokens,
+        "a",
+        {
+          max_tokens = 1,
+          seed = 1946,
+          temperature = 1,
+        }
+      ),
+      {3}
+    )
+  end
+)
+
+test.it(
+  "top-p and min-p narrow the candidates",
+  function()
+    local handle = loaded(
+      pieces_meta(FOUR_PIECES), four_entries({0, 0, 1, 0, 2, 0, 3, 0})
+    )
+    local tokens = tokens_of(handle)
+
+    local function drew(options: generate.Options): {integer}
+      return picked(handle, tokens, "a", options)
+    end
+
+    test.deepEqual(
+      drew(
+        {
+          max_tokens = 1,
+          seed = 1946,
+          temperature = 1,
+          top_k = 4,
+        }
+      ),
+      {0}
+    )
+    test.deepEqual(
+      drew(
+        {
+          max_tokens = 1,
+          seed = 1946,
+          temperature = 1,
+          top_k = 4,
+          top_p = 0.8,
+        }
+      ),
+      {2}
+    )
+    test.deepEqual(
+      drew(
+        {
+          max_tokens = 1,
+          seed = 1946,
+          temperature = 1,
+          top_k = 4,
+          top_p = 0.01,
+        }
+      ),
+      {3}
+    )
+    test.deepEqual(
+      drew(
+        {
+          max_tokens = 1,
+          seed = 1791,
+          temperature = 1,
+          top_p = 0.8,
+        }
+      ),
+      {2}
+    )
+    test.deepEqual(
+      drew(
+        {
+          max_tokens = 1,
+          seed = 1791,
+          temperature = 1,
+        }
+      ),
+      {3}
+    )
+    test.deepEqual(
+      drew(
+        {
+          max_tokens = 1,
+          seed = 1868,
+          temperature = 1,
+          top_k = 4,
+          min_p = 0.1,
+        }
+      ),
+      {2}
+    )
+    test.deepEqual(
+      drew(
+        {
+          max_tokens = 1,
+          seed = 1868,
+          temperature = 1,
+          top_k = 4,
+        }
+      ),
+      {1}
+    )
+    test.deepEqual(
+      drew(
+        {
+          max_tokens = 1,
+          seed = 1946,
+          temperature = 1,
+          top_k = 4,
+          min_p = 1,
+        }
+      ),
+      {3}
+    )
+    test.deepEqual(
+      drew(
+        {
+          max_tokens = 1,
+          seed = 2178,
+          temperature = 1,
+          min_p = 0.5,
+        }
+      ),
+      {3}
+    )
+  end
+)
+
+test.it(
+  "the penalties steer off what the run already holds",
+  function()
+    local handle = loaded(
+      pieces_meta(FOUR_PIECES), four_entries({0, 0, 1, 0, 2, 0, 3, 0})
+    )
+    local tokens = tokens_of(handle)
+    local negative = loaded(
+      pieces_meta(FOUR_PIECES), four_entries({-1, 0, -2, 0, -4, 0, -8, 0})
+    )
+    local negative_tokens = tokens_of(negative)
+
+    local function drew(prompt: string, options: generate.Options): {integer}
+      return picked(handle, tokens, prompt, options)
+    end
+
+    test.deepEqual(drew("d", {max_tokens = 1, seed = 0}), {3})
+    test.deepEqual(
+      drew("d", {max_tokens = 1, seed = 0, repetition_penalty = 1.6}), {2}
+    )
+    test.deepEqual(
+      drew("dd", {max_tokens = 1, seed = 0, repetition_penalty = 1.6}), {2}
+    )
+    test.deepEqual(
+      drew("d", {max_tokens = 1, seed = 0, presence_penalty = 1}), {3}
+    )
+    test.deepEqual(
+      drew("dd", {max_tokens = 1, seed = 0, presence_penalty = 1}), {3}
+    )
+    test.deepEqual(
+      drew("d", {max_tokens = 1, seed = 0, frequency_penalty = 1}), {3}
+    )
+    test.deepEqual(
+      drew("dd", {max_tokens = 1, seed = 0, frequency_penalty = 1}), {2}
+    )
+    test.deepEqual(
+      drew(
+        "d",
+        {
+          max_tokens = 1,
+          seed = 1791,
+          temperature = 1,
+          top_k = 2,
+          presence_penalty = 5,
+        }
+      ),
+      {1}
+    )
+    test.deepEqual(
+      drew(
+        "d",
+        {
+          max_tokens = 1,
+          seed = 0,
+          repetition_penalty = 0.5,
+          presence_penalty = 3,
+        }
+      ),
+      {3}
+    )
+    test.deepEqual(
+      picked(
+        negative,
+        negative_tokens,
+        "a",
+        {
+          max_tokens = 1,
+          seed = 0,
+          repetition_penalty = 4,
+        }
+      ),
+      {1}
+    )
   end
 )

@@ -154,8 +154,8 @@ start: integer | nil
   body whose single message content is 130 copies of `a` with `"max_tokens":2` and `"session_id":"w"`
   answers `OK` and leaves that conversation's model with 260 positions, twice its need of 131 being
   past the file's 260; that the body `{"messages":[{"role":"user","content":"a"}],"max_tokens":2,
-  "temperature":1,"seed":7,"session_id":"v"}` answers `OK` with `completion_tokens` 1 and leaves `v`
-  2 ids long, the first draw 0.2387808 taking id 0 and the second 0.9134933 taking the end id 1, so
+  "temperature":1,"seed":2,"session_id":"v"}` answers `OK` with `completion_tokens` 1 and leaves `v`
+  2 ids long, the first draw 0.2368431 taking id 0 and the second 0.4599744 taking the end id 1, so
   the one sampled id was forwarded and is stored where a budget stop would have dropped it; and that
   the body `{"messages":[{"role":"user","content":"a"},{"role":"assistant","content":"a"},
   {"role":"user","content":"a"}],"max_tokens":2,"session_id":"v"}` then answers `OK` with

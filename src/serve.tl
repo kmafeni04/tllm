@@ -84,6 +84,11 @@ local record Request
   messages: {chat.Message}
   temperature: number | nil
   top_k: integer | nil
+  top_p: number | nil
+  min_p: number | nil
+  repetition_penalty: number | nil
+  presence_penalty: number | nil
+  frequency_penalty: number | nil
   max_tokens: integer
   seed: integer
   stream: boolean
@@ -382,10 +387,69 @@ local function request_of(body: string): Request | nil, string | nil
     session_id = session_value as string
   end
 
+  local top_p: number | nil = nil
+  local top_p_value = fields.top_p
+  if not (top_p_value is nil) then
+    if not (top_p_value is number) then
+      return nil, "top_p: not a number"
+    end
+    if top_p_value <= 0 or top_p_value > 1 then
+      return nil, "top_p: not above zero and at most one"
+    end
+    top_p = top_p_value
+  end
+
+  local min_p: number | nil = nil
+  local min_p_value = fields.min_p
+  if not (min_p_value is nil) then
+    if not (min_p_value is number) then
+      return nil, "min_p: not a number"
+    end
+    if min_p_value < 0 or min_p_value > 1 then
+      return nil, "min_p: not between zero and one"
+    end
+    min_p = min_p_value
+  end
+
+  local repetition_penalty: number | nil = nil
+  local repetition_value = fields.repetition_penalty
+  if not (repetition_value is nil) then
+    if not (repetition_value is number) then
+      return nil, "repetition_penalty: not a number"
+    end
+    if repetition_value <= 0 then
+      return nil, "repetition_penalty: not above zero"
+    end
+    repetition_penalty = repetition_value
+  end
+
+  local presence_penalty: number | nil = nil
+  local presence_value = fields.presence_penalty
+  if not (presence_value is nil) then
+    if not (presence_value is number) then
+      return nil, "presence_penalty: not a number"
+    end
+    presence_penalty = presence_value
+  end
+
+  local frequency_penalty: number | nil = nil
+  local frequency_value = fields.frequency_penalty
+  if not (frequency_value is nil) then
+    if not (frequency_value is number) then
+      return nil, "frequency_penalty: not a number"
+    end
+    frequency_penalty = frequency_value
+  end
+
   return {
     messages = messages,
     temperature = temperature,
     top_k = top_k,
+    top_p = top_p,
+    min_p = min_p,
+    repetition_penalty = repetition_penalty,
+    presence_penalty = presence_penalty,
+    frequency_penalty = frequency_penalty,
     max_tokens = budget,
     seed = seed,
     stream = stream,
@@ -888,6 +952,11 @@ local function options_of(ready: Prepared): generate.Options
     seed = request.seed,
     temperature = request.temperature,
     top_k = request.top_k,
+    top_p = request.top_p,
+    min_p = request.min_p,
+    repetition_penalty = request.repetition_penalty,
+    presence_penalty = request.presence_penalty,
+    frequency_penalty = request.frequency_penalty,
     start = ready.cached,
   }
 end

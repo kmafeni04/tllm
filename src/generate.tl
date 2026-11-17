@@ -8,6 +8,11 @@ local record generate
     seed: integer
     temperature: number | nil
     top_k: integer | nil
+    top_p: number | nil
+    min_p: number | nil
+    repetition_penalty: number | nil
+    presence_penalty: number | nil
+    frequency_penalty: number | nil
     end_id: integer | nil
     start: integer | nil
   end
@@ -53,6 +58,7 @@ local record Progress
   end_id: integer | nil
   max_tokens: integer
   options: Options
+  held: {integer: integer}
   stream: Stream
   position: integer
   index: integer
@@ -76,62 +82,250 @@ local function greediest(scores: {number}): integer
   return best - 1
 end
 
-local function by_score(scores: {number}): {integer}
-  local order: {integer} = {}
+-- the penalties move a score once for each time the run holds its id
+local function penalised(
+  scores: {number}, options: Options, held: {integer: integer}
+): {number}
+  local repetition = options.repetition_penalty
+  local presence = options.presence_penalty
+  local frequency = options.frequency_penalty
+  if repetition is nil and presence is nil and frequency is nil then
+    return scores
+  end
+  local values: {number} = {}
   for index = 1, #scores do
-    order[index] = index
+    local value = scores[index]
+    local count = held[index - 1] or 0
+    if count > 0 then
+      if not (repetition is nil) then
+        if value > 0 then
+          value = value / repetition
+        elseif value < 0 then
+          value = value * repetition
+        end
+      end
+      if not (presence is nil) then
+        value = value - presence
+      end
+      if not (frequency is nil) then
+        value = value - frequency * count
+      end
+    end
+    values[index] = value
+  end
+  return values
+end
+
+-- higher score first, the lower id among equal scores
+local function outranks(
+  values: {number}, first: integer, second: integer
+): boolean
+  local left = values[first + 1]
+  local right = values[second + 1]
+  if left ~= right then
+    return left > right
+  end
+  return first < second
+end
+
+local function sifted(
+  values: {number}, heap: {integer}, root: integer, size: integer
+)
+  while true do
+    local child = root * 2
+    if child > size then
+      return
+    end
+    if child + 1 <= size and outranks(values, heap[child], heap[child + 1]) then
+      child = child + 1
+    end
+    if not outranks(values, heap[root], heap[child]) then
+      return
+    end
+    heap[root], heap[child] = heap[child], heap[root]
+    root = child
+  end
+end
+
+local function raised(values: {number}, heap: {integer}, size: integer)
+  local at = size
+  while at > 1 do
+    local parent = math.floor(at / 2)
+    if not outranks(values, heap[parent], heap[at]) then
+      return
+    end
+    heap[parent], heap[at] = heap[at], heap[parent]
+    at = parent
+  end
+end
+
+-- the count best ids in descending order, the wide row walked once and
+-- never ordered
+local function selected(values: {number}, count: integer): {integer}
+  local heap: {integer} = {}
+  local held = 0
+  for index = 1, #values do
+    local id = index - 1
+    if held < count then
+      held = held + 1
+      heap[held] = id
+      raised(values, heap, held)
+    elseif outranks(values, id, heap[1]) then
+      heap[1] = id
+      sifted(values, heap, 1, held)
+    end
+  end
+  table.sort(
+    heap,
+    function(left: integer, right: integer): boolean
+      return outranks(values, left, right)
+    end
+  )
+  return heap
+end
+
+local function ordered(values: {number}): {integer}
+  local order: {integer} = {}
+  for index = 1, #values do
+    order[index] = index - 1
   end
   table.sort(
     order,
     function(left: integer, right: integer): boolean
-      local first = scores[left]
-      local second = scores[right]
-      if first ~= second then
-        return first > second
-      end
-      return left < right
+      return outranks(values, left, right)
     end
   )
   return order
 end
 
-local function sampled(
-  scores: {number}, options: Options, stream: Stream
+-- three walks of the row and one draw, the ids in increasing order
+local function across(
+  values: {number}, temperature: number, stream: Stream
 ): integer
-  local temperature = options.temperature as number
-  local order = by_score(scores)
-  local count = #order
-  local top_k = options.top_k
-  if not (top_k is nil) and top_k < count then
-    count = top_k
+  local count = #values
+  local top = values[1]
+  for index = 2, count do
+    if values[index] > top then
+      top = values[index]
+    end
   end
-  local top = scores[order[1]]
-  local weights: {number} = {}
   local total: number = 0
-  for place = 1, count do
-    local weight = math.exp((scores[order[place]] - top) / temperature)
-    weights[place] = weight
-    total = total + weight
+  for index = 1, count do
+    total = total + math.exp((values[index] - top) / temperature)
   end
   local draw = drawn(stream)
   local running: number = 0
-  for place = 1, count do
-    running = running + weights[place] / total
+  for index = 1, count do
+    running = running + math.exp((values[index] - top) / temperature) / total
     if running > draw then
-      return order[place] - 1
+      return index - 1
     end
   end
-  return order[count] - 1
+  return count - 1
+end
+
+local function narrowed(
+  values: {number}, options: Options, temperature: number, stream: Stream
+): integer
+  local top_k = options.top_k
+  local top_p = options.top_p
+  local min_p = options.min_p
+  local order: {integer}
+  local top: number
+  if not (top_k is nil) then
+    local size = top_k
+    if size > #values then
+      size = #values
+    end
+    order = selected(values, size)
+    top = values[order[1] + 1]
+  elseif not (top_p is nil) then
+    order = ordered(values)
+    top = values[order[1] + 1]
+  else
+    order = {}
+    for index = 1, #values do
+      order[index] = index - 1
+    end
+    top = values[1]
+    for index = 2, #values do
+      if values[index] > top then
+        top = values[index]
+      end
+    end
+  end
+
+  local count = #order
+  local weights: {number} = {}
+  for index = 1, count do
+    weights[index] = math.exp((values[order[index] + 1] - top) / temperature)
+  end
+
+  if not (top_p is nil) then
+    local total: number = 0
+    for index = 1, count do
+      total = total + weights[index]
+    end
+    local running: number = 0
+    for index = 1, count do
+      running = running + weights[index] / total
+      if running >= top_p then
+        count = index
+        break
+      end
+    end
+  end
+
+  if not (min_p is nil) then
+    local highest = weights[1]
+    for index = 2, count do
+      if weights[index] > highest then
+        highest = weights[index]
+      end
+    end
+    local threshold = min_p * highest
+    local kept = 0
+    for index = 1, count do
+      local weight = weights[index]
+      if weight >= threshold then
+        kept = kept + 1
+        order[kept] = order[index]
+        weights[kept] = weight
+      end
+    end
+    count = kept
+  end
+
+  local total: number = 0
+  for index = 1, count do
+    total = total + weights[index]
+  end
+  local draw = drawn(stream)
+  local running: number = 0
+  for index = 1, count do
+    running = running + weights[index] / total
+    if running > draw then
+      return order[index]
+    end
+  end
+  return order[count]
 end
 
 local function chosen(
-  scores: {number}, options: Options, stream: Stream
+  scores: {number}, options: Options, held: {integer: integer}, stream: Stream
 ): integer
+  local values = penalised(scores, options, held)
   local temperature = options.temperature
   if temperature is nil or temperature == 0 then
-    return greediest(scores)
+    return greediest(values)
   end
-  return sampled(scores, options, stream)
+  local top_k = options.top_k
+  local top_p = options.top_p
+  local min_p = options.min_p
+  if top_k is nil and top_p is nil and min_p is nil then
+    return across(values, temperature, stream)
+  end
+  return narrowed(values, options, temperature, stream)
 end
 
 local function faulted(options: Options): string | nil
@@ -151,6 +345,24 @@ local function faulted(options: Options): string | nil
   local start = options.start
   if not (start is nil) and start < 0 then
     return "generate: start " .. tostring(start) .. " is below zero"
+  end
+  local top_p = options.top_p
+  if not (top_p is nil) and (top_p <= 0 or top_p > 1) then
+    return "generate: top_p "
+      .. tostring(top_p)
+      .. " is not above zero and at most one"
+  end
+  local min_p = options.min_p
+  if not (min_p is nil) and (min_p < 0 or min_p > 1) then
+    return "generate: min_p "
+      .. tostring(min_p)
+      .. " is not between zero and one"
+  end
+  local repetition = options.repetition_penalty
+  if not (repetition is nil) and repetition <= 0 then
+    return "generate: repetition_penalty "
+      .. tostring(repetition)
+      .. " is not above zero"
   end
   return nil
 end
@@ -204,6 +416,12 @@ function generate.open(
     end_id = tokens.end_id
   end
 
+  local held: {integer: integer} = {}
+  for index = start + 1, #ids do
+    local id = ids[index]
+    held[id] = (held[id] or 0) + 1
+  end
+
   local progress: Progress = {
     model = model,
     tokens = tokens,
@@ -212,6 +430,7 @@ function generate.open(
     end_id = end_id,
     max_tokens = options.max_tokens,
     options = options,
+    held = held,
     stream = {state = options.seed % STATE_MODULUS},
     position = start,
     index = start + 1,
@@ -262,7 +481,9 @@ function generate.open(
     end
 
     local started = clock.now()
-    local token_id = chosen(scores, progress.options, progress.stream)
+    local token_id = chosen(
+      scores, progress.options, progress.held, progress.stream
+    )
     local ended = clock.now()
     local measure = progress.model.measure
     measure.sampling = measure.sampling + (ended - started)
@@ -273,6 +494,7 @@ function generate.open(
     end
 
     produced[#produced + 1] = token_id
+    progress.held[token_id] = (progress.held[token_id] or 0) + 1
     local piece, piece_line = progress.tokens:decode({token_id})
     if piece is nil then
       self.done = true
