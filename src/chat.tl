@@ -774,10 +774,10 @@ local function read_postfix(parser: Parser): Expr | nil, string | nil
         call.labels = arguments.labels
         node = call
       else
-        local field = new_expr("field")
-        field.left = node
-        field.text = held.text
-        node = field
+        local access = new_expr("field")
+        access.left = node
+        access.text = held.text
+        node = access
       end
     elseif atom.text == "[" then
       parser.mark = parser.mark + 1
@@ -1417,15 +1417,15 @@ local function slice_spots(
       return nil, "a slice step must be a whole number other than zero"
     end
   end
-  local from: integer | nil = nil
+  local start: integer | nil = nil
   local to: integer | nil = nil
   if not (low is nil) then
     if low.kind ~= "number" then
       return nil, "a slice bound must be a number"
     end
-    from = math.floor(low.num)
-    if from < 0 then
-      from = size + from
+    start = math.floor(low.num)
+    if start < 0 then
+      start = size + start
     end
   end
   if not (high is nil) then
@@ -1439,7 +1439,7 @@ local function slice_spots(
   end
   local spots: {integer} = {}
   if step > 0 then
-    local walk = from or 0
+    local walk = start or 0
     if walk < 0 then
       walk = 0
     end
@@ -1452,7 +1452,7 @@ local function slice_spots(
       walk = walk + step
     end
   else
-    local walk = (from or (size - 1))
+    local walk = (start or (size - 1))
     if walk >= size then
       walk = size - 1
     end
@@ -1703,20 +1703,20 @@ local function trim_marks(
   text: string, marks: {string}, front: boolean, back: boolean
 ): string
   local held = letters(text)
-  local from = 1
-  local to = #held
+  local first = 1
+  local last = #held
   if front then
-    while from <= to and holds(held[from], marks) do
-      from = from + 1
+    while first <= last and holds(held[first], marks) do
+      first = first + 1
     end
   end
   if back then
-    while to >= from and holds(held[to], marks) do
-      to = to - 1
+    while last >= first and holds(held[last], marks) do
+      last = last - 1
     end
   end
   local picked: {string} = {}
-  for index = from, to do
+  for index = first, last do
     picked[#picked + 1] = held[index]
   end
   return table.concat(picked)

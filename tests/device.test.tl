@@ -1,12 +1,15 @@
-local ffi = require("ffi")
 local fs = require("fs")
 local test = require("lde-test")
+local support = require("tests.support")
 local compute = require("tllm.compute")
 local weights = require("tllm.weights")
-
-local function first_row(hidden: {number}, position: integer): {compute.Row}
-  return {{sequence = "", hidden = hidden, position = position}}
-end
+local type Entry = support.Entry
+local FLOAT_BYTES: integer = support.FLOAT_BYTES
+local type Meta = support.Meta
+local u32, u64, text, padded =
+  support.u32, support.u64, support.text, support.padded
+local f32, mint, mfloat = support.f32, support.mint, support.mfloat
+local mtext, both, first_row = support.mtext, support.both, support.first_row
 
 local function only(
   output: {{number}} | nil, line: string | nil
@@ -22,63 +25,6 @@ os.remove(ROOT)
 fs.mkdirAll(ROOT)
 
 test.afterAll(function() fs.rmdir(ROOT) end)
-
-local type Floats = {integer: number}
-
-local FLOAT_BYTES: integer = 4
-
-local function u32(value: integer): string
-  return string.char(
-    value % 256,
-    math.floor(value / 256) % 256,
-    math.floor(value / 65536) % 256,
-    math.floor(value / 16777216) % 256
-  )
-end
-
-local function u64(value: integer): string
-  local parts: {string} = {}
-  local rest = value
-  for _ = 1, 8 do
-    parts[#parts + 1] = string.char(rest % 256)
-    rest = math.floor(rest / 256)
-  end
-  return table.concat(parts)
-end
-
-local function text(bytes: string): string
-  return u64(#bytes) .. bytes
-end
-
-local function floats(values: {number}): string
-  local parts: {string} = {}
-  local cell = ffi.new("float[1]") as Floats
-  for _, value in ipairs(values) do
-    cell[0] = value
-    parts[#parts + 1] = ffi.string(cell as ffi.CData, FLOAT_BYTES)
-  end
-  return table.concat(parts)
-end
-
-local record Entry
-  name: string
-  dims: {integer}
-  code: integer
-  bytes: string
-end
-
-local record Meta
-  name: string
-  code: integer
-  bytes: string
-end
-
-local function padded(prefix: string, alignment: integer): string
-  if #prefix % alignment == 0 then
-    return prefix
-  end
-  return prefix .. string.rep("\0", alignment - #prefix % alignment)
-end
 
 local written = 0
 
@@ -107,22 +53,6 @@ local function fixture(meta: {Meta}, entries: {Entry}): string
   local location = ROOT .. "/device" .. written .. ".gguf"
   fs.write(location, padded(head, 32) .. table.concat(body))
   return location
-end
-
-local function f32(name: string, dims: {integer}, values: {number}): Entry
-  return {name = name, dims = dims, code = 0, bytes = floats(values)}
-end
-
-local function mint(name: string, value: integer): Meta
-  return {name = name, code = 4, bytes = u32(value)}
-end
-
-local function mfloat(name: string, value: number): Meta
-  return {name = name, code = 6, bytes = floats({value})}
-end
-
-local function mtext(name: string, value: string): Meta
-  return {name = name, code = 8, bytes = text(value)}
 end
 
 -- deterministic numbers that do not line up with each other, so a dot product
@@ -237,17 +167,6 @@ local function feed_forward_entries(prefix: string): {Entry}
   }
 end
 
-local function both(first: {Entry}, second: {Entry}): {Entry}
-  local result: {Entry} = {}
-  for _, entry in ipairs(first) do
-    result[#result + 1] = entry
-  end
-  for _, entry in ipairs(second) do
-    result[#result + 1] = entry
-  end
-  return result
-end
-
 local function model_meta(): {Meta}
   return {
     mtext("general.architecture", "devicemoe"),
@@ -338,7 +257,7 @@ end
 
 local function found_device(): boolean
   local bytes, total = backend:memory()
-  return bytes ~= nil and total ~= nil
+  return not (bytes is nil) and not (total is nil)
 end
 
 -- the cases that need a card say why they did not run

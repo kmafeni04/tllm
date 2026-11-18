@@ -4,9 +4,7 @@ local record clock
   now: function(): number
 end
 
--- the tag is this module's own because fs's stat already declares timespec,
--- and the pointer is void so a test that declares clock_gettime with its own
--- struct keeps linking to the same function
+-- the tag is this module's own because fs's stat already declares timespec
 ffi.cdef(
   [[
 struct tllm_clock_time { long tv_sec; long tv_nsec; };

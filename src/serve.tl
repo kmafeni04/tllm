@@ -1951,15 +1951,40 @@ local function model_bytes(info: gguf.Info): integer | nil, string | nil
   return total, nil
 end
 
--- the pool's scratch directory: made by this call or not at all, and readable
--- only by this process, because every request body and reply passes through it
-local function scratch_directory(): string | nil, string | nil
-  local base = os.getenv("XDG_RUNTIME_DIR") or os.getenv("TMPDIR") or "/tmp"
+local function slot_under(base: string): string | nil
+  if not fs.isdir(base) then
+    return nil
+  end
   for _ = 1, 32 do
     local made = os.tmpname()
     os.remove(made)
     local dir = base .. "/" .. (made:match("[^/]+$") as string)
     if fs.mkdir(dir) then
+      return dir
+    end
+  end
+  return nil
+end
+
+-- the pool's scratch directory: made by this call or not at all, and readable
+-- only by this process, because every request body and reply passes through it
+local function scratch_directory(): string | nil, string | nil
+  -- a set-but-unusable XDG_RUNTIME_DIR (a read-only /run in a container, a
+  -- runtime directory this user does not own) must not take the pool down, so
+  -- every candidate is tried rather than the first one that is merely set
+  local bases: {string} = {}
+  local runtime = os.getenv("XDG_RUNTIME_DIR")
+  local temp = os.getenv("TMPDIR")
+  if runtime is string and runtime ~= "" then
+    bases[#bases + 1] = runtime
+  end
+  if temp is string and temp ~= "" then
+    bases[#bases + 1] = temp
+  end
+  bases[#bases + 1] = "/tmp"
+  for _, base in ipairs(bases) do
+    local dir = slot_under(base)
+    if not (dir is nil) then
       -- 0700: fs.mkdir applies the umask, which leaves the directory readable
       -- by every local user on a machine with no runtime directory
       if not fs.chmod(dir, 448) then
@@ -1969,7 +1994,8 @@ local function scratch_directory(): string | nil, string | nil
       return dir, nil
     end
   end
-  return nil, "build: cannot make a scratch directory under " .. base
+  return nil,
+    "build: cannot make a scratch directory under " .. table.concat(bases, ", ")
 end
 
 local function pool_build(

@@ -1,86 +1,22 @@
-local ffi = require("ffi")
 local fs = require("fs")
 local test = require("lde-test")
+local support = require("tests.support")
 local compute = require("tllm.compute")
 local weights = require("tllm.weights")
-
-local function first_row(hidden: {number}, position: integer): {compute.Row}
-  return {{sequence = "", hidden = hidden, position = position}}
-end
-
-local function first(
-  output: {{number}} | nil, line: string | nil
-): {number} | nil, string | nil
-  if output is nil then
-    return nil, line
-  end
-  return (output as {{number}})[1], line
-end
+local type Entry = support.Entry
+local u32, u64, text = support.u32, support.u64, support.text
+local padded, floats, f32, zeros =
+  support.padded, support.floats, support.f32, support.zeros
+local ones, halves, without, replaced =
+  support.ones, support.halves, support.without, support.replaced
+local first, first_row, refused =
+  support.first, support.first_row, support.refused
 
 local ROOT = os.tmpname()
 os.remove(ROOT)
 fs.mkdirAll(ROOT)
 
 test.afterAll(function() fs.rmdir(ROOT) end)
-
-local function u16(value: integer): string
-  return string.char(value % 256, math.floor(value / 256) % 256)
-end
-
-local function u32(value: integer): string
-  return string.char(
-    value % 256,
-    math.floor(value / 256) % 256,
-    math.floor(value / 65536) % 256,
-    math.floor(value / 16777216) % 256
-  )
-end
-
-local function u64(value: integer): string
-  local parts: {string} = {}
-  local rest = value
-  for _ = 1, 8 do
-    parts[#parts + 1] = string.char(rest % 256)
-    rest = math.floor(rest / 256)
-  end
-  return table.concat(parts)
-end
-
-local function text(bytes: string): string
-  return u64(#bytes) .. bytes
-end
-
-local type Floats = {integer: number}
-
-local FLOAT_BYTES: integer = 4
-
-local function floats(values: {number}): string
-  local parts: {string} = {}
-  local cell = ffi.new("float[1]") as Floats
-  for _, value in ipairs(values) do
-    cell[0] = value
-    parts[#parts + 1] = ffi.string(cell as ffi.CData, FLOAT_BYTES)
-  end
-  return table.concat(parts)
-end
-
-local function halves(count: integer): string
-  return string.rep(u16(0x3C00), count)
-end
-
-local record Entry
-  name: string
-  dims: {integer}
-  code: integer
-  bytes: string
-end
-
-local function padded(prefix: string, alignment: integer): string
-  if #prefix % alignment == 0 then
-    return prefix
-  end
-  return prefix .. string.rep("\0", alignment - #prefix % alignment)
-end
 
 local written = 0
 
@@ -106,26 +42,6 @@ local function fixture(entries: {Entry}): string
   local location = ROOT .. "/attention" .. written .. ".gguf"
   fs.write(location, padded(head, 32) .. table.concat(body))
   return location
-end
-
-local function zeros(count: integer): {number}
-  local result: {number} = {}
-  for position = 1, count do
-    result[position] = 0
-  end
-  return result
-end
-
-local function ones(count: integer): {number}
-  local result: {number} = {}
-  for position = 1, count do
-    result[position] = 1
-  end
-  return result
-end
-
-local function f32(name: string, dims: {integer}, values: {number}): Entry
-  return {name = name, dims = dims, code = 0, bytes = floats(values)}
 end
 
 local function toy(prefix: string): {Entry}
@@ -189,30 +105,6 @@ local function toy_entries(): {Entry}
   return entries
 end
 
-local function without(entries: {Entry}, name: string): {Entry}
-  local result: {Entry} = {}
-  for _, entry in ipairs(entries) do
-    if entry.name ~= name then
-      result[#result + 1] = entry
-    end
-  end
-  return result
-end
-
-local function replaced(
-  entries: {Entry}, name: string, replacement: Entry
-): {Entry}
-  local result: {Entry} = {}
-  for _, entry in ipairs(entries) do
-    if entry.name == name then
-      result[#result + 1] = replacement
-    else
-      result[#result + 1] = entry
-    end
-  end
-  return result
-end
-
 local function loaded(entries: {Entry}): weights.Handle
   local location = fixture(entries)
   local handle, failure = weights.load(location)
@@ -257,14 +149,6 @@ local function attended(
   local attention, failure = compute.attend(backend, handle, shape)
   test.equal(failure, nil)
   return attention as compute.Attention
-end
-
-local function refused(value: {number} | nil, line: string | nil): string
-  test.equal(value, nil)
-  test.truthy(line)
-  local message = line as string
-  test.equal(message:find("\n"), nil)
-  return message
 end
 
 local function close(got: {number} | nil, wanted: {number})

@@ -1,11 +1,18 @@
-local ffi = require("ffi")
 local fs = require("fs")
 local test = require("lde-test")
+local support = require("tests.support")
 local cli = require("tllm.cli")
 local compute = require("tllm.compute")
 local tokenizer = require("tllm.tokenizer")
 local weights = require("tllm.weights")
 local tltp = require("tltp")
+local type Entry = support.Entry
+local type Meta = support.Meta
+local u32, u64, text = support.u32, support.u64, support.text
+local padded, f32, mint = support.padded, support.f32, support.mint
+local mfloat, mtext, mstrings, mint_array =
+  support.mfloat, support.mtext, support.mstrings, support.mint_array
+local both = support.both
 
 local ROOT = os.tmpname()
 os.remove(ROOT)
@@ -23,61 +30,6 @@ local function fixture(bytes: string): string
   local file_path = path_for("s") .. ".gguf"
   fs.write(file_path, bytes)
   return file_path
-end
-
-local function u32(value: integer): string
-  return string.char(
-    value % 256,
-    math.floor(value / 256) % 256,
-    math.floor(value / 65536) % 256,
-    math.floor(value / 16777216) % 256
-  )
-end
-
-local function u64(value: integer): string
-  local parts: {string} = {}
-  local rest = value
-  for _ = 1, 8 do
-    parts[#parts + 1] = string.char(rest % 256)
-    rest = math.floor(rest / 256)
-  end
-  return table.concat(parts)
-end
-
-local function text(bytes: string): string
-  return u64(#bytes) .. bytes
-end
-
-local function padded(prefix: string, alignment: integer): string
-  if #prefix % alignment == 0 then
-    return prefix
-  end
-  return prefix .. string.rep("\0", alignment - #prefix % alignment)
-end
-
-local type Floats = {integer: number}
-
-local function floats(values: {number}): string
-  local parts: {string} = {}
-  local cell = ffi.new("float[1]") as Floats
-  for _, value in ipairs(values) do
-    cell[0] = value
-    parts[#parts + 1] = ffi.string(cell as ffi.CData, 4)
-  end
-  return table.concat(parts)
-end
-
-local record Entry
-  name: string
-  dims: {integer}
-  code: integer
-  bytes: string
-end
-
-local record Meta
-  name: string
-  code: integer
-  bytes: string
 end
 
 local function meta_bytes(meta: {Meta}, entries: {Entry}): string
@@ -106,53 +58,6 @@ end
 
 local function meta_file(meta: {Meta}, entries: {Entry}): string
   return fixture(meta_bytes(meta, entries))
-end
-
-local function f32(name: string, dims: {integer}, values: {number}): Entry
-  return {name = name, dims = dims, code = 0, bytes = floats(values)}
-end
-
-local function mint(name: string, value: integer): Meta
-  return {name = name, code = 4, bytes = u32(value)}
-end
-
-local function mfloat(name: string, value: number): Meta
-  return {name = name, code = 6, bytes = floats({value})}
-end
-
-local function mtext(name: string, value: string): Meta
-  return {name = name, code = 8, bytes = text(value)}
-end
-
-local function array(item_code: integer, items: {string}): string
-  return u32(item_code) .. u64(#items) .. table.concat(items)
-end
-
-local function mstrings(name: string, values: {string}): Meta
-  local items: {string} = {}
-  for _, value in ipairs(values) do
-    items[#items + 1] = text(value)
-  end
-  return {name = name, code = 9, bytes = array(8, items)}
-end
-
-local function mint_array(name: string, values: {integer}): Meta
-  local items: {string} = {}
-  for _, value in ipairs(values) do
-    items[#items + 1] = u32(value)
-  end
-  return {name = name, code = 9, bytes = array(5, items)}
-end
-
-local function both(first: {Entry}, second: {Entry}): {Entry}
-  local result: {Entry} = {}
-  for _, entry in ipairs(first) do
-    result[#result + 1] = entry
-  end
-  for _, entry in ipairs(second) do
-    result[#result + 1] = entry
-  end
-  return result
 end
 
 local FILLER = "The quick brown fox jumps over the lazy dog. "

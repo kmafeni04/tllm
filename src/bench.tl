@@ -130,10 +130,10 @@ local function driven(
   end
 
   local entry = stream_fn as function(tltp.EmitFn): boolean | nil
-  local thread = coroutine.create(entry)
+  local producer = coroutine.create(entry)
   -- a producer that raises never registers its turn, so nothing would be
   -- measured and the zeros would read as a pass
-  local resumed, why = coroutine.resume(thread, emit)
+  local resumed, why = coroutine.resume(producer, emit)
   if not resumed then
     return nil, tostring(why)
   end
@@ -294,16 +294,16 @@ function bench.run(
         end
         if routing_path is string then
           lines = {}
-          generation.routing_sink = function(record: compute.Routing)
+          generation.routing_sink = function(routing: compute.Routing)
             local held = lines
             if held is nil then
               return
             end
             held[#held + 1] = tltp.json_encode(
               {
-                layer = record.layer,
-                token = record.token,
-                experts = record.experts,
+                layer = routing.layer,
+                token = routing.token,
+                experts = routing.experts,
               }
             ) as string
           end

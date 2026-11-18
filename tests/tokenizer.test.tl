@@ -1,8 +1,11 @@
 local fs = require("fs")
 local test = require("lde-test")
+local support = require("tests.support")
 local clock = require("tllm.clock")
 local gguf = require("tllm.gguf")
 local tokenizer = require("tllm.tokenizer")
+local u32, text, array = support.u32, support.text, support.array
+local header, pair = support.header, support.pair
 
 local ROOT = os.tmpname()
 os.remove(ROOT)
@@ -16,41 +19,6 @@ local function fixture(bytes: string): string
   local file_path = ROOT .. "/t" .. tostring(created) .. ".gguf"
   fs.write(file_path, bytes)
   return file_path
-end
-
-local function u32(value: integer): string
-  return string.char(
-    value % 256,
-    math.floor(value / 256) % 256,
-    math.floor(value / 65536) % 256,
-    math.floor(value / 16777216) % 256
-  )
-end
-
-local function u64(value: integer): string
-  local parts: {string} = {}
-  local rest = value
-  for _ = 1, 8 do
-    parts[#parts + 1] = string.char(rest % 256)
-    rest = math.floor(rest / 256)
-  end
-  return table.concat(parts)
-end
-
-local function header(tensor_count: integer, metadata_count: integer): string
-  return "GGUF" .. u32(3) .. u64(tensor_count) .. u64(metadata_count)
-end
-
-local function text(bytes: string): string
-  return u64(#bytes) .. bytes
-end
-
-local function pair(name: string, code: integer, bytes: string): string
-  return text(name) .. u32(code) .. bytes
-end
-
-local function array(item_code: integer, items: {string}): string
-  return u32(item_code) .. u64(#items) .. table.concat(items)
 end
 
 local function strings(items: {string}): string

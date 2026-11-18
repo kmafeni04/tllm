@@ -1,71 +1,24 @@
-local ffi = require("ffi")
 local fs = require("fs")
 local test = require("lde-test")
+local support = require("tests.support")
+local clock = require("tllm.clock")
 local compute = require("tllm.compute")
 local weights = require("tllm.weights")
+local type Entry = support.Entry
+local type Meta = support.Meta
+local u32, u64, text, padded =
+  support.u32, support.u64, support.text, support.padded
+local f32, zeros, ones = support.f32, support.zeros, support.ones
+local mint, mfloat, mtext, both =
+  support.mint, support.mfloat, support.mtext, support.both
+local without, without_meta, replaced, refused =
+  support.without, support.without_meta, support.replaced, support.refused
 
 local ROOT = os.tmpname()
 os.remove(ROOT)
 fs.mkdirAll(ROOT)
 
 test.afterAll(function() fs.rmdir(ROOT) end)
-
-local function u32(value: integer): string
-  return string.char(
-    value % 256,
-    math.floor(value / 256) % 256,
-    math.floor(value / 65536) % 256,
-    math.floor(value / 16777216) % 256
-  )
-end
-
-local function u64(value: integer): string
-  local parts: {string} = {}
-  local rest = value
-  for _ = 1, 8 do
-    parts[#parts + 1] = string.char(rest % 256)
-    rest = math.floor(rest / 256)
-  end
-  return table.concat(parts)
-end
-
-local function text(bytes: string): string
-  return u64(#bytes) .. bytes
-end
-
-local type Floats = {integer: number}
-
-local FLOAT_BYTES: integer = 4
-
-local function floats(values: {number}): string
-  local parts: {string} = {}
-  local cell = ffi.new("float[1]") as Floats
-  for _, value in ipairs(values) do
-    cell[0] = value
-    parts[#parts + 1] = ffi.string(cell as ffi.CData, FLOAT_BYTES)
-  end
-  return table.concat(parts)
-end
-
-local record Entry
-  name: string
-  dims: {integer}
-  code: integer
-  bytes: string
-end
-
-local record Meta
-  name: string
-  code: integer
-  bytes: string
-end
-
-local function padded(prefix: string, alignment: integer): string
-  if #prefix % alignment == 0 then
-    return prefix
-  end
-  return prefix .. string.rep("\0", alignment - #prefix % alignment)
-end
 
 local written = 0
 
@@ -96,22 +49,6 @@ local function fixture(meta: {Meta}, entries: {Entry}): string
   return location
 end
 
-local function zeros(count: integer): {number}
-  local result: {number} = {}
-  for position = 1, count do
-    result[position] = 0
-  end
-  return result
-end
-
-local function ones(count: integer): {number}
-  local result: {number} = {}
-  for position = 1, count do
-    result[position] = 1
-  end
-  return result
-end
-
 local function repeated(values: {number}, times: integer): {number}
   local result: {number} = {}
   for _ = 1, times do
@@ -122,24 +59,8 @@ local function repeated(values: {number}, times: integer): {number}
   return result
 end
 
-local function f32(name: string, dims: {integer}, values: {number}): Entry
-  return {name = name, dims = dims, code = 0, bytes = floats(values)}
-end
-
-local function mint(name: string, value: integer): Meta
-  return {name = name, code = 4, bytes = u32(value)}
-end
-
 local function mint32(name: string, value: integer): Meta
   return {name = name, code = 5, bytes = u32(value)}
-end
-
-local function mfloat(name: string, value: number): Meta
-  return {name = name, code = 6, bytes = floats({value})}
-end
-
-local function mtext(name: string, value: string): Meta
-  return {name = name, code = 8, bytes = text(value)}
 end
 
 local function joined(first: {number}, second: {number}): {number}
@@ -149,41 +70,6 @@ local function joined(first: {number}, second: {number}): {number}
   end
   for _, value in ipairs(second) do
     result[#result + 1] = value
-  end
-  return result
-end
-
-local function both(first: {Entry}, second: {Entry}): {Entry}
-  local result: {Entry} = {}
-  for _, entry in ipairs(first) do
-    result[#result + 1] = entry
-  end
-  for _, entry in ipairs(second) do
-    result[#result + 1] = entry
-  end
-  return result
-end
-
-local function without(entries: {Entry}, name: string): {Entry}
-  local result: {Entry} = {}
-  for _, entry in ipairs(entries) do
-    if entry.name ~= name then
-      result[#result + 1] = entry
-    end
-  end
-  return result
-end
-
-local function replaced(
-  entries: {Entry}, name: string, replacement: Entry
-): {Entry}
-  local result: {Entry} = {}
-  for _, entry in ipairs(entries) do
-    if entry.name == name then
-      result[#result + 1] = replacement
-    else
-      result[#result + 1] = entry
-    end
   end
   return result
 end
@@ -201,16 +87,6 @@ local function with_integer(meta: {Meta}, name: string, value: integer): {Meta}
   end
   if not found then
     result[#result + 1] = mint(name, value)
-  end
-  return result
-end
-
-local function without_meta(meta: {Meta}, name: string): {Meta}
-  local result: {Meta} = {}
-  for _, entry in ipairs(meta) do
-    if entry.name ~= name then
-      result[#result + 1] = entry
-    end
   end
   return result
 end
@@ -368,14 +244,6 @@ local function model_of(
   local model, failure = compute.model(backend, handle, positions, "f32")
   test.equal(failure, nil)
   return model as compute.Model
-end
-
-local function refused(value: {number} | nil, line: string | nil): string
-  test.equal(value, nil)
-  test.truthy(line)
-  local message = line as string
-  test.equal(message:find("\n"), nil)
-  return message
 end
 
 local function forward(
@@ -1161,28 +1029,6 @@ test.it(
   end
 )
 
-ffi.cdef(
-  [[
-struct tllm_pass_wall { long seconds; long nanos; };
-int clock_gettime(int clock_id, struct tllm_pass_wall *at);
-]]
-)
-
-local record PassWall
-  seconds: integer
-  nanos: integer
-end
-
-local record PassClocks
-  clock_gettime: function(integer, ffi.CData): integer
-end
-
-local function now(): number
-  local at = ffi.new("struct tllm_pass_wall") as PassWall
-  (ffi.C as PassClocks).clock_gettime(1, at as ffi.CData)
-  return tonumber(at.seconds) + tonumber(at.nanos) / 1e9
-end
-
 test.it(
   "a pass costs no more than its rows one by one",
   function()
@@ -1202,16 +1048,16 @@ test.it(
         test.equal(single:reserve(name, 4), nil)
       end
       collectgarbage("collect")
-      local started = now()
+      local started = clock.now()
       local result = batched:pass(rows)
-      local together = now() - started
+      local together = clock.now() - started
       test.truthy(result)
       local apart: number = 0
       collectgarbage("collect")
       for _, row in ipairs(rows) do
-        local before = now()
+        local before = clock.now()
         single:pass({row})
-        apart = apart + (now() - before)
+        apart = apart + (clock.now() - before)
       end
       return together, apart
     end

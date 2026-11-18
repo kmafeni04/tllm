@@ -1,55 +1,17 @@
-local ffi = require("ffi")
 local fs = require("fs")
 local test = require("lde-test")
+local support = require("tests.support")
 local compute = require("tllm.compute")
 local weights = require("tllm.weights")
+local type Entry = support.Entry
+local u16, u32, u64, text = support.u16, support.u32, support.u64, support.text
+local padded, floats, refused = support.padded, support.floats, support.refused
 
 local ROOT = os.tmpname()
 os.remove(ROOT)
 fs.mkdirAll(ROOT)
 
 test.afterAll(function() fs.rmdir(ROOT) end)
-
-local function u16(value: integer): string
-  return string.char(value % 256, math.floor(value / 256) % 256)
-end
-
-local function u32(value: integer): string
-  return string.char(
-    value % 256,
-    math.floor(value / 256) % 256,
-    math.floor(value / 65536) % 256,
-    math.floor(value / 16777216) % 256
-  )
-end
-
-local function u64(value: integer): string
-  local parts: {string} = {}
-  local rest = value
-  for _ = 1, 8 do
-    parts[#parts + 1] = string.char(rest % 256)
-    rest = math.floor(rest / 256)
-  end
-  return table.concat(parts)
-end
-
-local function text(bytes: string): string
-  return u64(#bytes) .. bytes
-end
-
-local type Floats = {integer: number}
-
-local FLOAT_BYTES: integer = 4
-
-local function floats(values: {number}): string
-  local parts: {string} = {}
-  local cell = ffi.new("float[1]") as Floats
-  for _, value in ipairs(values) do
-    cell[0] = value
-    parts[#parts + 1] = ffi.string(cell as ffi.CData, FLOAT_BYTES)
-  end
-  return table.concat(parts)
-end
 
 -- 1, 2, 3 and 4 as f16
 local HALVES: {integer} = {0x3C00, 0x4000, 0x4200, 0x4400}
@@ -102,20 +64,6 @@ local function q5_K(blocks: integer): string
       .. string.rep("\17", 128)
   end
   return table.concat(parts)
-end
-
-local record Entry
-  name: string
-  dims: {integer}
-  code: integer
-  bytes: string
-end
-
-local function padded(prefix: string, alignment: integer): string
-  if #prefix % alignment == 0 then
-    return prefix
-  end
-  return prefix .. string.rep("\0", alignment - #prefix % alignment)
 end
 
 local function fixture(entries: {Entry}): string
@@ -223,14 +171,6 @@ test.equal(load_failure, nil)
 -- the numbers below are the CPU backend's, so these stay on the CPU
 local backend = compute.load(nil, false) as compute.Backend
 local maths = compute.attach(backend, handle as weights.Handle) as compute.Maths
-
-local function refused(value: {number} | nil, line: string | nil): string
-  test.equal(value, nil)
-  test.truthy(line)
-  local message = line as string
-  test.equal(message:find("\n"), nil)
-  return message
-end
 
 test.it(
   "mapped tensors come back by name through ggml",

@@ -1,8 +1,12 @@
 local ffi = require("ffi")
 local fs = require("fs")
 local test = require("lde-test")
+local support = require("tests.support")
 local gguf = require("tllm.gguf")
 local weights = require("tllm.weights")
+local u32, u64, text, header =
+  support.u32, support.u64, support.text, support.header
+local pair, padded = support.pair, support.padded
 
 local ROOT = os.tmpname()
 os.remove(ROOT)
@@ -18,37 +22,6 @@ local function fixture(bytes: string): string
   return file_path
 end
 
-local function u32(value: integer): string
-  return string.char(
-    value % 256,
-    math.floor(value / 256) % 256,
-    math.floor(value / 65536) % 256,
-    math.floor(value / 16777216) % 256
-  )
-end
-
-local function u64(value: integer): string
-  local parts: {string} = {}
-  local rest = value
-  for _ = 1, 8 do
-    parts[#parts + 1] = string.char(rest % 256)
-    rest = math.floor(rest / 256)
-  end
-  return table.concat(parts)
-end
-
-local function header(tensor_count: integer, metadata_count: integer): string
-  return "GGUF" .. u32(3) .. u64(tensor_count) .. u64(metadata_count)
-end
-
-local function text(bytes: string): string
-  return u64(#bytes) .. bytes
-end
-
-local function pair(name: string, code: integer, bytes: string): string
-  return text(name) .. u32(code) .. bytes
-end
-
 local function tensor(
   name: string, dims: {integer}, type_code: integer, offset: integer
 ): string
@@ -61,13 +34,6 @@ local function tensor(
     .. table.concat(parts)
     .. u32(type_code)
     .. u64(offset)
-end
-
-local function padded(prefix: string, alignment: integer): string
-  if #prefix % alignment == 0 then
-    return prefix
-  end
-  return prefix .. string.rep("\0", alignment - #prefix % alignment)
 end
 
 local function region(size: integer, fill: integer): string
