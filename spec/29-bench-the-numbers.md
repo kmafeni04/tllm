@@ -130,8 +130,8 @@ refusal lines through the second, and hands back the exit code. The `generation`
 - FR-004 (US-001) WHEN a length's turn has run, THE SYSTEM SHALL write the line
   `prompt L: C tokens at R tok/s, first token M ms` and the line
   `decode L: C tokens at R tok/s`, where L is the length, the prompt C is the tokens passed up to
-  and including the step that produced the first content frame and, when no content frame came,
-  every token the turn passed, its R is that C over the seconds from handing the body to the first
+  and including the pass that produced the first content frame, read from `measure.tokens` as
+  `33/FR-009` amends it and, when no content frame came, every token the turn passed, its R is that C over the seconds from handing the body to the first
   content frame and, when no content frame came, to the turn's end, its M is those seconds in
   milliseconds, the decode C is the content frames after the first, and its R is that C over the
   seconds from the first content frame to the last content frame, every number printed with one
@@ -166,19 +166,22 @@ refusal lines through the second, and hands back the exit code. The `generation`
 - FR-008 (US-003) WHEN `--dump-routing FILE` is given, THE SYSTEM SHALL set a routing sink on the
   model that collects one line per record, a JSON object holding the keys `layer`, `token` and
   `experts`, the first two whole numbers and the third the ids in ascending order, `token` being
-  the pass count since `measure` was last zeroed so each length's records start at 0, SHALL truncate
+  the token's index among the rows passed since `measure` was last zeroed so each length's records
+  start at 0, SHALL truncate
   FILE once a length's body has been accepted and before that length's first pass, write that
   length's collected lines when its turn ends, so FILE ends up holding the run of the largest
   length that ran, and SHALL write no line and create no file when the flag is absent; IF FILE
   cannot be written, THEN THE SYSTEM SHALL write one line naming FILE to the stderr writer, run no
   further length, and exit 1.
-- FR-009 (US-002) WHEN a model has passed a token, THE SYSTEM SHALL add that pass to its `measure`
-  with the seconds it took and the number of ggml graphs it built, so `measure` carries a seventh
-  field beside `passes` and no line of `bench`'s report and no count it prints changes, WHEN a token
+- FR-009 (US-002) WHEN a model has made a pass, THE SYSTEM SHALL add that pass to its `measure`
+  with the seconds it took and the number of ggml graphs it built, and add the rows the pass carried
+  to `measure.tokens`, the field `33` declares beside `passes`, and no line of `bench`'s report and
+  no count it prints changes, WHEN a token
   has been chosen from those scores, THE SYSTEM SHALL add
   that choice's seconds and its clock mark to `measure`, and WHEN a pass has routed its experts,
   THE SYSTEM SHALL add their count and the bytes their three matrices hold and, only while
-  `routing_sink` is held, hand it one record per layer, so a run with no sink keeps no routing.
+  `routing_sink` is held, hand it one record per row of the pass per layer, so a run with no sink
+  keeps no routing.
 - FR-010 (US-002) THE SYSTEM SHALL read the monotonic clock as `ffi.C.clock_gettime` with
   `CLOCK_MONOTONIC`, filling the one two-long struct the module keeps rather than allocating one
   per read, in `src/clock.tl` and nowhere else, so every number `bench` prints comes from that one
@@ -189,7 +192,8 @@ refusal lines through the second, and hands back the exit code. The `generation`
 - FR-011 (US-004) THE SYSTEM SHALL build its server through `serve.build` with an endpoint whose
   `path` is the resolved model's path, whose `kv_cache` is the config file's value or `f16`, whose
   `sessions` is 1, whose `workers` is 1, whose `context_path` and `context_bytes` are nil, whose
-  `host` is `127.0.0.1` and whose `port` is 8080, so a bench run binds no socket, starts no worker
+  `host` is `127.0.0.1`, whose `port` is 8080 and whose `ubatch` is the config file's `ubatch` or
+  512 when it names none, so a bench run binds no socket, starts no worker
   process and creates no context directory.
   Not testable: `sessions`, `workers`, `context_path`, `context_bytes`, `host` and `port` exist
   only for serve's binding, spawning and context store, none of which a bench run uses, and

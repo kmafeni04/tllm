@@ -33,6 +33,7 @@ local record serve
     context_path: string | nil
     context_bytes: integer | nil
     workers: integer | nil
+    ubatch: integer | nil
   end
 
   record Worker
@@ -194,6 +195,7 @@ local record EndpointFields
   kv_cache: compute.CacheType | nil
   context_path: string | nil
   context_bytes: integer | nil
+  ubatch: integer | nil
 end
 
 local DEFAULT_BUDGET: integer = 256
@@ -1704,23 +1706,44 @@ function serve.step(server: tltp.Server): integer
     end
   end
 
+  local model = models[server] as serve.Model
+  -- every turn that has a row takes its whole share of the model's bound, so a
+  -- step hands one pass the groups of them all
+  local with_rows = 0
+  for _, turn in ipairs(list) do
+    local driven = turn.run
+    if turn.live and not turn.waiting and not (driven is nil) then
+      with_rows = with_rows + 1
+    end
+  end
+  local share = 1
+  if with_rows > 0 then
+    share = math.floor(model.generation.ubatch / with_rows)
+    if share < 1 then
+      share = 1
+    end
+  end
+
   local active: {Turn} = {}
+  local lasts: {integer} = {}
   local inputs: {compute.Input} = {}
   for _, turn in ipairs(list) do
     if turn.live and not turn.waiting then
       local run = turn.run
       if not (run is nil) then
-        local input = run.next(run)
-        if not (input is nil) then
+        local rows = run.next(run, share)
+        if not (rows is nil) then
+          for _, input in ipairs(rows as {compute.Input}) do
+            inputs[#inputs + 1] = input
+          end
           active[#active + 1] = turn
-          inputs[#inputs + 1] = input
+          lasts[#active] = #inputs
         end
       end
     end
   end
 
   if #inputs > 0 then
-    local model = models[server] as serve.Model
     local rows = model.generation:pass(inputs)
     if rows is nil then
       for _, turn in ipairs(active) do
@@ -1731,7 +1754,7 @@ function serve.step(server: tltp.Server): integer
       local planes = rows as {{number}}
       for index, turn in ipairs(active) do
         local run = turn.run as generate.Run
-        local piece, accept_line = run.accept(run, planes[index])
+        local piece, accept_line = run.accept(run, planes[lasts[index]])
         if not (accept_line is nil) then
           lost(turn.ready)
           dropped(server, turn)
@@ -1896,6 +1919,7 @@ local function endpoint_json(endpoint: serve.Endpoint): string
     kv_cache = endpoint.kv_cache,
     context_path = endpoint.context_path,
     context_bytes = endpoint.context_bytes,
+    ubatch = endpoint.ubatch,
   }
   return tltp.json_encode(fields) as string
 end
@@ -2123,7 +2147,7 @@ function serve.build(
   end
 
   local generation, generation_failure = compute.model(
-    backend, handle, nil, endpoint.kv_cache, endpoint.sessions
+    backend, handle, nil, endpoint.kv_cache, endpoint.sessions, endpoint.ubatch
   )
   if generation is nil then
     return nil, generation_failure

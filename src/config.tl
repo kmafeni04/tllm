@@ -22,6 +22,7 @@ local record Config
   context_path: string | nil
   context_bytes: integer | nil
   workers: integer | nil
+  ubatch: integer | nil
 end
 
 local DEFAULT_CONTEXT_BYTES: integer = 1073741824
@@ -90,6 +91,7 @@ local function unknown_key(fields: Fields): string | nil
     kv_cache = true,
     context = true,
     workers = true,
+    ubatch = true,
   }
   local keys: {string} = {}
   for key in pairs(fields) do
@@ -289,6 +291,20 @@ local function parse(
   elseif not (workers is nil) then
     return fault(
       "config " .. file_path .. ": workers must be an integer of one or more"
+    )
+  end
+
+  local ubatch = fields.ubatch
+  if ubatch is number then
+    if not (ubatch % 1 == 0 and ubatch >= 1) then
+      return fault(
+        "config " .. file_path .. ": ubatch must be an integer of one or more"
+      )
+    end
+    settings.ubatch = ubatch as integer
+  elseif not (ubatch is nil) then
+    return fault(
+      "config " .. file_path .. ": ubatch must be an integer of one or more"
     )
   end
 

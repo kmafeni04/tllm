@@ -1,6 +1,6 @@
 # 33: Prefill a prompt in chunks
 
-**Status**: pending   **Depends on**: 04, 12, 14, 15, 16, 18, 19, 25, 26, 28, 29, 32
+**Status**: done   **Depends on**: 04, 12, 14, 15, 16, 18, 19, 25, 26, 28, 29, 32
 
 ## Problem & context
 
@@ -23,9 +23,10 @@ eight passes at `ubatch` 512 instead of 4,096. The pieces it needs:
 
 - the rows of one sequence in a pass become a group of consecutive positions running up from the
   positions that sequence has taken, which is the only shape that keeps `26/FR-010`'s bound;
-- an attention row's scores past its own position are held out of its softmax by the mask `26`
-  settled into `ggml_soft_max_ext`, whether the positions before it came from an earlier pass or
-  from an earlier row of the same pass;
+- an attention row's scores past its own position are held out of its softmax because the row reads
+  the cache only over its sequence's positions zero to its own, whether those positions were written
+  by an earlier pass or by an earlier row of the same pass, whose key and value the graph has already
+  written by then;
 - a linear block's convolution window and recurrent state are threaded through the graph from row to
   row and written back once at the group's end, because two rows of one graph reading and writing one
   host state have no order ggml promises them;
@@ -176,7 +177,8 @@ bound of its own.
   refusal before any block took them leaves the sequence able to go on.
 - FR-009 (US-003) WHEN a run is asked for its next rows with a bound of one or more, THE SYSTEM SHALL
   return as many of its unforwarded rows as that bound holds, in position order and no row handed
-  twice, and nil once it has no row to forward; WHEN a run's rows are accepted, THE SYSTEM SHALL take
+  twice, and nil once it has no row to forward, a group it handed and has not been given scores for
+  yet being no row to forward; WHEN a run's rows are accepted, THE SYSTEM SHALL take
   the scores handed with them as the scores of the last row that run was handed.
 - FR-010 (US-003) WHEN `generate` drives a run, THE SYSTEM SHALL ask it for the model's `ubatch` rows
   at a time, forward the prompt's ids from `start` on in list order in those groups, sample its first
@@ -225,6 +227,9 @@ bound of its own.
 `blk.1.attn_output.weight` holding the two rows `{1,0}` and `{0,1}` in place of two rows of zeros, so
 both block kinds contribute numbers to every score row.
 
+The mixed fixture turns token `0` at position `0` into the zero vector its own norm then divides by,
+so the cases below read ids it answers with numbers.
+
 Every fixture prompt is shorter than the default `ubatch`, so a turn forwards its whole prompt in the
 first step that hands it rows. In the cases of `18`, `19`, `25` and `26` that step a streamed turn,
 the first token's event therefore arrives in the step that forwards the prompt's last row, which for
@@ -236,21 +241,21 @@ drive a run by hand calls `Run.next` once per row and hands one input to `pass`;
 - T-001 (FR-001, FR-002, FR-004, FR-005, FR-006): `a chunk gives each row the numbers it gets one at
   a time`, proves on the mixed fixture that, with two models `compute.model(backend, handle, 4,
   "f32")` each holding `""` reserved at 4 and named here the chunked model and the one-row model, one
-  `pass` of the rows `{"", 0, 0}`, `{"", 1, 1}`, `{"", 2, 2}` on the chunked model returns three score
+  `pass` of the rows `{"", 1, 0}`, `{"", 2, 1}`, `{"", 1, 2}` on the chunked model returns three score
   rows each equal within 1e-4 to the row the one-row model returns for the matching one-row pass of
   that id and position, and equal within 1e-4 to the rows a third model of that shape returns for the
-  same ids handed as two rows then one row; that the chunk's first score row differs from its third by
-  more than 1e-3 in at least one number, so a chunk that let a row attend over a later one, or handed
-  every row the same attention, fails the case; that after the chunk a pass of the single row
-  `{"", 0, 3}` on the chunked model returns within 1e-4 the row the one-row model returns for its
+  same ids handed as two rows then one row; that the chunk's first score row differs from its third
+  by more than 1e-3 in at least one number, so a chunk that let a row attend over a later one, or
+  handed every row the same attention, fails the case; that after the chunk a pass of the single row
+  `{"", 2, 3}` on the chunked model returns within 1e-4 the row the one-row model returns for its
   fourth one-row pass at position 3, so the chunk left the cache rows, the convolution window and the
   state where three single rows leave them; and that the chunk adds 8 to `measure.graphs`, the same 8
   a one-row pass adds to a model of that two-block run.
 - T-002 (FR-007): `rows that do not run together are refused and take nothing`, proves on the mixed
-  fixture built with `sequences` 2 and `"a"` and `"b"` reserved at 4 that a pass of `{"a", 0, 0}` and
-  `{"a", 2, 2}`, a pass of `{"a", 0, 1}` and `{"a", 1, 0}`, and a pass of `{"a", 0, 0}`, `{"b", 0,
-  0}` and `{"a", 1, 1}` each return nil and one line holding `pass` and `a`, and that the pass of
-  `{"a", 0, 0}` and `{"a", 1, 1}` after them returns the two rows a model of that shape returns for
+  fixture built with `sequences` 2 and `"a"` and `"b"` reserved at 4 that a pass of `{"a", 1, 0}` and
+  `{"a", 2, 2}`, a pass of `{"a", 1, 1}` and `{"a", 2, 0}`, and a pass of `{"a", 1, 0}`, `{"b", 1,
+  0}` and `{"a", 2, 1}` each return nil and one line holding `pass` and `a`, and that the pass of
+  `{"a", 1, 0}` and `{"a", 2, 1}` after them returns the two rows a model of that shape returns for
   those ids one at a time, within 1e-4, so no refusal took a position.
 - T-003 (FR-008): `a chunk past the cache is refused as one`, proves on `15/T-001`'s fixture built
   with `compute.model(backend, handle, 4, "f32", 2)` and `"a"` reserved at 4 that a pass of the six
@@ -268,7 +273,7 @@ drive a run by hand calls `Run.next` once per row and hands one input to `pass`;
   its `tokenizer.ggml.tokens` the three pieces `{"a", "b", "c"}`, its `tokenizer.ggml.eos_token_id`
   removed so a run answers its whole budget on any id, and its `qwen35moe.context_length` 8, so its
   score rows follow the position the way `T-001` reads them, that `generate.text_ids` with the ids
-  `{0, 1, 2, 0}`, `{max_tokens = 2}` and a `seed` and `temperature` of the case's choosing returns the
+  `{1, 2, 1, 2}`, `{max_tokens = 2}` and a `seed` and `temperature` of the case's choosing returns the
   same text and the same ids on models built with `ubatch` 2 and 8 as on the model built with `ubatch`
   1; that the passes behind those three replies are 5, 3 and 2 and that `measure.tokens` is 5 on all
   three; that those options reach as far as the claim does, drawing different ids from the score rows
@@ -287,7 +292,10 @@ drive a run by hand calls `Run.next` once per row and hands one input to `pass`;
   that body on either server, the reach of `FR-014` being `T-004`'s; and that on a third server of the
   same fixture with `ubatch` 2 two streamed bodies whose
   contents are `aa` and `bb` each take a second step to reach their first payload beyond the `role`
-  event, so each of two live turns was given one row of the two.
+  event, so each of two live turns was given one row of the two; and that on a fourth server of the
+  same fixture with `ubatch` 8 a turn whose whole prompt runs as one group beside another streamed
+  turn streams what the same body streams on a fifth server of the same fixture whose `ubatch` is 1,
+  so a turn handed a row other than its own group's last one answers another position.
 - T-006 (FR-012): `ubatch is read from the file and refused when it is not a count`, proves with the
   `04` cases' `run`, an `environment` and a start function that a file naming `ubatch` 3 reaches
   `start` with 3, that a file naming none reaches it with 512, that a file naming `ubatch` beside a
@@ -302,7 +310,8 @@ drive a run by hand calls `Run.next` once per row and hands one input to `pass`;
 - T-008 (FR-015): `bench counts tokens and routes one record per token`, proves on `29`'s fixture
   with a config file naming `ubatch` 3 that `bench m --config F --prefill-tokens 8
   --decode-tokens 8 --dump-routing R` returns 0, prints a `prompt 8:` line whose token count is at
-  least 8 where the passes would number fewer than five, and writes to R one line per token per layer
+  least 8 and more than the passes that prompt made at that bound, and writes to R one line per token
+  per layer
   whose `token` values run 0 to that prompt count plus the decode count minus one with no value
   repeated.
 
@@ -312,49 +321,4 @@ drive a run by hand calls `Run.next` once per row and hands one input to `pass`;
 
 ## Amendments
 
-- `04/FR-006`: `ubatch` joins the top-level keys a file may hold.
-- `04/FR-007`: `ubatch` joins the checked values, a whole number of one or more, and joins the order
-  the fault line names keys in last, after `context`.
-- `04/FR-011`: the values passed to `start` gain the file's `ubatch`, 512 when the file sets none and
-  512 when no file is read.
-- `12/FR-011`: a row's position may also be the one after an earlier row of the same call naming the
-  same sequence, so a group of consecutive rows is accepted and only a gap, a rewind or a negative
-  position is refused.
-- `14/FR-010`: the history and state a block call keeps are what its sequence's last row of that call
-  leaves them, the earlier rows of one group folded into them.
-- `14/FR-014`: the same relaxation for the number of positions a sequence and prefix have taken, so a
-  group of consecutive rows is accepted.
-- `16/FR-002`: the prompt's ids from `start` on are forwarded as the run's full groups of the model's
-  `ubatch` rows at their positions, the last group holding what remains, in list order, and the first
-  sampled token comes from the scores the prompt's last id returns.
-- `25/FR-002`: a run hands its unforwarded prompt ids as rows of its own, as many as the bound it is
-  asked for holds, so a prompt of several ids takes one step per group and not one per id.
-- `26/FR-008`: a pass returns one score row per input row and adds each sequence's row count to that
-  sequence's taken count, for a pass whose rows form consecutive groups.
-- `26/FR-009`: the refusal of two rows naming one sequence becomes the refusal of rows that do not
-  form a group of consecutive positions running up from that sequence's taken count.
-- `26/FR-010`: a row's softmax runs over its own sequence's positions zero to its own whether those
-  positions came from an earlier pass or from an earlier row of the same pass, and no later position
-  of its own sequence contributes.
-- `26/FR-012`: a step hands one pass the groups of every live turn that has a row, each group that
-  turn's whole share of the model's `ubatch` under `33/FR-011` and at least one row, and gives each
-  turn the scores of its own group's last row.
-- `26/FR-015`: `build` passes the endpoint's `ubatch` to the model it builds.
-- `26/FR-022`: a turn admitted to a free sequence forwards its prompt's first group in that step's
-  pass, not its first id.
-- `29/FR-004`: a length's prompt count is the tokens it passed, read from `measure.tokens`, not the
-  passes it made.
-- `29/FR-008`: a routing record's `token` is the token's index among the rows passed since `measure`
-  was last zeroed, not the pass count, so the rows of one chunk each get a record.
-- `29/FR-009`: `measure` gains the `tokens` field of the record this spec declares, a pass adds its
-  row count to it as well as one to `passes`, and the record a pass hands a held sink is one per row
-  of the pass per layer rather than one per pass per layer.
-- `29/FR-011`: the endpoint bench builds carries the config file's `ubatch`, and 512 when it names
-  none.
-- `32/FR-005`: a model's arena is sized at its build from the largest graph a pass of one row per
-  sequence builds at the model's `positions`, and is replaced by a larger one when a pass holds more
-  rows, the block handles building over the arena the model then holds and the block device buffers
-  that pool holds going with it.
-- `32/FR-008`: the buffer a block runs its graphs in is sized by `32/FR-005`'s rule as amended, so a
-  pass holding more rows replaces the buffers of the pool a model grew, the next graph of each block
-  taking the buffer the grown pool gives it, and no block keeps a buffer across that replacement.
+- None.

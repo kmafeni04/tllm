@@ -272,6 +272,113 @@ local function pieces_meta(pieces: {string}): {Meta}
   return without_meta(meta, "tokenizer.ggml.eos_token_id")
 end
 
+local function replaced(
+  entries: {Entry}, name: string, replacement: Entry
+): {Entry}
+  local result: {Entry} = {}
+  for _, entry in ipairs(entries) do
+    if entry.name == name then
+      result[#result + 1] = replacement
+    else
+      result[#result + 1] = entry
+    end
+  end
+  return result
+end
+
+local function repeated(values: {number}, times: integer): {number}
+  local made: {number} = {}
+  for _ = 1, times do
+    for _, value in ipairs(values) do
+      made[#made + 1] = value
+    end
+  end
+  return made
+end
+
+local function linear_entries(prefix: string, out: {number}): {Entry}
+  local LN3 = math.log(3)
+  return {
+    f32(prefix .. "attn_norm.weight", {2}, {1, 1}),
+    f32(
+      prefix .. "attn_qkv.weight",
+      {2, 12},
+      {
+        2,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        3,
+        4,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        5,
+        100,
+        0,
+        0,
+        100,
+        0,
+        0,
+        0,
+        200,
+      }
+    ),
+    f32(prefix .. "attn_gate.weight", {2, 4}, repeated({100, 0}, 4)),
+    f32(prefix .. "ssm_beta.weight", {2, 2}, repeated({LN3, 0}, 2)),
+    f32(prefix .. "ssm_alpha.weight", {2, 2}, repeated({1, 0}, 2)),
+    f32(prefix .. "ssm_dt.bias", {2}, {LN3, 0}),
+    f32(prefix .. "ssm_a", {2}, {-1, -1}),
+    f32(prefix .. "ssm_conv1d.weight", {2, 12}, repeated({0.5, 1}, 12)),
+    f32(prefix .. "ssm_norm.weight", {2}, {1, 1}),
+    f32(prefix .. "ssm_out.weight", {4, 2}, out),
+  }
+end
+
+local function linear_block(prefix: string, out: {number}): {Entry}
+  return both(linear_entries(prefix, out), feed_forward_entries(prefix))
+end
+
+-- the mixed fixture grown with this file's tokenizer: its linear block turns
+-- token zero at position zero into zeros the run divides by, so the cases that
+-- read scores walk the ids this fixture answers with numbers
+local function mixed_meta(): {Meta}
+  local meta = with_integer(t001_meta(), "qwen35moe.block_count", 2)
+  meta = with_integer(meta, "qwen35moe.full_attention_interval", 2)
+  meta = with_integer(meta, "qwen35moe.ssm.group_count", 2)
+  meta = with_integer(meta, "qwen35moe.ssm.state_size", 2)
+  meta = with_integer(meta, "qwen35moe.ssm.time_step_rank", 2)
+  meta = with_integer(meta, "qwen35moe.ssm.inner_size", 4)
+  meta = with_integer(meta, "qwen35moe.ssm.conv_kernel", 2)
+  meta = with_integer(meta, "qwen35moe.context_length", 8)
+  return without_meta(meta, "tokenizer.ggml.eos_token_id")
+end
+
+local function mixed_entries(): {Entry}
+  local entries = both(
+    linear_block("blk.0.", {1, 0, 1, 0, 0, 1, 0, 1}), full_block("blk.1.")
+  )
+  entries = replaced(
+    entries,
+    "blk.1.attn_output.weight",
+    f32("blk.1.attn_output.weight", {2, 2}, {1, 0, 0, 1})
+  )
+  return both(
+    entries,
+    {
+      f32("token_embd.weight", {2, 3}, {1, 0, 3, 4, 1, 1}),
+      f32("output_norm.weight", {2}, ones(2)),
+      f32("output.weight", {2, 3}, {0, 1, 1, 0.636, -1, -1}),
+    }
+  )
+end
+
 local FOUR_PIECES: {string} = {"a", "b", "c", "d"}
 
 local function four_entries(output: {number}): {Entry}
@@ -692,17 +799,17 @@ end
 local function advance(
   model: compute.Model, run: generate.Run
 ): string | nil, string | nil
-  local input = run.next(run)
-  if input is nil then
+  local given = run.next(run, 1)
+  if given is nil then
     return nil, nil
   end
-  local rows, line = model:pass({input})
+  local rows, line = model:pass(given)
   if rows is nil then
     run.fail(run, line as string)
     return nil, line
   end
   local planes = rows as {{number}}
-  return run.accept(run, planes[1])
+  return run.accept(run, planes[#planes])
 end
 
 local function opened(
@@ -1207,5 +1314,119 @@ test.it(
     local piece, line = advance(model, run)
     test.equal(line, nil)
     test.equal(piece, nil)
+  end
+)
+
+local function bounded(handle: weights.Handle, bound: integer): compute.Model
+  local model, failure = compute.model(backend, handle, nil, "f32", 1, bound)
+  test.equal(failure, nil)
+  return model as compute.Model
+end
+
+test.it(
+  "a run prefills its prompt in chunks and answers the same",
+  function()
+    local handle = loaded(mixed_meta(), mixed_entries())
+    local tokens = tokens_of(handle)
+    local ids = {1, 2, 1, 2}
+    local options: generate.Options = {max_tokens = 2, seed = 7}
+
+    local function reply(bound: integer): generate.Text, integer, integer
+      local model = bounded(handle, bound)
+      local made, line = generate.text_ids(model, tokens, ids, options)
+      test.equal(line, nil)
+      local answer = made as generate.Text
+      return answer, model.measure.passes, model.measure.tokens
+    end
+
+    local single, single_passes, single_tokens = reply(1)
+    local pair, pair_passes, pair_tokens = reply(2)
+    local whole, whole_passes, whole_tokens = reply(8)
+
+    test.deepEqual(pair.sampled, single.sampled)
+    test.equal(pair.text, single.text)
+    test.deepEqual(whole.sampled, single.sampled)
+    test.equal(whole.text, single.text)
+    test.deepEqual({single_passes, pair_passes, whole_passes}, {5, 3, 2})
+    test.equal(single_tokens, 5)
+    test.equal(pair_tokens, 5)
+    test.equal(whole_tokens, 5)
+
+    local walked = bounded(handle, 1)
+    test.equal(walked:reserve("", walked.positions), nil)
+    local prompt_rows: {{number}} = {}
+    for position = 1, #ids do
+      local made, line = walked:pass(
+        {
+          {
+            sequence = "",
+            token = ids[position],
+            position = position - 1,
+          },
+        }
+      )
+      test.equal(line, nil)
+      prompt_rows[position] = (made as {{number}})[1]
+    end
+
+    -- the id a run draws with these options off the scores it samples from:
+    -- the prompt's last row for the run itself, another row for a run that
+    -- sampled from earlier in its group
+    local function drawn(from: integer): integer
+      local made, line = generate.open_ids(
+        bounded(handle, 1), tokens, ids, options
+      )
+      test.equal(line, nil)
+      local held = made as generate.Run
+      for position = 1, #ids do
+        local rows = held.next(held, 1) as {compute.Input}
+        test.equal(#rows, 1)
+        local scores = prompt_rows[position]
+        if position == #ids then
+          scores = prompt_rows[from]
+        end
+        held.accept(held, scores)
+      end
+      test.equal(#held.produced, 1, "one id drawn per prompt")
+      return held.produced[1]
+    end
+
+    local from_last = drawn(#ids)
+    local from_first = drawn(1)
+    test.equal(
+      from_first == from_last,
+      false,
+      "first "
+        .. table.concat(prompt_rows[1], ",")
+        .. " last "
+        .. table.concat(prompt_rows[#ids], ",")
+        .. " drawn "
+        .. from_first
+        .. "/"
+        .. from_last
+    )
+    test.equal(single.sampled[1], from_last)
+
+    local split = bounded(handle, 2)
+    test.equal(split:reserve("", split.positions), nil)
+    local made, made_line = generate.open_ids(split, tokens, ids, options)
+    test.equal(made_line, nil)
+    local run = made as generate.Run
+    local head = run.next(run, 1) as {compute.Input}
+    test.equal(#head, 1)
+    local rest = run.next(run, 8) as {compute.Input}
+    test.equal(#rest, 3)
+    test.equal(run.next(run, 8), nil, "a group still owed hands no more rows")
+
+    local head_scores, head_line = split:pass(head)
+    test.equal(head_line, nil)
+    test.equal(#(head_scores as {{number}}), 1)
+    local tail_scores, tail_line = split:pass(rest)
+    test.equal(tail_line, nil)
+    local planes = tail_scores as {{number}}
+    test.equal(#planes, 3)
+    local _, accept_line = run.accept(run, planes[#planes])
+    test.equal(accept_line, nil)
+    test.equal(run.produced[1], single.sampled[1])
   end
 )

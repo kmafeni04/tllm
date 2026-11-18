@@ -120,9 +120,12 @@ record `29` declares, and `29/FR-009` is amended to say so.
   of an earlier graph after that initialisation, so that a pass two hundred deep returns the numbers
   a pass one deep returned, all two hundred fit the arena allocated when the model was built, and no
   number is read through a tensor the buffer no longer backs.
-- FR-005 (US-004) THE SYSTEM SHALL size a model's arena from the largest of the graphs FR-001 counts
-  a pass to build at the model's `positions`, so an arena is the worst case of one graph and not the
-  sum of the run's blocks.
+- FR-005 (US-004) THE SYSTEM SHALL size a model's arena at its build from the largest of the graphs
+  FR-001 counts a pass of one row per sequence to build at the model's `positions`, so an arena is
+  the worst case of one graph and not the sum of the run's blocks, and WHEN a pass holds more rows
+  than that arena was measured at, replace it with one sized the same way for that pass, as
+  `33/FR-003` says, the block handles of that model building over the arena the model then holds and
+  the block device buffers that pool holds going with it.
   Not testable: nothing a model publishes reports its arena's size or how many allocations it made;
   a reader confirms the one allocation and the largest-graph sizing in the tree.
 - FR-006 (US-004) WHEN a block handle is built outside a model, THE SYSTEM SHALL give it one arena of
@@ -139,9 +142,11 @@ record `29` declares, and `29/FR-009` is amended to say so.
   unreachable from outside; the branch is the raise in `graph_tensor` and the `pcall` around a
   graph's build, confirmed by inspection, and `11/FR-016` states the same for one operation.
 - FR-008 (US-004) WHEN a block's graph runs on a backend whose weights are in device memory, THE
-  SYSTEM SHALL allocate one device buffer for that block's graphs, sized by FR-005's rule from the
-  largest graph that block builds at the geometry's `positions`, and reuse it for every later pass's
-  graph of that block, and SHALL copy back the key and value rows the graph appended so the rest of
+  SYSTEM SHALL allocate one device buffer for that block's graphs, sized by FR-005's rule as
+  `33/FR-003` amends it from the largest graph that block builds at the geometry's `positions`, and
+  reuse it for every later pass's graph of that block, a pass holding more rows replacing the
+  buffers of the pool a model grew so the next graph of each block takes the buffer the grown pool
+  gives it and no block keeps a buffer across that replacement, and SHALL copy back the key and value rows the graph appended so the rest of
   the cache stays in host memory.
   Not testable: the library reports neither which backend buffer a graph's tensors landed in nor how
   many buffers were allocated, and `21/FR-003` makes the same argument; the copy-back is what

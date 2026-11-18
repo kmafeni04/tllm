@@ -154,7 +154,9 @@ end
   and the numbers at fault. The shape checks are made against each row of the batch's hidden.
 - FR-011 (US-003) IF a row's `position` is negative, or is the positions `reserve` gave that
   row's sequence or more, or is not the one after the last position that sequence and prefix's
-  cache took, where a sequence and prefix holding no positions takes position zero next, THEN THE
+  cache took, where a sequence and prefix holding no positions takes position zero next and a row
+  of the same call naming the same sequence and prefix counts as a position it took, so a group of
+  consecutive rows is accepted and only a gap, a rewind or a negative position is refused, THEN THE
   SYSTEM SHALL return nil and one line naming `block`, that row's sequence and its position.
 - FR-012 (US-003) IF the memory a prefix's cache or a block's graph needs cannot be allocated THEN
   THE SYSTEM SHALL return nil and one line naming `block`.

@@ -542,3 +542,48 @@ test.it(
     cleanup({dir})
   end
 )
+
+test.it(
+  "ubatch is read from the file and refused when it is not a count",
+  function()
+    local xdg = temp_dir()
+    local model = model_file(xdg)
+    local config = write_config(xdg, config_text(model, '"ubatch":3'))
+    local environment = {XDG_CONFIG_HOME = xdg}
+
+    local named = run({"serve", "m"}, environment)
+    test.equal(named.code, 0)
+    test.equal((named.endpoint as serve.Endpoint).ubatch, 3)
+
+    fs.write(config, config_text(model, ""))
+    local unset = run({"serve", "m"}, environment)
+    test.equal(unset.code, 0)
+    test.equal((unset.endpoint as serve.Endpoint).ubatch, 512)
+
+    fs.write(config, config_text(model, '"ubatch":3,"port":9101'))
+    local beside = run({"serve", "m"}, environment)
+    test.equal(beside.code, 0)
+    test.equal(#beside.err, 0)
+    test.equal((beside.endpoint as serve.Endpoint).ubatch, 3)
+
+    fs.write(
+      config, config_text(model, '"ubatch":0,"context":{"path":"","bytes":0}')
+    )
+    local first = run({"serve", "m"}, environment)
+    test.equal(first.code, 1)
+    test.equal(#first.err, 1)
+    test.includes(first.err[1], "context")
+    test.equal(first.starts, 0)
+
+    for _, given in ipairs({'"8"', "0", "-1", "1.5"}) do
+      fs.write(config, config_text(model, '"ubatch":' .. given))
+      local refused = run({"serve", "m"}, environment)
+      test.equal(refused.code, 1, given)
+      test.equal(#refused.err, 1, given)
+      test.includes(refused.err[1], "ubatch")
+      test.equal(refused.starts, 0, given)
+    end
+
+    cleanup({xdg})
+  end
+)

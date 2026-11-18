@@ -39,6 +39,7 @@ struct ggml_tensor {
 const char *ggml_version(void);
 size_t ggml_tensor_overhead(void);
 size_t ggml_graph_overhead(void);
+size_t ggml_graph_overhead_custom(size_t size, bool grads);
 ggml_context *ggml_init(struct ggml_init_params params);
 void ggml_free(ggml_context *ctx);
 ggml_tensor *ggml_new_tensor_2d(ggml_context *ctx, int type, int64_t ne0, int64_t ne1);
@@ -79,6 +80,7 @@ ggml_tensor *ggml_add(ggml_context *ctx, ggml_tensor *a, ggml_tensor *b);
 ggml_tensor *ggml_swiglu_split(ggml_context *ctx, ggml_tensor *a, ggml_tensor *b);
 ggml_tensor *ggml_sigmoid(ggml_context *ctx, ggml_tensor *a);
 ggml_cgraph *ggml_new_graph(ggml_context *ctx);
+ggml_cgraph *ggml_new_graph_custom(ggml_context *ctx, size_t size, bool grads);
 void ggml_build_forward_expand(ggml_cgraph *cgraph, ggml_tensor *tensor);
 void *ggml_get_data(const ggml_tensor *tensor);
 size_t ggml_nbytes(const ggml_tensor *tensor);
@@ -121,6 +123,7 @@ local record Library
   ggml_version: function(): ffi.CData
   ggml_tensor_overhead: function(): integer
   ggml_graph_overhead: function(): integer
+  ggml_graph_overhead_custom: function(integer, boolean): integer
   ggml_init: function(Params): ffi.CData
   ggml_free: function(ffi.CData)
   ggml_new_tensor_2d: function(ffi.CData, integer, integer, integer): ffi.CData
@@ -178,6 +181,7 @@ local record Library
   ggml_swiglu_split: function(ffi.CData, ffi.CData, ffi.CData): ffi.CData
   ggml_sigmoid: function(ffi.CData, ffi.CData): ffi.CData
   ggml_new_graph: function(ffi.CData): ffi.CData
+  ggml_new_graph_custom: function(ffi.CData, integer, boolean): ffi.CData
   ggml_build_forward_expand: function(ffi.CData, ffi.CData)
   ggml_get_data: function(ffi.CData): ffi.CData
   ggml_nbytes: function(ffi.CData): integer
@@ -297,6 +301,7 @@ local record compute
 
   record Measure
     passes: integer
+    tokens: integer
     compute: number
     sampling: number
     ready: number
@@ -320,7 +325,7 @@ local record compute
 
   record FeedForward
     block: function(
-      FeedForward, {Row}, string, watch?: Watch
+      FeedForward, {Row}, string, watch?: {Watch}
     ): {{number}} | nil, string | nil
     scores: function(FeedForward, {{number}}): {{number}} | nil, string | nil
     close: function(FeedForward)
@@ -343,6 +348,7 @@ local record compute
   record Model
     positions: integer
     sequences: integer
+    ubatch: integer
     measure: Measure
     routing_sink: (function(Routing) | nil)
     forward: function(Model, integer, integer): {number} | nil, string | nil
@@ -369,7 +375,12 @@ local record compute
     Backend, weights.Handle, Geometry
   ): LinearAttention | nil, string | nil
   model: function(
-    Backend, weights.Handle, integer | nil, CacheType | nil, sequences?: integer
+    Backend,
+    weights.Handle,
+    integer | nil,
+    CacheType | nil,
+    sequences?: integer,
+    ubatch?: integer
   ): Model | nil, string | nil
 end
 
@@ -436,11 +447,25 @@ local record Pool
   -- the rows its graphs were measured at, so a call holding more rows than that
   -- is given an arena sized from itself rather than one that cannot hold it
   rows: integer
+  -- the tensors the largest of those graphs made, so the next sizing counts a
+  -- row's nodes from a measurement rather than by building one to count
+  tensors: integer
+  -- the nodes the graph object this arena holds room for
+  nodes: integer
   backend: ffi.CData | nil
   cpu: ffi.CData | nil
   device_bytes: {string: integer}
   devices: {string: ffi.CData}
   held: {string: integer}
+end
+
+-- the arena a run of blocks builds its graphs in, held through one box so a
+-- model that grows its arena for a wider pass gives the grown arena to every
+-- block of its run: the pool inside is re-initialised by every graph and
+-- freed only by the handle that holds the box
+local record Box
+  pool: Pool | nil
+  owned: boolean
 end
 
 local record Holder
@@ -473,7 +498,7 @@ local record AttentionState
   geometry: compute.Geometry
   caches: {string: {string: Cache}}
   capacities: {string: integer}
-  pool: Pool | nil
+  pool: Box
   measure: compute.Measure | nil
   owner: boolean
 end
@@ -481,7 +506,7 @@ end
 local record FeedForwardState
   mapped: Mapped
   geometry: compute.Geometry
-  pool: Pool | nil
+  pool: Box
   measure: compute.Measure | nil
   owner: boolean
 end
@@ -505,7 +530,7 @@ local record LinearState
   shape: LinearShape
   eps: number
   prefixes: {string: {string: LinearKept}}
-  pool: Pool | nil
+  pool: Box
   measure: compute.Measure | nil
   owner: boolean
 end
@@ -517,7 +542,8 @@ local record ModelPlan
   width: integer
   positions: integer
   sequences: integer
-  pool: Pool | nil
+  pool: Box
+  sized: function(integer): {Build}
   measure: compute.Measure
   attention: compute.Attention | nil
   linear: compute.LinearAttention | nil
@@ -544,7 +570,8 @@ local record ModelState
   cache_code: integer
   full_prefixes: {string}
   linear_prefixes: {string}
-  pool: Pool | nil
+  pool: Box
+  sized: function(integer): {Build}
   measure: compute.Measure
 end
 
@@ -572,6 +599,12 @@ local ARENA_ALIGN: integer = 16
 local TENSOR_ALIGN: integer = 64
 -- room for the context and graph objects ggml aligns past the tensors
 local ARENA_SLACK: integer = 8192
+-- the tensors a measuring context is opened with before anything is measured:
+-- a graph's nodes are counted per row of the batch, with room to spare
+local TENSORS_PER_ROW: integer = 256
+local TENSOR_SPARE: integer = 4096
+-- the rows a pass carries when nothing names a bound of its own
+local DEFAULT_UBATCH: integer = 512
 local GGML_TYPE_F32: integer = 0
 local GGML_TYPE_F16: integer = 1
 local GGML_TYPE_Q4_0: integer = 2
@@ -693,13 +726,19 @@ local function round_up(value: integer, alignment: integer): integer
   return value + alignment - remainder
 end
 
--- tensors is the number of tensors the operation builds plus spares: an arena
--- one tensor short makes ggml dereference NULL instead of returning a refusal
+-- tensors is the number of tensors the operation builds plus spares, and a
+-- graph of that many nodes is reserved beside them: an arena one tensor short
+-- makes ggml dereference NULL instead of returning a refusal
 local function arena_for(
   lib: Library, tensors: integer, data_bytes: integer
 ): integer
   local overhead = tonumber(lib.ggml_tensor_overhead()) as integer
   local graph = tonumber(lib.ggml_graph_overhead()) as integer
+  local wide = tonumber(lib.ggml_graph_overhead_custom(tensors, false))
+    as integer
+  if wide > graph then
+    graph = wide
+  end
   local objects = overhead * (tensors + 8)
   local bytes = graph + objects + data_bytes + ARENA_SLACK
   return round_up(bytes, ARENA_ALIGN)
@@ -972,7 +1011,9 @@ local function pool_new(
   copy: Copy | nil,
   host_bytes: integer,
   device_bytes: {string: integer},
-  rows: integer
+  rows: integer,
+  tensors: integer,
+  nodes: integer
 ): Pool | nil
   -- the numbers a graph keeps sit in a buffer after its descriptors, so the
   -- arena starts and ends on the alignment that buffer needs
@@ -986,6 +1027,8 @@ local function pool_new(
     host = finalised(block),
     bytes = size,
     rows = rows,
+    tensors = tensors,
+    nodes = nodes,
     backend = device_of_copy(copy),
     device_bytes = device_bytes,
     devices = {},
@@ -1005,6 +1048,7 @@ local function pool_free(pool: Pool)
     pool.devices[prefix] = nil
     pool.held[prefix] = nil
   end
+  pool.device_bytes = {}
   local cpu = pool.cpu
   if not (cpu is nil) then
     pool.cpu = nil
@@ -1353,6 +1397,9 @@ local function run(
   return planes[1], nil
 end
 
+-- the tensors one build makes, walked out of the context it built them in:
+-- a row's nodes repeat for every row of the batch, so the count of one row's
+-- build tells how many a batch of any size asks the arena for
 -- the bytes one graph asks for, measured by building it in a context that
 -- places no number: the arena holds the descriptors and the graph object, and
 -- the numbers go into a buffer whose bytes this asks ggml for
@@ -1360,8 +1407,9 @@ local function footprint_of(
   lib: Library,
   copy: Copy | nil,
   device: boolean,
-  build: function(Graph): {Output}
-): integer, integer
+  build: function(Graph): {Output},
+  tensors: integer
+): integer, integer, integer
   local buft: ffi.CData = lib.ggml_backend_cpu_buffer_type()
   local mode = "host"
   if device then
@@ -1370,75 +1418,102 @@ local function footprint_of(
     buft = lib.ggml_backend_get_default_buffer_type(engine)
   end
 
-  -- a graph of a block makes a descriptor per head and per row, and the
-  -- measuring context gives up rather than place one it has no room for
-  local tensors = 512
-  for _ = 1, 8 do
-    local size = arena_for(lib, tensors, 0)
-    local block = libc.aligned_alloc(ARENA_ALIGN, size)
-    if block is nil then
-      return 0, 0
-    end
-    local ctx = lib.ggml_init(pool_params(size, block, true))
-    if ctx is nil then
-      libc.free(block)
-      return 0, 0
-    end
-    local graph: Graph = {
-      lib = lib,
-      ctx = ctx,
-      pending = {},
-      measure = mode,
-    }
-    local ok = pcall(build, graph)
-    if not ok then
-      lib.ggml_free(ctx)
-      libc.free(block)
-      tensors = tensors * 2
-    else
-      -- the graph object a pass's build makes comes out of the same arena
-      lib.ggml_new_graph(ctx)
-      local used = tonumber(lib.ggml_used_mem(ctx)) as integer
-      local numbers = tonumber(
-        lib.ggml_backend_alloc_ctx_tensors_from_buft_size(ctx, buft)
-      ) as integer
-      lib.ggml_free(ctx)
-      libc.free(block)
-      if device then
-        return used, numbers
-      end
-      return used + numbers, 0
-    end
+  local size = arena_for(lib, tensors, 0)
+  local block = libc.aligned_alloc(ARENA_ALIGN, size)
+  if block is nil then
+    return 0, 0, 0
   end
-  return 0, 0
+  local ctx = lib.ggml_init(pool_params(size, block, true))
+  if ctx is nil then
+    libc.free(block)
+    return 0, 0, 0
+  end
+  local graph: Graph = {
+    lib = lib,
+    ctx = ctx,
+    pending = {},
+    measure = mode,
+  }
+  if not pcall(build, graph) then
+    lib.ggml_free(ctx)
+    libc.free(block)
+    return 0, 0, 0
+  end
+
+  -- the graph object a pass's build makes comes out of the same arena, and
+  -- the tensors it left behind are what the arena is then sized from
+  lib.ggml_new_graph_custom(ctx, tensors, false)
+  local used = tonumber(lib.ggml_used_mem(ctx)) as integer
+  local numbers = tonumber(
+    lib.ggml_backend_alloc_ctx_tensors_from_buft_size(ctx, buft)
+  ) as integer
+  local made = 0
+  local tensor = lib.ggml_get_first_tensor(ctx)
+  while not (tensor is nil) do
+    made = made + 1
+    tensor = lib.ggml_get_next_tensor(ctx, tensor)
+  end
+  lib.ggml_free(ctx)
+  libc.free(block)
+  if device then
+    return used, numbers, made
+  end
+  return used + numbers, 0, made
 end
 
--- the arena and the device buffer a handle holds, each the worst case of one
+-- the arena and the device buffers a handle holds, each the worst case of one
 -- graph: never the sum of a run's blocks
 local function sized_pool(
-  lib: Library, copy: Copy | nil, builds: {Build}, rows: integer
+  lib: Library,
+  copy: Copy | nil,
+  builds: {Build},
+  rows: integer,
+  per_row: integer | nil,
+  floor: integer | nil
 ): Pool | nil
+  -- a graph's nodes repeat for every row it holds, so one measurement carries
+  -- to the next size: a measuring context that runs short stops the process
+  -- rather than hand back NULL, so its room is never grown by trial and error
+  local tensors = TENSOR_SPARE + rows * TENSORS_PER_ROW
+  if not (per_row is nil) then
+    tensors = per_row * rows + TENSOR_SPARE
+  end
+
   local host: integer = 0
   local device: {string: integer} = {}
+  local made = 0
   for _, entry in ipairs(builds) do
-    local host_bytes, device_bytes = footprint_of(lib, copy, false, entry.build)
+    local host_bytes, device_bytes, count = footprint_of(
+      lib, copy, false, entry.build, tensors
+    )
     if host_bytes > host then
       host = host_bytes
     end
+    if count > made then
+      made = count
+    end
     if not (copy is nil) then
-      host_bytes, device_bytes = footprint_of(lib, copy, true, entry.build)
+      host_bytes, device_bytes, count = footprint_of(
+        lib, copy, true, entry.build, tensors
+      )
       if host_bytes > host then
         host = host_bytes
       end
       if device_bytes > (device[entry.kind] or 0) then
         device[entry.kind] = device_bytes
       end
+      if count > made then
+        made = count
+      end
     end
+  end
+  if not (floor is nil) and floor > host then
+    host = floor
   end
   if host == 0 then
     return nil
   end
-  return pool_new(lib, copy, host, device, rows)
+  return pool_new(lib, copy, host, device, rows, made, tensors)
 end
 
 -- a graph built in the pool's arena and computed, its tensors readable until
@@ -1480,7 +1555,9 @@ local function graph_run(
     error(reason, 0)
   end
   local outputs = made as {Output}
-  local cgraph = session.lib.ggml_new_graph(session.ctx)
+  local cgraph = session.lib.ggml_new_graph_custom(
+    session.ctx, pool.nodes, false
+  )
   for _, output in ipairs(outputs) do
     session.lib.ggml_build_forward_expand(cgraph, output.tensor)
   end
@@ -3032,18 +3109,18 @@ local function attention_sized(
   if entry is nil then
     return nil
   end
-  return sized_pool(state.mapped.lib, state.mapped.device, {entry}, rows)
+  return sized_pool(
+    state.mapped.lib, state.mapped.device, {entry}, rows, nil, nil
+  )
 end
 
 -- the arena a graph is built in: the model's, which holds every row a pass can
 -- carry, or the handle's own, sized again from this call's rows when the call
 -- holds more rows than the arena it already has was measured at
 local function grown(
-  held: Pool | nil,
-  owned: boolean,
-  rows: integer,
-  size: function(integer): Pool | nil
+  box: Box, owned: boolean, rows: integer, size: function(integer): Pool | nil
 ): Pool | nil
+  local held = box.pool
   if not owned then
     return held
   end
@@ -3057,13 +3134,14 @@ local function grown(
   if not (held is nil) then
     pool_free(held)
   end
+  box.pool = wider
   return wider
 end
 
 local function attention_arena(
   state: AttentionState, prefix: string, rows: integer
 ): Pool | nil
-  local wider = grown(
+  return grown(
     state.pool,
     state.owner,
     rows,
@@ -3071,10 +3149,6 @@ local function attention_arena(
       return attention_sized(state, prefix, most)
     end
   )
-  if not (wider is nil) then
-    state.pool = wider
-  end
-  return wider
 end
 
 local function attention_block(
@@ -3087,6 +3161,9 @@ local function attention_block(
   local mapped = state.mapped
   local kind = cache_kind_of(geometry.cache_type) as CacheKind
   local checked: {integer: boolean} = {}
+  -- the position each sequence's next row of this call must name: a group runs
+  -- on from the row before it rather than from the cache alone
+  local running: {string: integer} = {}
 
   for _, entry in ipairs(rows) do
     if not checked[#entry.hidden] then
@@ -3111,9 +3188,12 @@ local function attention_block(
     if not (held is nil) then
       cache = held[prefix]
     end
-    local expected = 0
-    if not (cache is nil) then
-      expected = (cache as Cache).count
+    local expected = running[entry.sequence]
+    if expected is nil then
+      expected = 0
+      if not (cache is nil) then
+        expected = (cache as Cache).count
+      end
     end
     local bad_position = position_refusal(
       entry.sequence,
@@ -3125,6 +3205,7 @@ local function attention_block(
     if bad_position then
       return nil, bad_position
     end
+    running[entry.sequence] = entry.position + 1
   end
 
   for _, entry in ipairs(rows) do
@@ -3664,7 +3745,9 @@ local function feed_forward_ready(
   if #builds == 0 then
     return nil
   end
-  return sized_pool(state.mapped.lib, state.mapped.device, builds, rows)
+  return sized_pool(
+    state.mapped.lib, state.mapped.device, builds, rows, nil, nil
+  )
 end
 
 -- what a router's choice reports: how many experts it routed to, the bytes of
@@ -3713,7 +3796,7 @@ end
 local function feed_forward_arena(
   state: FeedForwardState, prefix: string | nil, width: integer, rows: integer
 ): Pool | nil
-  local wider = grown(
+  return grown(
     state.pool,
     state.owner,
     rows,
@@ -3721,17 +3804,13 @@ local function feed_forward_arena(
       return feed_forward_ready(state, prefix, width, most)
     end
   )
-  if not (wider is nil) then
-    state.pool = wider
-  end
-  return wider
 end
 
 local function feed_forward_block(
   state: FeedForwardState,
   rows: {compute.Row},
   prefix: string,
-  watch: compute.Watch | nil
+  watchs: {compute.Watch} | nil
 ): {{number}} | nil, string | nil
   local mapped = state.mapped
   local geometry = state.geometry
@@ -3793,8 +3872,8 @@ local function feed_forward_block(
       total = total + probabilities[expert + 1]
     end
     totals[index] = total
-    if not (watch is nil) then
-      recorded(watch as compute.Watch, mapped, prefix, chosen)
+    if not (watchs is nil) then
+      recorded((watchs as {compute.Watch})[index], mapped, prefix, chosen)
     end
   end
 
@@ -4217,6 +4296,13 @@ local record LinearBuilt
   projected: ffi.CData
 end
 
+-- what the rows before this one in its group leave it: the state the row
+-- before it left and every projection the group made, oldest first
+local record LinearCarry
+  state: ffi.CData | nil
+  taps: {ffi.CData}
+end
+
 -- one row's linear-attention graph: the tensors it answers with, the state it
 -- leaves, and the projection the history takes its newest tap from
 local function linear_build(
@@ -4224,7 +4310,8 @@ local function linear_build(
   graph: Graph,
   entry: compute.Row,
   prefix: string,
-  active: LinearKept
+  active: LinearKept,
+  carry: LinearCarry
 ): LinearBuilt
   local lib = graph.lib
   local ctx = graph.ctx
@@ -4305,17 +4392,50 @@ local function linear_build(
     )
   )
 
+  -- the taps of this row's window: the stored window's oldest taps the group
+  -- does not carry, then the rows before it, then its own projection
   local current = node(graph, lib.ggml_reshape_3d(ctx, projected, 1, rows, 1))
   local window = current
   if kernel > 1 then
-    local past = host_tensor(
-      graph,
-      {kernel - 1, rows, 1},
-      GGML_TYPE_F32,
-      active.history,
-      (kernel - 1) * rows * F32_BYTES
-    )
-    window = node(graph, lib.ggml_concat(ctx, past, current, 0))
+    local slots = kernel - 1
+    local mine = #carry.taps
+    local used = mine
+    if used > slots then
+      used = slots
+    end
+    local parts: {ffi.CData} = {}
+    if slots > used then
+      local stored = host_tensor(
+        graph,
+        {slots, rows, 1},
+        GGML_TYPE_F32,
+        active.history,
+        slots * rows * F32_BYTES
+      )
+      parts[#parts + 1] = node(
+        graph,
+        lib.ggml_view_3d(
+          ctx,
+          stored,
+          slots - used,
+          rows,
+          1,
+          slots * F32_BYTES,
+          slots * rows * F32_BYTES,
+          used * F32_BYTES
+        )
+      )
+    end
+    for tap = mine - used + 1, mine do
+      parts[#parts + 1] = node(
+        graph, lib.ggml_reshape_3d(ctx, carry.taps[tap], 1, rows, 1)
+      )
+    end
+    parts[#parts + 1] = current
+    window = parts[1]
+    for part = 2, #parts do
+      window = node(graph, lib.ggml_concat(ctx, window, parts[part], 0))
+    end
   end
   local convolved = node(
     graph,
@@ -4418,13 +4538,19 @@ local function linear_build(
     )
   )
 
-  local stored_state = host_tensor(
-    graph,
-    {key_length, value_length, value_heads},
-    GGML_TYPE_F32,
-    active.state,
-    state_floats * F32_BYTES
-  )
+  local carried = carry.state
+  local stored_state: ffi.CData
+  if carried is nil then
+    stored_state = host_tensor(
+      graph,
+      {key_length, value_length, value_heads},
+      GGML_TYPE_F32,
+      active.state,
+      state_floats * F32_BYTES
+    )
+  else
+    stored_state = carried
+  end
   local decayed = node(
     graph,
     lib.ggml_mul(
@@ -4523,8 +4649,11 @@ local function linear_builds(
   local entries = blank_rows(width, rows)
   local build = function(graph: Graph): {Output}
     local outputs: {Output} = {}
+    local carry: LinearCarry = {taps = {}}
     for _, entry in ipairs(entries) do
-      local made = linear_build(state, graph, entry, prefix, kept)
+      local made = linear_build(state, graph, entry, prefix, kept, carry)
+      carry = {state = made.updated, taps = carry.taps}
+      carry.taps[#carry.taps + 1] = made.projected
       outputs[#outputs + 1] = {tensor = made.output, count = #entry.hidden}
       outputs[#outputs + 1] = {tensor = made.updated, count = 0}
       outputs[#outputs + 1] = {tensor = made.projected, count = 0}
@@ -4537,7 +4666,7 @@ end
 local function linear_arena(
   state: LinearState, prefix: string, width: integer, rows: integer
 ): Pool | nil
-  local wider = grown(
+  return grown(
     state.pool,
     state.owner,
     rows,
@@ -4546,13 +4675,11 @@ local function linear_arena(
       if #builds == 0 then
         return nil
       end
-      return sized_pool(state.mapped.lib, state.mapped.device, builds, most)
+      return sized_pool(
+        state.mapped.lib, state.mapped.device, builds, most, nil, nil
+      )
     end
   )
-  if not (wider is nil) then
-    state.pool = wider
-  end
-  return wider
 end
 
 local function linear_block(
@@ -4565,6 +4692,9 @@ local function linear_block(
   local shape = state.shape
   local checked: {integer: boolean} = {}
   local kepts: {LinearKept} = {}
+  -- the position each sequence's next row of this call must name: a group runs
+  -- on from the row before it rather than from the kept state alone
+  local running: {string: integer} = {}
 
   for index, entry in ipairs(rows) do
     if not checked[#entry.hidden] then
@@ -4592,6 +4722,10 @@ local function linear_block(
     if entry.position < 0 then
       return nil, "block: prefix " .. prefix .. " position " .. entry.position
     end
+    local next_position = running[entry.sequence]
+    if not (next_position is nil) then
+      expected = next_position
+    end
     if entry.position ~= expected then
       return nil,
         "block: prefix "
@@ -4601,6 +4735,7 @@ local function linear_block(
           .. ", the next is "
           .. expected
     end
+    running[entry.sequence] = entry.position + 1
     if kept is nil then
       local made, failure = linear_prefix_of(state, entry.sequence, prefix)
       if not (made is LinearKept) then
@@ -4625,8 +4760,16 @@ local function linear_block(
     state.measure,
     function(graph: Graph): {Output}
       local outputs: {Output} = {}
+      local carry: LinearCarry = {taps = {}}
       for index, entry in ipairs(rows) do
-        local built = linear_build(state, graph, entry, prefix, kepts[index])
+        if index > 1 and rows[index - 1].sequence ~= entry.sequence then
+          carry = {taps = {}}
+        end
+        local built = linear_build(
+          state, graph, entry, prefix, kepts[index], carry
+        )
+        carry = {state = built.updated, taps = carry.taps}
+        carry.taps[#carry.taps + 1] = built.projected
         local count = #entry.hidden
         outputs[#outputs + 1] = {tensor = built.output, count = count}
         outputs[#outputs + 1] = {tensor = built.updated, count = 0}
@@ -4640,43 +4783,61 @@ local function linear_block(
   end
 
   local kernel = shape.conv_kernel
-  local rows_per_row = 2 * shape.key_heads * shape.key_length + shape.value_heads * shape.value_length
+  local slots = kernel - 1
+  local value_cells = shape.value_heads * shape.value_length
+  local channels = 2 * shape.key_heads * shape.key_length + value_cells
   local _, state_floats = linear_floats(shape)
   local outputs: {{number}} = {}
   for index, entry in ipairs(rows) do
-    local built = made.outputs[index * 3 - 2]
-    local updated = made.outputs[index * 3 - 1]
-    local projected = made.outputs[index * 3]
     local active = kepts[index]
-    outputs[index] = graph_numbers(made, built)
-    read_bytes(
-      made.lib,
-      updated.tensor,
-      active.state,
-      state_floats * F32_BYTES,
-      made.device
-    )
-    if kernel > 1 then
-      -- the past tensor reads a channel's taps consecutively, oldest first
-      local slots = kernel - 1
-      local history = ffi.cast("float*", active.history) as Floats
-      local fresh_bytes = ffi.new("float[?]", rows_per_row) as ffi.CData
+    outputs[index] = graph_numbers(made, made.outputs[index * 3 - 2])
+    local group = index < #rows and rows[index + 1].sequence == entry.sequence
+    if not group then
+      -- the window and the state a sequence keeps are what its group's last
+      -- row leaves them
+      local first = index
+      while first > 1 and rows[first - 1].sequence == entry.sequence do
+        first = first - 1
+      end
       read_bytes(
         made.lib,
-        projected.tensor,
-        fresh_bytes,
-        rows_per_row * F32_BYTES,
+        made.outputs[index * 3 - 1].tensor,
+        active.state,
+        state_floats * F32_BYTES,
         made.device
       )
-      local fresh = fresh_bytes as Floats
-      for channel = 0, rows_per_row - 1 do
-        for slot = 0, slots - 2 do
-          history[channel * slots + slot] = history[channel * slots + slot + 1]
+      if kernel > 1 then
+        local fresh = index - first + 1
+        if fresh > slots then
+          fresh = slots
         end
-        history[channel * slots + slots - 1] = fresh[channel]
+        local older = slots - fresh
+        local taps: {Floats} = {}
+        for tap = 1, fresh do
+          local cells = ffi.new("float[?]", channels) as ffi.CData
+          read_bytes(
+            made.lib,
+            made.outputs[(index - fresh + tap) * 3].tensor,
+            cells,
+            channels * F32_BYTES,
+            made.device
+          )
+          taps[tap] = cells as Floats
+        end
+        -- the past tensor reads a channel's taps consecutively, oldest first
+        local history = ffi.cast("float*", active.history) as Floats
+        for channel = 0, channels - 1 do
+          for slot = 0, older - 1 do
+            local ahead = channel * slots + slot + fresh
+            history[channel * slots + slot] = history[ahead]
+          end
+          for tap = 1, fresh do
+            history[channel * slots + older + tap - 1] = taps[tap][channel]
+          end
+        end
       end
+      active.count = entry.position + 1
     end
-    active.count = entry.position + 1
   end
   graph_closed(made)
   return outputs, nil
@@ -4857,7 +5018,7 @@ local function attention_of(
   backend: compute.Backend,
   handle: weights.Handle,
   geometry: compute.Geometry,
-  pool: Pool | nil,
+  pool: Box,
   measure: compute.Measure | nil
 ): compute.Attention | nil, string | nil
   local refusal = geometry_refusal(geometry)
@@ -4882,7 +5043,7 @@ local function attention_of(
     capacities = {},
     pool = pool,
     measure = measure,
-    owner = pool is nil,
+    owner = pool.owned,
   }
   local finished = false
   local function shut(operation: string): string | nil
@@ -4964,9 +5125,12 @@ local function attention_of(
     end
     finished = true
     attention_closed(state)
-    local held = state.pool
-    if state.owner and not (held is nil) then
-      pool_free(held)
+    if state.owner then
+      local held = state.pool.pool
+      if not (held is nil) then
+        pool_free(held)
+        state.pool.pool = nil
+      end
     end
   end
   return attention
@@ -4975,7 +5139,9 @@ end
 function compute.attend(
   backend: compute.Backend, handle: weights.Handle, geometry: compute.Geometry
 ): compute.Attention | nil, string | nil
-  return attention_of(backend, handle, geometry, nil, nil)
+  return attention_of(
+    backend, handle, geometry, {pool = nil, owned = true}, nil
+  )
 end
 
 -- the feed forward handle over a mapped handle, sharing a model's arena when
@@ -4984,7 +5150,7 @@ local function feed_forward_of(
   backend: compute.Backend,
   handle: weights.Handle,
   geometry: compute.Geometry,
-  pool: Pool | nil,
+  pool: Box,
   measure: compute.Measure | nil
 ): compute.FeedForward | nil, string | nil
   local loaded = LOADED[backend]
@@ -5009,7 +5175,7 @@ local function feed_forward_of(
     geometry = geometry,
     pool = pool,
     measure = measure,
-    owner = pool is nil,
+    owner = pool.owned,
   }
   local finished = false
   local feed_forward = {} as compute.FeedForward
@@ -5017,7 +5183,7 @@ local function feed_forward_of(
     _: compute.FeedForward,
     rows: {compute.Row},
     prefix: string,
-    watch?: compute.Watch
+    watch?: {compute.Watch}
   ): {{number}} | nil, string | nil
     if finished then
       return nil, "block: the feed forward is closed"
@@ -5038,9 +5204,12 @@ local function feed_forward_of(
     end
     finished = true
     state.mapped.close()
-    local held = state.pool
-    if state.owner and not (held is nil) then
-      pool_free(held)
+    if state.owner then
+      local held = state.pool.pool
+      if not (held is nil) then
+        pool_free(held)
+        state.pool.pool = nil
+      end
     end
   end
   return feed_forward
@@ -5049,7 +5218,9 @@ end
 function compute.feed_forward(
   backend: compute.Backend, handle: weights.Handle, geometry: compute.Geometry
 ): compute.FeedForward | nil, string | nil
-  return feed_forward_of(backend, handle, geometry, nil, nil)
+  return feed_forward_of(
+    backend, handle, geometry, {pool = nil, owned = true}, nil
+  )
 end
 
 -- the linear-attention handle over a mapped handle, sharing a model's arena
@@ -5058,7 +5229,7 @@ local function linear_of(
   backend: compute.Backend,
   handle: weights.Handle,
   geometry: compute.Geometry,
-  pool: Pool | nil,
+  pool: Box,
   measure: compute.Measure | nil
 ): compute.LinearAttention | nil, string | nil
   local loaded = LOADED[backend]
@@ -5085,7 +5256,7 @@ local function linear_of(
     prefixes = {},
     pool = pool,
     measure = measure,
-    owner = pool is nil,
+    owner = pool.owned,
   }
   local finished = false
   local function shut(operation: string): string | nil
@@ -5142,9 +5313,12 @@ local function linear_of(
     end
     finished = true
     linear_closed(state)
-    local held = state.pool
-    if state.owner and not (held is nil) then
-      pool_free(held)
+    if state.owner then
+      local held = state.pool.pool
+      if not (held is nil) then
+        pool_free(held)
+        state.pool.pool = nil
+      end
     end
   end
   return linear
@@ -5153,7 +5327,7 @@ end
 function compute.linear_attention(
   backend: compute.Backend, handle: weights.Handle, geometry: compute.Geometry
 ): compute.LinearAttention | nil, string | nil
-  return linear_of(backend, handle, geometry, nil, nil)
+  return linear_of(backend, handle, geometry, {pool = nil, owned = true}, nil)
 end
 
 local function summed(left: {number}, right: {number}): {number}
@@ -5224,6 +5398,100 @@ local function embedding_build(
       graph.ctx, mapped.descriptors["token_embd.weight"], ints_of(graph, ids)
     )
   )
+end
+
+-- the graphs a pass of `rows` rows builds, each measured at the model's whole
+-- position count, where a row's attention scores are widest: the largest of
+-- them sizes the arena that pass runs in
+local function model_builds(
+  mapped: Mapped,
+  geometry: compute.Geometry,
+  kinds: {boolean},
+  count: integer,
+  width: integer,
+  rows: integer
+): {Build}
+  local first_full: integer | nil = nil
+  local first_linear: integer | nil = nil
+  for index = 1, count do
+    if kinds[index] then
+      if first_full is nil then
+        first_full = index - 1
+      end
+    elseif first_linear is nil then
+      first_linear = index - 1
+    end
+  end
+
+  local builds: {Build} = {}
+  -- the graph gathering a pass's embedding rows, whose ids the build reads as
+  -- its own inputs
+  if holds(mapped, {"token_embd.weight"}) then
+    local ids: {integer} = {}
+    for index = 1, rows do
+      ids[index] = 0
+    end
+    builds[#builds + 1] = {
+      kind = "embed",
+      build = function(graph: Graph): {Output}
+        return {
+          {tensor = embedding_build(mapped, graph, ids), count = rows * width},
+        }
+      end,
+    }
+  end
+  local feed_forward_state: FeedForwardState = {
+    mapped = mapped,
+    geometry = geometry,
+    pool = {pool = nil, owned = false},
+    owner = false,
+  }
+  local full_prefix = prefix_named(mapped, "post_attention_norm.weight")
+  local hidden_count = hidden_width(mapped, "post_attention_norm.weight")
+  if not (full_prefix is nil) and not (hidden_count is nil) then
+    for _, entry in ipairs(
+      feed_forward_builds(feed_forward_state, full_prefix, hidden_count, rows)
+    ) do
+      builds[#builds + 1] = entry
+    end
+  end
+  if not (first_full is nil) then
+    local attention_state: AttentionState = {
+      mapped = mapped,
+      geometry = geometry,
+      caches = {},
+      capacities = {},
+      pool = {pool = nil, owned = false},
+      owner = false,
+    }
+    local prefix = "blk." .. (first_full as integer) .. "."
+    if holds(mapped, prefixed(prefix, ATTENTION_NAMES)) then
+      local entry = attention_measure(attention_state, prefix, rows)
+      if not (entry is nil) then
+        builds[#builds + 1] = entry
+      end
+    end
+  end
+  if not (first_linear is nil) then
+    local linear_state: LinearState = {
+      mapped = mapped,
+      shape = (linear_shape_of(geometry) as LinearShape),
+      eps = geometry.eps,
+      prefixes = {},
+      pool = {pool = nil, owned = false},
+      owner = false,
+    }
+    local prefix = "blk." .. (first_linear as integer) .. "."
+    local linear_count = hidden_width(mapped, "attn_norm.weight")
+    if not (linear_count is nil) then
+      for _, entry in ipairs(
+        linear_builds(linear_state, prefix, linear_count, rows)
+      ) do
+        builds[#builds + 1] = entry
+      end
+    end
+  end
+  return builds
 end
 
 local function model_plan(
@@ -5334,9 +5602,7 @@ local function model_plan(
   local has_full = false
   local has_linear = false
   local first_full = 0
-  local first_linear = 0
   local found_full = false
-  local found_linear = false
   for index = 0, count - 1 do
     local full = (index + 1) % step == 0
     kinds[index + 1] = full
@@ -5348,10 +5614,6 @@ local function model_plan(
       end
     else
       has_linear = true
-      if not found_linear then
-        first_linear = index
-        found_linear = true
-      end
     end
   end
 
@@ -5571,6 +5833,7 @@ local function model_plan(
   -- graph a pass builds at the model's whole position count
   local measure: compute.Measure = {
     passes = 0,
+    tokens = 0,
     compute = 0,
     sampling = 0,
     ready = 0,
@@ -5578,96 +5841,32 @@ local function model_plan(
     routed_bytes = 0,
     graphs = 0,
   }
-  local builds: {Build} = {}
-  -- the graph gathering a pass's embedding rows, whose ids the build reads as
-  -- its own inputs
-  if holds(mapped, {"token_embd.weight"}) then
-    local ids: {integer} = {}
-    for index = 1, sequences do
-      ids[index] = 0
-    end
-    builds[#builds + 1] = {
-      kind = "embed",
-      build = function(graph: Graph): {Output}
-        return {
-          {
-            tensor = embedding_build(mapped, graph, ids),
-            count = sequences * math.floor(width),
-          },
-        }
-      end,
-    }
+  local sized = function(rows: integer): {Build}
+    return model_builds(mapped, geometry, kinds, count, math.floor(width), rows)
   end
-  local feed_forward_state: FeedForwardState = {
-    mapped = mapped,
-    geometry = geometry,
-    owner = false,
-  }
-  local full_prefix = prefix_named(mapped, "post_attention_norm.weight")
-  local hidden_count = hidden_width(mapped, "post_attention_norm.weight")
-  if not (full_prefix is nil) and not (hidden_count is nil) then
-    for _, entry in ipairs(
-      feed_forward_builds(
-        feed_forward_state, full_prefix, hidden_count, sequences
-      )
-    ) do
-      builds[#builds + 1] = entry
-    end
-  end
-  if has_full then
-    local attention_state: AttentionState = {
-      mapped = mapped,
-      geometry = geometry,
-      caches = {},
-      capacities = {},
-      owner = false,
-    }
-    local prefix = "blk." .. first_full .. "."
-    if holds(mapped, prefixed(prefix, ATTENTION_NAMES)) then
-      local entry = attention_measure(attention_state, prefix, sequences)
-      if entry is nil then
-        return nil, "model: no arena for its graphs"
-      end
-      builds[#builds + 1] = entry
-    end
-  end
-  if has_linear then
-    local linear_state: LinearState = {
-      mapped = mapped,
-      shape = (linear_shape_of(geometry) as LinearShape),
-      eps = eps,
-      prefixes = {},
-      owner = false,
-    }
-    local prefix = "blk." .. first_linear .. "."
-    local linear_count = hidden_width(mapped, "attn_norm.weight")
-    if not (linear_count is nil) then
-      for _, entry in ipairs(
-        linear_builds(linear_state, prefix, linear_count, sequences)
-      ) do
-        builds[#builds + 1] = entry
-      end
-    end
-  end
-  local pool = sized_pool(mapped.lib, mapped.device, builds, sequences)
-  if pool is nil then
+  local builds = sized(sequences)
+  local arena = sized_pool(
+    mapped.lib, mapped.device, builds, sequences, nil, nil
+  )
+  if arena is nil then
     return nil, "model: no arena for its graphs"
   end
+  local box: Box = {pool = arena, owned = false}
 
   local feed_forward, feed_line = feed_forward_of(
-    backend, handle, geometry, pool, measure
+    backend, handle, geometry, box, measure
   )
   if feed_forward is nil then
-    pool_free(pool)
+    pool_free(arena)
     return nil, "model: " .. (feed_line as string)
   end
 
   local attention: compute.Attention | nil = nil
   if has_full then
-    local made, line = attention_of(backend, handle, geometry, pool, measure)
+    local made, line = attention_of(backend, handle, geometry, box, measure)
     if made is nil then
       feed_forward:close()
-      pool_free(pool)
+      pool_free(arena)
       return nil, "model: " .. (line as string)
     end
     attention = made
@@ -5675,14 +5874,14 @@ local function model_plan(
 
   local linear: compute.LinearAttention | nil = nil
   if has_linear then
-    local made, line = linear_of(backend, handle, geometry, pool, measure)
+    local made, line = linear_of(backend, handle, geometry, box, measure)
     if made is nil then
       feed_forward:close()
       local blocked = attention
       if not (blocked is nil) then
         blocked:close()
       end
-      pool_free(pool)
+      pool_free(arena)
       return nil, "model: " .. (line as string)
     end
     linear = made
@@ -5696,7 +5895,8 @@ local function model_plan(
     width = math.floor(width),
     positions = taken,
     sequences = sequences,
-    pool = pool,
+    pool = box,
+    sized = sized,
     measure = measure,
     attention = attention,
     linear = linear,
@@ -5838,6 +6038,72 @@ local function fingerprint_of(tensors: {string: Tensor}): integer
   return hash
 end
 
+-- the rows of one sequence in one pass are a group: consecutive positions
+-- running up from the number of positions that sequence has taken
+local function group_refusal(
+  state: ModelState, inputs: {compute.Input}
+): string | nil
+  local named: {string: boolean} = {}
+  for index, input in ipairs(inputs) do
+    local held = state.sequences[input.sequence]
+    if held is nil then
+      return "pass: sequence " .. input.sequence .. " is not reserved"
+    end
+    local first = index == 1 or inputs[index - 1].sequence ~= input.sequence
+    local next_position = (held as SequenceState).taken
+    if first then
+      if named[input.sequence] then
+        return "pass: sequence " .. input.sequence .. " is handed twice"
+      end
+      named[input.sequence] = true
+    else
+      next_position = inputs[index - 1].position + 1
+    end
+    if input.position ~= next_position then
+      return "pass: sequence "
+        .. input.sequence
+        .. " position "
+        .. input.position
+        .. ", the next is "
+        .. next_position
+    end
+  end
+  return nil
+end
+
+-- the arena a pass runs in: the model's, grown to the largest graph a pass of
+-- these rows builds when it holds more rows than the arena was measured at,
+-- the blocks of the run building over the arena the box then holds
+local function pass_arena(
+  state: ModelState, rows: integer
+): Pool | nil, string | nil
+  local box = state.pool
+  local held = box.pool
+  if held is nil then
+    return nil, "pass: no arena for its graphs"
+  end
+  if held.rows >= rows then
+    return held, nil
+  end
+  -- sized from a measurement of this run's own largest graph, and never
+  -- smaller than the arena it replaces
+  local old = held as Pool
+  local wider = sized_pool(
+    old.lib,
+    state.mapped.device,
+    state.sized(rows),
+    rows,
+    math.ceil(old.tensors / math.max(old.rows, 1)),
+    old.bytes
+  )
+  if wider is nil then
+    return nil, "pass: no arena for " .. rows .. " rows"
+  end
+  pool_free(held as Pool)
+  box.pool = wider
+  return wider, nil
+end
+
 local function model_pass(
   state: ModelState,
   inputs: {compute.Input},
@@ -5847,30 +6113,17 @@ local function model_pass(
   if #inputs == 0 then
     return nil, "pass: no rows"
   end
+  local refusal = group_refusal(state, inputs)
+  if not (refusal is nil) then
+    return nil, refusal
+  end
+  local arena, no_room = pass_arena(state, #inputs)
+  if arena is nil then
+    return nil, no_room
+  end
 
   local started = clock.now()
-  local token = measure.passes
-
-  local seen: {string: boolean} = {}
-  for _, input in ipairs(inputs) do
-    local held = state.sequences[input.sequence]
-    if held is nil then
-      return nil, "pass: sequence " .. input.sequence .. " is not reserved"
-    end
-    if seen[input.sequence] then
-      return nil, "pass: sequence " .. input.sequence .. " appears twice"
-    end
-    seen[input.sequence] = true
-    if input.position < 0 or input.position ~= held.taken then
-      return nil,
-        "pass: sequence "
-          .. input.sequence
-          .. " position "
-          .. input.position
-          .. ", the next is "
-          .. held.taken
-    end
-  end
+  local first = measure.tokens
 
   local ids: {integer} = {}
   for index, input in ipairs(inputs) do
@@ -5882,7 +6135,7 @@ local function model_pass(
   end
 
   local embedded, embed_line = graph_run(
-    state.pool as Pool,
+    arena as Pool,
     "",
     "embed",
     "forward",
@@ -5934,11 +6187,16 @@ local function model_pass(
         position = entry.position,
       }
     end
-    local blocked, block_line = state.feed_forward:block(
-      mixed,
-      prefix,
-      {layer = index, token = token, measure = measure, sink = sink}
-    )
+    local watchs: {compute.Watch} = {}
+    for row_index = 1, #mixed do
+      watchs[row_index] = {
+        layer = index,
+        token = first + row_index - 1,
+        measure = measure,
+        sink = sink,
+      }
+    end
+    local blocked, block_line = state.feed_forward:block(mixed, prefix, watchs)
     if blocked is nil then
       return nil, block_line
     end
@@ -5966,7 +6224,8 @@ local function model_pass(
     local held = state.sequences[input.sequence] as SequenceState
     held.taken = held.taken + 1
   end
-  measure.passes = token + 1
+  measure.passes = measure.passes + 1
+  measure.tokens = first + #inputs
   measure.compute = measure.compute + (clock.now() - started)
   return scores, nil
 end
@@ -5976,7 +6235,8 @@ function compute.model(
   handle: weights.Handle,
   positions: integer | nil,
   cache_type: compute.CacheType | nil,
-  sequences?: integer
+  sequences?: integer,
+  ubatch?: integer
 ): compute.Model | nil, string | nil
   local loaded = LOADED[backend]
   if loaded is nil then
@@ -5985,6 +6245,10 @@ function compute.model(
   local limit = sequences or 1
   if limit < 1 then
     return nil, "model: sequences is " .. limit
+  end
+  local rows = ubatch or DEFAULT_UBATCH
+  if rows < 1 then
+    return nil, "model: ubatch is " .. rows
   end
   local cached: compute.CacheType = cache_type or "f16"
   local plan, plan_line = model_plan(
@@ -6021,12 +6285,14 @@ function compute.model(
     full_prefixes = full_prefixes,
     linear_prefixes = linear_prefixes,
     pool = plan.pool,
+    sized = plan.sized,
     measure = plan.measure,
   }
 
   local model = {} as compute.Model
   model.positions = plan.positions
   model.sequences = limit
+  model.ubatch = rows
   model.measure = plan.measure
   local measure = model.measure
   model.routing_sink = nil
@@ -6124,9 +6390,10 @@ function compute.model(
     end
     state.feed_forward:close()
     state.mapped.close()
-    local pool = state.pool
+    local pool = state.pool.pool
     if not (pool is nil) then
       pool_free(pool)
+      state.pool.pool = nil
     end
   end
   model.save = function(

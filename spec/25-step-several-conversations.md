@@ -120,9 +120,10 @@ end
   make no forward, the run exposing `next` and `accept` in place of `step`, and IF `16/FR-009`,
   `16/FR-010` or `16/FR-011` refuse those arguments, THEN THE SYSTEM SHALL return nil and the line
   `generate.text` gives for them.
-- FR-002 (US-001) WHEN a run has an unforwarded prompt id, THE SYSTEM SHALL forward that id and only
-  that id as one row of the pass, at its own position, the one `16/FR-002` gives it, and return no
-  text, so a prompt of several ids takes one step per id.
+- FR-002 (US-001) WHEN a run has an unforwarded prompt id, THE SYSTEM SHALL hand that id and the
+  ids after it, as many as the bound the caller gives it holds and no more, as rows of its own at
+  their own positions, the ones `16/FR-002` gives them, and return no text, so a prompt of several
+  ids takes one step per group and not one per id.
 - FR-003 (US-001) WHEN a row's scores are accepted, THE SYSTEM SHALL take the next token from them
   by the rules `16/FR-004`, `16/FR-005` and `16/FR-006` give, sampling happening when a row's
   scores are accepted and not after a forward of its own, and IF that token is not the end id, THEN

@@ -184,28 +184,31 @@ conversations without the memory growing with every conversation ever seen.
   the bytes `24/FR-006` states for that sequence's positions, and nil when the model holds no such
   sequence; `24/FR-005`'s `attention.cache_bytes` stays the block handle's own form for the cases
   that build a handle and no model.
-- FR-008 (US-001) WHEN `model:pass(rows)` is called with one row for each of one or more reserved
-  sequences, THE SYSTEM SHALL call each block once for all of the pass's rows, return one score row
+- FR-008 (US-001) WHEN `model:pass(rows)` is called with rows that form groups, each group one
+  reserved sequence's consecutive positions running up from the number of positions that sequence
+  has taken, THE SYSTEM SHALL call each block once for all of the pass's rows, return one score row
   per input row in the order given, each holding the numbers `15/FR-005` gives for that row's token
-  at its position at its sequence, and add one to each named sequence's taken count; a pass of no
-  rows SHALL be refused with one line naming `pass`.
-- FR-009 (US-001) IF two rows name one sequence, or a row names a sequence the model has not
-  reserved, or a row's position is not the number of positions its sequence has taken, THEN THE
-  SYSTEM SHALL return nil and one line naming `pass` and that sequence, and add no position to any
-  sequence.
+  at its position at its sequence, and add the rows that sequence was given to that sequence's taken
+  count; a pass of no rows SHALL be refused with one line naming `pass`.
+- FR-009 (US-001) IF the rows naming one sequence are not handed together as a group of consecutive
+  positions running up from the number of positions that sequence has taken, or a row names a
+  sequence the model has not reserved, THEN THE SYSTEM SHALL return nil and one line naming `pass`
+  and that sequence, and add no position to any sequence.
 - FR-010 (US-001) WHEN a pass holds rows of several sequences, THE SYSTEM SHALL return each row's
   numbers as the numbers that row gets in a pass holding only it, whatever order the pass's rows
   are in, and each row's weights SHALL be the softmax of its scores over its own sequence's
-  positions zero to the row's position, no other sequence's positions contributing, so no
-  sequence's keys or values reach another sequence's scores.
+  positions zero to the row's position, whether those positions came from an earlier pass or from an
+  earlier row of the same pass, no other sequence's positions and no later position of its own
+  sequence contributing, so no sequence's keys or values reach another sequence's scores.
 - FR-011 (US-001) WHEN `model:forward(token, position)` is called, THE SYSTEM SHALL make a pass of
   one row for that token on the sequence `""`, reserving it at the model's `positions` when it is
   not reserved, and return that row's score row, or the line `reserve` gives when it cannot make
   that reservation.
-- FR-012 (US-003) WHEN `serve.step(server)` is called, THE SYSTEM SHALL make one pass holding one
-  row for each registered turn that has a row to forward, make no pass when no turn has one, give
-  each such turn the scores of its own row, and return how many turns are still registered after
-  that pass, waiting ones included.
+- FR-012 (US-003) WHEN `serve.step(server)` is called, THE SYSTEM SHALL make one pass holding the
+  groups of every registered turn that has a row to forward, each group that turn's whole share of
+  the model's `ubatch` under `33/FR-011` and at least one row, in the order the turns registered,
+  make no pass when no turn has one, give each such turn the scores of its own group's last row, and
+  return how many turns are still registered after that pass, waiting ones included.
 - FR-013 (US-003) WHEN two turns advance in one step, THE SYSTEM SHALL write each turn's events
   through that turn's own emit in the order the turns registered, and the reply each turn composes
   SHALL be the reply it gives when no other turn runs.
@@ -215,8 +218,9 @@ conversations without the memory growing with every conversation ever seen.
   `12/FR-012` or `14/FR-015`, and making that allocation fail needs a memory limit the suite cannot
   set portably; the branch writes the line `25/FR-010` already writes.
 - FR-015 (US-004) WHEN `serve.build` is called, THE SYSTEM SHALL build one model for the endpoint
-  with the endpoint's `sessions` as its `sequences` and the file's context length as its
-  `positions`, hold it on that server as `serve.model_of` reports it, and build no model per turn;
+  with the endpoint's `sessions` as its `sequences`, the endpoint's `ubatch` as its `ubatch` and
+  the file's context length as its `positions`, hold it on that server as `serve.model_of` reports
+  it, and build no model per turn;
   for an endpoint whose `workers` is more than one, `build` builds no model and holds none on that
   server, so `serve.model_of` gives nil.
 - FR-016 (US-004) IF `compute.model` returns nil when `serve.build` builds it, THEN THE SYSTEM SHALL
@@ -241,7 +245,7 @@ conversations without the memory growing with every conversation ever seen.
   write no other event, and yield.
 - FR-022 (US-004) WHEN a step starts and a sequence is free, THE SYSTEM SHALL admit the
   longest-waiting turns, as many as are free, before it builds the pass, reserving each its
-  sequence and forwarding its prompt's first id in that pass.
+  sequence and forwarding its prompt's first group in that pass.
 - FR-023 (US-004) IF no sequence is free and no stored conversation may be evicted and the reply is
   not streamed, THEN THE SYSTEM SHALL answer `TooManyRequests` with a body holding `error` of type
   `too_many_requests` whose message names `sessions`, storing no conversation and making no pass.

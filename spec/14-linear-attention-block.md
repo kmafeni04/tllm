@@ -197,7 +197,9 @@ the refusal line.
   `position - linear_conv_kernel + 2` to `position` as that sequence and prefix's convolution
   history, and the state numbers FR-007 gives as that sequence and prefix's state, one history
   and one state for each sequence and prefix, each held as single precision numbers, so that a
-  call at the next position reads them and no other sequence's numbers. A sequence and prefix's
+  call at the next position reads them and no other sequence's numbers. What a call keeps is what
+  that sequence's last row of the call leaves them, the earlier rows of a group folded into them
+  as `33/FR-005` says. A sequence and prefix's
   history and state start as zeros, and a refused block call stores nothing: every refusal of
   FR-012 to FR-015 happens before those numbers are written. The history and state are kept under
   a sequence and a prefix, and are freed with that sequence as `26/FR-005` says.
@@ -246,8 +248,9 @@ the refusal line.
   batch's hidden.
 - FR-014 (US-003) IF a row's `position` is negative, or is not the number of positions that
   row's sequence and prefix have already taken, a sequence and prefix that have taken no position
-  taking zero next, THEN THE SYSTEM SHALL return nil and one line naming `block` and that row's
-  sequence and position.
+  taking zero next and a row of the same call naming the same sequence and prefix counting as a
+  position it took, so a group of consecutive rows is accepted, THEN THE SYSTEM SHALL return nil
+  and one line naming `block` and that row's sequence and position.
 - FR-015 (US-003) IF the memory a prefix's history or state or a block call's graph
   needs cannot be allocated THEN THE SYSTEM SHALL return nil and one line naming
   `block`.

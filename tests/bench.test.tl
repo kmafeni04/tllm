@@ -616,3 +616,48 @@ test.it(
     test.falsy(fs.exists(absent))
   end
 )
+
+test.it(
+  "bench counts tokens and routes one record per token",
+  function()
+    local file_path = meta_file(meta(260, nil, true), entries())
+    local config_path = path_for("c") .. ".json"
+    fs.write(
+      config_path, '{"models":{"m":{"path":"' .. file_path .. '"}},"ubatch":3}'
+    )
+    local dump = path_for("r") .. ".jsonl"
+    local ran = run(
+      {
+        "bench",
+        "m",
+        "--config",
+        config_path,
+        "--prefill-tokens",
+        "8",
+        "--decode-tokens",
+        "8",
+        "--dump-routing",
+        dump,
+      }
+    )
+    test.equal(ran.code, 0)
+
+    local prompt_count = count_of(ran.out, "prompt 8")
+    local decode_count = count_of(ran.out, "decode 8")
+    test.truthy(prompt_count >= 8, "the prompt counts the tokens it passed")
+
+    local lines = dumped(dump)
+    test.equal(#lines, prompt_count + decode_count)
+    local seen: {integer: boolean} = {}
+    for _, line in ipairs(lines) do
+      test.equal(line.layer, 0)
+      test.truthy(line.token >= 0, "token " .. line.token)
+      test.less(line.token, #lines)
+      test.equal(seen[line.token], nil, "token " .. line.token .. " twice")
+      seen[line.token] = true
+    end
+    for index = 0, #lines - 1 do
+      test.equal(seen[index], true, "no record for token " .. index)
+    end
+  end
+)

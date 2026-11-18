@@ -367,7 +367,8 @@ local function build(
   cache?: compute.CacheType,
   context_path?: string,
   context_bytes?: integer,
-  workers?: integer
+  workers?: integer,
+  ubatch?: integer
 ): tltp.Server
   local server, failure = serve.build(
     {
@@ -380,6 +381,7 @@ local function build(
       context_path = context_path,
       context_bytes = context_bytes,
       workers = workers,
+      ubatch = ubatch,
     }
   )
   test.equal(failure, nil, file_path)
@@ -2904,5 +2906,143 @@ test.it(
     test.deepEqual(count_events[1], ROLE_EVENT)
     test.deepEqual(count_events[2], finish_event("length"))
     test.equal(count_payloads[3], "[DONE]")
+  end
+)
+
+local SHARE_BODY = '{"messages":[{"role":"user","content":"aba"}],"max_tokens":2,"stream":true}'
+
+local SHARE_ANSWER = '{"messages":[{"role":"user","content":"aba"}],"max_tokens":2}'
+
+local FIRST_HALF = '{"messages":[{"role":"user","content":"aa"}],"max_tokens":2,"stream":true}'
+
+local SECOND_HALF = '{"messages":[{"role":"user","content":"bb"}],"max_tokens":2,"stream":true}'
+
+local ROW_BODY = '{"messages":[{"role":"user","content":"abab"}],'
+  .. '"max_tokens":1,"stream":true}'
+
+local function pieces(events: {StreamEvent}): {string}
+  local parts: {string} = {}
+  for _, event in ipairs(events) do
+    local delta = event.choices[1].delta
+    if not (delta is nil) then
+      local piece = delta.content
+      if not (piece is nil) then
+        parts[#parts + 1] = piece as string
+      end
+    end
+  end
+  return parts
+end
+
+test.it(
+  "a step keeps to its share and splits it fairly",
+  function()
+    local file_path = meta_file(t001_meta(), t001_entries())
+    local chunked = build(file_path, "m", 2, "f32", nil, nil, nil, 2)
+    local whole = build(file_path, "m", 2)
+
+    local _, chunk_fn = serve.stream(chunked, SHARE_BODY)
+    test.truthy(chunk_fn)
+    local one = begun(chunk_fn as tltp.StreamFn, nil, "A")
+    test.deepEqual(events_of(one.payloads), {ROLE_EVENT})
+    serve.step(chunked)
+    test.deepEqual(events_of(one.payloads), {ROLE_EVENT})
+    serve.step(chunked)
+    test.truthy(#one.payloads > 1, "the prompt's last row brings a payload")
+    while serve.step(chunked) > 0 do
+    end
+
+    local _, whole_fn = serve.stream(whole, SHARE_BODY)
+    test.truthy(whole_fn)
+    local full = begun(whole_fn as tltp.StreamFn, nil, "B")
+    serve.step(whole)
+    test.truthy(#full.payloads > 1, "the whole prompt goes in one step")
+    while serve.step(whole) > 0 do
+    end
+
+    test.deepEqual(one.payloads, full.payloads)
+    local answer = serve.answer(whole, SHARE_ANSWER)
+    local reply = tltp.json_decode(answer.body) as ChatReply
+    test.equal(
+      table.concat(pieces(events_of(one.payloads)), ""),
+      reply.choices[1].message.content
+    )
+
+    local pair = build(file_path, "m", 2, "f32", nil, nil, nil, 2)
+    local _, first_fn = serve.stream(pair, FIRST_HALF)
+    test.truthy(first_fn)
+    local first = begun(first_fn as tltp.StreamFn, nil, "A")
+    local _, second_fn = serve.stream(pair, SECOND_HALF)
+    test.truthy(second_fn)
+    local second = begun(second_fn as tltp.StreamFn, nil, "B")
+    test.equal(serve.step(pair), 2)
+    test.deepEqual(events_of(first.payloads), {ROLE_EVENT})
+    test.deepEqual(events_of(second.payloads), {ROLE_EVENT})
+    serve.step(pair)
+    test.truthy(#first.payloads > 1, "the first turn was given its row")
+    test.truthy(#second.payloads > 1, "the second turn was given its row")
+    while serve.step(pair) > 0 do
+    end
+
+    -- 33/FR-011: a turn is given its own group's last row, so a turn whose group
+    -- runs over several rows answers what the same prompt answers one row at a
+    -- time, and a turn shares nothing with the turn stepped beside it
+    local group = build(file_path, "m", 2, "f32", nil, nil, nil, 8)
+    local row = build(file_path, "m", 1, "f32", nil, nil, nil, 1)
+    local _, aside_fn = serve.stream(group, FIRST_HALF)
+    local _, whole_fn2 = serve.stream(group, ROW_BODY)
+    local _, one_fn = serve.stream(row, ROW_BODY)
+    test.truthy(aside_fn)
+    test.truthy(whole_fn2)
+    test.truthy(one_fn)
+    local aside = begun(aside_fn as tltp.StreamFn, nil, "A")
+    local walked = begun(whole_fn2 as tltp.StreamFn, nil, "B")
+    local solo = begun(one_fn as tltp.StreamFn, nil, "C")
+    while serve.step(group) > 0 do
+    end
+    while serve.step(row) > 0 do
+    end
+    test.truthy(#aside.payloads > 1, "the turn beside it was given its row")
+    test.equal(
+      table.concat(pieces(events_of(walked.payloads)), ""),
+      table.concat(pieces(events_of(solo.payloads)), ""),
+      "the group's last row answers the prompt"
+    )
+
+    serve.stop(chunked)
+    serve.stop(whole)
+    serve.stop(pair)
+    serve.stop(group)
+    serve.stop(row)
+  end
+)
+
+test.it(
+  "the endpoint's chunk bound reaches the model",
+  function()
+    local file_path = meta_file(t001_meta(), t001_entries())
+    local bound = build(file_path, "m", 1, "f32", nil, nil, nil, 3)
+    local carried = serve.model_of(bound) as serve.Model
+    test.equal(carried.generation.ubatch, 3)
+
+    local quiet = build(file_path, "m", 1)
+    test.equal((serve.model_of(quiet) as serve.Model).generation.ubatch, 512)
+
+    local plain, plain_line = compute.model(
+      carried.backend, carried.handle, nil, "f32", 1
+    )
+    test.equal(plain_line, nil)
+    test.equal((plain as compute.Model).ubatch, 512)
+
+    local narrow, narrow_line = compute.model(
+      carried.backend, carried.handle, nil, "f32", 1, 0
+    )
+    test.equal(narrow, nil)
+    local message = narrow_line as string
+    test.includes(message, "model")
+    test.includes(message, "ubatch")
+
+    serve.stop(bound)
+    serve.stop(quiet)
   end
 )

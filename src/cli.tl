@@ -158,6 +158,9 @@ local function process_environment(): {string: string}
   return environment
 end
 
+-- 04/FR-011: the chunk bound a file names none keeps
+local DEFAULT_UBATCH: integer = 512
+
 local function serve_code(
   command: targs.Parser,
   write_err: function(string),
@@ -242,6 +245,7 @@ local function serve_code(
       context_path = settings.context_path,
       context_bytes = settings.context_bytes,
       workers = settings.workers or 1,
+      ubatch = settings.ubatch or DEFAULT_UBATCH,
     },
     write_err
   )
@@ -335,6 +339,7 @@ local function bench_code(
       decode = decode,
       kv_cache = cache_type,
       routing_path = routing_path,
+      ubatch = settings.ubatch or DEFAULT_UBATCH,
     },
     write_out,
     write_err

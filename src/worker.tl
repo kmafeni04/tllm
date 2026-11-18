@@ -16,6 +16,7 @@ local record EndpointJson
   kv_cache: compute.CacheType | nil
   context_path: string | nil
   context_bytes: integer | nil
+  ubatch: integer | nil
 end
 
 local function write_frame(path: string, text: string)
@@ -42,6 +43,7 @@ local function endpoint_of(text: string): serve.Endpoint | nil
     kv_cache = decoded.kv_cache,
     context_path = decoded.context_path,
     context_bytes = decoded.context_bytes,
+    ubatch = decoded.ubatch,
   }
 end
 

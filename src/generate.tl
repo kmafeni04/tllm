@@ -23,7 +23,7 @@ local record generate
     cut: boolean
     failure: string | nil
     produced: {integer}
-    next: function(Run): compute.Input | nil
+    next: function(Run, integer): {compute.Input} | nil
     accept: function(Run, {number}): string | nil, string | nil
     fail: function(Run, string)
   end
@@ -74,6 +74,7 @@ local record Progress
   position: integer
   index: integer
   pending: integer | nil
+  handed: integer
   unreleased: string
 end
 
@@ -508,31 +509,43 @@ function generate.open_ids(
     position = start,
     index = start + 1,
     pending = nil,
+    handed = 0,
     unreleased = "",
   }
 
   local produced: {integer} = {}
 
-  local function next_input(self: generate.Run): compute.Input | nil
-    if self.done then
+  -- the rows this run has yet to forward, as many as the caller's bound holds:
+  -- consecutive positions, none of them taken until accept
+  local function next_input(
+    self: generate.Run, most: integer
+  ): {compute.Input} | nil
+    if self.done or most < 1 then
       return nil
     end
-    if progress.index <= #progress.ids then
-      return {
+    local rows: {compute.Input} = {}
+    local at = progress.index + progress.handed
+    while #rows < most and at <= #progress.ids do
+      rows[#rows + 1] = {
         sequence = progress.sequence,
-        token = progress.ids[progress.index],
+        token = progress.ids[at],
+        position = progress.position + progress.handed + #rows,
+      }
+      at = at + 1
+    end
+    if #rows == 0 then
+      local token = progress.pending
+      if token is nil or progress.handed > 0 then
+        return nil
+      end
+      rows[1] = {
+        sequence = progress.sequence,
+        token = token,
         position = progress.position,
       }
     end
-    local token = progress.pending
-    if token is nil then
-      return nil
-    end
-    return {
-      sequence = progress.sequence,
-      token = token,
-      position = progress.position,
-    }
+    progress.handed = progress.handed + #rows
+    return rows
   end
 
   local function accept(
@@ -542,11 +555,17 @@ function generate.open_ids(
       return nil, nil
     end
 
-    local was_prompt = progress.index <= #progress.ids
-    progress.position = progress.position + 1
-    if was_prompt then
-      progress.index = progress.index + 1
-    else
+    local rows = progress.handed
+    progress.handed = 0
+    local prompt_rows = 0
+    while
+      prompt_rows < rows and progress.index + prompt_rows <= #progress.ids
+    do
+      prompt_rows = prompt_rows + 1
+    end
+    progress.index = progress.index + prompt_rows
+    progress.position = progress.position + rows
+    if prompt_rows < rows then
       progress.pending = nil
     end
 
@@ -652,17 +671,17 @@ function generate.text_ids(
 
   local pieces: {string} = {}
   while not run.done do
-    local input = run.next(run)
-    if input is nil then
+    local given = run.next(run, model.ubatch)
+    if given is nil then
       break
     end
-    local rows, pass_line = model:pass({input})
+    local rows, pass_line = model:pass(given)
     if rows is nil then
       run.fail(run, pass_line as string)
       break
     end
     local scores = rows as {{number}}
-    local piece, accept_line = run.accept(run, scores[1])
+    local piece, accept_line = run.accept(run, scores[#scores])
     if not (accept_line is nil) then
       break
     end

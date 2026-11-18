@@ -13,6 +13,7 @@ local record bench
     decode: integer
     kv_cache: compute.CacheType | nil
     routing_path: string | nil
+    ubatch: integer | nil
   end
 
   run: function(Settings, function(string), function(string)): integer
@@ -41,13 +42,13 @@ local record Frame
   ready: number
   routed: integer
   bytes: integer
-  passes: integer
+  tokens: integer
 end
 
 local record Report
   started: number
   ended: number
-  passes: integer
+  tokens: integer
   frames: {Frame}
 end
 
@@ -83,6 +84,7 @@ end
 
 local function zeroed(measure: compute.Measure)
   measure.passes = 0
+  measure.tokens = 0
   measure.compute = 0
   measure.sampling = 0
   measure.ready = 0
@@ -122,7 +124,7 @@ local function driven(
       ready = measure.ready,
       routed = measure.routed,
       bytes = measure.routed_bytes,
-      passes = measure.passes,
+      tokens = measure.tokens,
     }
     return nil, nil
   end
@@ -141,7 +143,7 @@ local function driven(
   return {
     started = started,
     ended = ended,
-    passes = measure.passes,
+    tokens = measure.tokens,
     frames = frames,
   }
 end
@@ -151,10 +153,10 @@ local function reported(
 )
   local frames = report.frames
   local count = #frames
-  local prompt_count = report.passes
+  local prompt_count = report.tokens
   local prompt_end = report.ended
   if count > 0 then
-    prompt_count = frames[1].passes
+    prompt_count = frames[1].tokens
     prompt_end = frames[1].at
   end
   local prompt_seconds = prompt_end - report.started
@@ -236,6 +238,7 @@ function bench.run(
       context_path = nil,
       context_bytes = nil,
       workers = 1,
+      ubatch = settings.ubatch,
     }
   )
   if server is nil then

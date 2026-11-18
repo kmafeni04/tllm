@@ -1485,3 +1485,213 @@ test.it(
     end
   end
 )
+
+-- the mixed fixture: 15/T-002's linear blk.0. and full-attention blk.1. with an
+-- attention output that lets every score row hold numbers. Its linear block
+-- turns token zero at position zero into zeros the run then divides by, so the
+-- cases below walk the ids this fixture answers with numbers
+local function mixed_entries(): {Entry}
+  return replaced(
+    t002_entries(),
+    "blk.1.attn_output.weight",
+    f32("blk.1.attn_output.weight", {2, 2}, {1, 0, 0, 1})
+  )
+end
+
+local function mixed_model(handle: weights.Handle): compute.Model
+  local model = model_of(handle, 4)
+  test.equal(model:reserve("", 4), nil)
+  return model
+end
+
+local function apart(got: {number}, other: {number}, slack: number)
+  test.equal(#got, #other)
+  local wide = false
+  for index = 1, #got do
+    if math.abs(got[index] - other[index]) > slack then
+      wide = true
+    end
+  end
+  test.truthy(wide)
+end
+
+local function refused_rows(got: {{number}} | nil, line: string | nil): string
+  test.equal(got, nil)
+  test.truthy(line)
+  local message = line as string
+  test.equal(message:find("\n"), nil)
+  return message
+end
+
+local function refused_group(model: compute.Model, rows: {compute.Input})
+  local got, line = model:pass(rows)
+  local message = refused_rows(got, line)
+  test.includes(message, "pass")
+  test.includes(message, "sequence a")
+end
+
+-- the mixed fixture at a convolution kernel wider than two, where a group row's
+-- window carries stored taps and the taps of the rows before it in the group
+local function wider_kernel(meta: {Meta}): {Meta}
+  return with_integer(meta, "qwen35moe.ssm.conv_kernel", 4)
+end
+
+local function wider_conv(entries: {Entry}): {Entry}
+  return replaced(
+    entries,
+    "blk.0.ssm_conv1d.weight",
+    f32("blk.0.ssm_conv1d.weight", {4, 12}, repeated({0.5, 1, 0.25, 2}, 12))
+  )
+end
+
+local function chunk_walk(meta: {Meta}, entries: {Entry})
+  local handle = loaded(meta, entries)
+  local chunked = mixed_model(handle)
+  local one = mixed_model(handle)
+  local split = mixed_model(handle)
+  local started = chunked.measure.graphs
+  local ids = {1, 2, 1}
+
+  local got, line = chunked:pass(
+    {
+      {sequence = "", token = 1, position = 0},
+      {sequence = "", token = 2, position = 1},
+      {sequence = "", token = 1, position = 2},
+    }
+  )
+  test.equal(line, nil)
+  local rows = got as {{number}}
+  test.equal(#rows, 3)
+  test.equal(chunked.measure.graphs - started, 8)
+  test.equal(chunked.measure.tokens, 3)
+
+  for index, token in ipairs(ids) do
+    close(rows[index], forward(one, token, index - 1), 1e-4)
+  end
+
+  local halves, half_line = split:pass(
+    {
+      {sequence = "", token = 1, position = 0},
+      {sequence = "", token = 2, position = 1},
+    }
+  )
+  test.equal(half_line, nil)
+  local rest, rest_line = split:pass({{sequence = "", token = 1, position = 2}})
+  test.equal(rest_line, nil)
+  local walked = halves as {{number}}
+  close(rows[1], walked[1], 1e-4)
+  close(rows[2], walked[2], 1e-4)
+  close(rows[3], (rest as {{number}})[1], 1e-4)
+
+  apart(rows[1], rows[3], 1e-3)
+
+  local after, after_line = chunked:pass(
+    {{sequence = "", token = 2, position = 3}}
+  )
+  test.equal(after_line, nil)
+  close((after as {{number}})[1], forward(one, 2, 3), 1e-4)
+end
+
+test.it(
+  "a chunk gives each row the numbers it gets one at a time",
+  function()
+    chunk_walk(t002_meta(), mixed_entries())
+    chunk_walk(wider_kernel(t002_meta()), wider_conv(mixed_entries()))
+  end
+)
+
+test.it(
+  "rows that do not run together are refused and take nothing",
+  function()
+    local handle = loaded(t002_meta(), mixed_entries())
+    local model = model_sequences(handle, 4, 2)
+    local alone = mixed_model(handle)
+    test.equal(model:reserve("a", 4), nil)
+    test.equal(model:reserve("b", 4), nil)
+
+    refused_group(
+      model,
+      {
+        {sequence = "a", token = 1, position = 0},
+        {sequence = "a", token = 2, position = 2},
+      }
+    )
+    refused_group(
+      model,
+      {
+        {sequence = "a", token = 1, position = 1},
+        {sequence = "a", token = 2, position = 0},
+      }
+    )
+    refused_group(
+      model,
+      {
+        {sequence = "a", token = 1, position = 0},
+        {sequence = "b", token = 1, position = 0},
+        {sequence = "a", token = 2, position = 1},
+      }
+    )
+
+    local got, line = model:pass(
+      {
+        {sequence = "a", token = 1, position = 0},
+        {sequence = "a", token = 2, position = 1},
+      }
+    )
+    test.equal(line, nil)
+    local rows = got as {{number}}
+    close(rows[1], forward(alone, 1, 0), 1e-4)
+    close(rows[2], forward(alone, 2, 1), 1e-4)
+  end
+)
+
+local function past_rows(name: string): {compute.Input}
+  local ids = {0, 1, 0, 1, 0, 1}
+  local rows: {compute.Input} = {}
+  for position, token in ipairs(ids) do
+    rows[position] = {
+      sequence = name,
+      token = token,
+      position = position - 1,
+    }
+  end
+  return rows
+end
+
+test.it(
+  "a chunk past the cache is refused as one",
+  function()
+    local handle = loaded(t001_meta(), t001_entries())
+    local model = model_sequences(handle, 4, 2)
+    local alone = model_of(handle, 4)
+    test.equal(model:reserve("a", 4), nil)
+    test.equal(alone:reserve("", 4), nil)
+
+    local six = past_rows("a")
+    local got, line = model:pass(six)
+    local message = refused_rows(got, line)
+    test.includes(message, "sequence a")
+    test.includes(message, "position 4")
+    test.equal(message:find("5", 1, true), nil)
+
+    local four = {six[1], six[2], six[3], six[4]}
+    local again, again_line = model:pass(four)
+    test.equal(again_line, nil)
+    local rows = again as {{number}}
+    for position = 1, 4 do
+      local token = six[position].token
+      close(rows[position], forward(alone, token, position - 1), 1e-4)
+    end
+
+    local walked = model_sequences(loaded(t002_meta(), mixed_entries()), 4, 2)
+    test.equal(walked:reserve("a", 4), nil)
+    local _, mixed_line = walked:pass(six)
+    local first = refused_rows(nil, mixed_line)
+    test.includes(first, "sequence a")
+    test.includes(first, "position 4")
+    local _, next_line = walked:pass(four)
+    local second = refused_rows(nil, next_line)
+    test.includes(second, "blk.0.")
+    test.includes(second, "position 0")
+  end
+)
