@@ -574,3 +574,18 @@ on_device(
     test.greaterEqual(again - loaded, math.floor(bytes * 9 / 10))
   end
 )
+
+on_device(
+  "a device model reads no matrix whole",
+  function()
+    local handle = model_handle()
+    local model = passed(backend, handle)
+    local scores, line = model:forward(0, 0)
+    test.equal(line, nil)
+    test.truthy(scores ~= nil, "the pass ran")
+    test.equal(model.measure.blob_reads, 0)
+
+    model:close()
+    test.equal(handle.release(handle), nil)
+  end
+)

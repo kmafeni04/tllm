@@ -1,6 +1,6 @@
 # 34: Whole-blob expert reads
 
-**Status**: pending   **Depends on**: 06, 13, 21, 26, 29, 33
+**Status**: done   **Depends on**: 06, 13, 21, 26, 29, 33
 
 ## Problem & context
 
@@ -30,10 +30,10 @@ cache behind the pointer `weight_of` already hands out, so a matrix costs its co
 handle's lifetime and a later zero-copy read path over that same mapping stays open.
 
 The seam already exists. `compute` chooses a block's experts on the host between the block's votes
-graph and its choice graph (`src/compute.tl:3869`), and `expert_bytes` already takes the chosen set
+graph and its choice graph (`src/compute.tl:3920`), and `expert_bytes` already takes the chosen set
 apart into the three matrices an expert holds, so their offsets and sizes are known before the graph
 that reads them is built. What is missing is the descriptor to read from (`weights.load` closes the
-one it opened for `mmap`, which `06/FR-013` requires and this spec amends), the buffer a read lands
+one it opened for `mmap`, which `06/FR-013` now keeps open on the handle), the buffer a read lands
 in, the handle's record of what it has read, and three fields in `compute.Measure` beside the
 `tokens` field `33` added, so `29`'s bench can report the reads.
 
@@ -41,6 +41,7 @@ in, the handle's record of what it has read, and three fields in `compute.Measur
 local record weights
   record Handle
     -- 06's fields, plus:
+    mapping: integer
     descriptor: integer
     read_matrices: {string: {integer: boolean}}
     buffer: ffi.CData | nil
@@ -65,7 +66,9 @@ end
 ```
 
 The buffer is allocated by a handle's first read, grown when a larger matrix comes, reused for
-every later read of that handle and freed by `release` beside the mapping.
+every later read of that handle and freed by `release` beside the mapping. `mapping` is the address
+the mapping was made at, so a tensor's `data` says which position of the file the whole read asks
+for.
 
 ## User stories
 
@@ -142,16 +145,4 @@ every later read of that handle and freed by `release` beside the mapping.
 
 ## Amendments
 
-- `06/FR-013`: `weights.load` keeps the descriptor it opened for `mmap` on the handle instead of
-  closing it, and `weights.Handle.release` closes it with the mapping, because `34`'s whole-matrix
-  reads read from that descriptor; `06`'s paragraph saying the handle holds the mapping and nothing
-  else is corrected in the same pass to say it holds the mapping and one descriptor, and `06/T-005`'s
-  clause about `/proc/self/fd` after `load` moves to `34/T-006`.
-- `29/FR-005`: the `experts` line becomes
-  `experts L: K routed, X MB; per turn R reads, Y MB read, S ms`, R being the turn's
-  `measure.blob_reads` value as a whole number, Y that turn's `measure.blob_bytes` value divided by
-  1000000 to one decimal place, and S its `measure.blob_seconds` value in milliseconds to three
-  decimal places, with the three times the `token` line prints still summing to within 20% of T;
-  `29/T-001`'s `experts` pattern gains those three fields, its four-line count stays four, and its
-  second-run comparison covers the prompt count, the routed count, the routed bytes, the reads and
-  the bytes read only, because S is a clock reading and no case pins a speed.
+- None.

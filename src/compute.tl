@@ -307,6 +307,9 @@ local record compute
     ready: number
     routed: integer
     routed_bytes: integer
+    blob_reads: integer
+    blob_bytes: integer
+    blob_seconds: number
     graphs: integer
   end
 
@@ -477,6 +480,7 @@ local record Mapped
   lib: Library
   tensors: {string: Tensor}
   descriptors: {string: ffi.CData}
+  handle: weights.Handle
   device: Copy | nil
   arena: ffi.CData | nil
   ctx: ffi.CData | nil
@@ -1755,6 +1759,7 @@ local function mapped_of(
         lib = lib,
         tensors = handle.tensors,
         descriptors = copy.tensors,
+        handle = handle,
         device = copy,
         hold = mark.hold,
         close = mark.close,
@@ -1797,6 +1802,7 @@ local function mapped_of(
     lib = lib,
     tensors = handle.tensors,
     descriptors = descriptors,
+    handle = handle,
     arena = arena,
     ctx = ctx,
     hold = mark.hold,
@@ -3774,6 +3780,52 @@ local function expert_bytes(
   return total
 end
 
+-- the whole read of the chosen experts: one request per matrix this handle has
+-- not read yet, filling the page cache behind the pointer the choice graph
+-- multiplies by. The graph over a device copy reads no mapping, so it reads no
+-- matrix
+local function read_experts(
+  mapped: Mapped,
+  prefix: string,
+  chosen: {integer: boolean},
+  experts: integer,
+  measure: compute.Measure | nil
+): string | nil
+  local copy = mapped.device
+  if copy is Copy then
+    return nil
+  end
+  local started = clock.now()
+  local reads = 0
+  local bytes = 0
+  for _, name in ipairs(
+    {"ffn_up_exps.weight", "ffn_gate_exps.weight", "ffn_down_exps.weight"}
+  ) do
+    local tensor = mapped.tensors[prefix .. name]
+    if not (tensor is nil) and #tensor.dims >= 3 then
+      local each = math.floor(tensor.bytes / (tensor.dims[3] as integer))
+      for expert = 0, experts - 1 do
+        if chosen[expert] then
+          local moved, line = weights.read(mapped.handle, tensor, expert)
+          if moved is nil then
+            return line as string
+          end
+          if moved == true then
+            reads = reads + 1
+            bytes = bytes + each
+          end
+        end
+      end
+    end
+  end
+  if reads > 0 and not (measure is nil) then
+    measure.blob_reads = measure.blob_reads + reads
+    measure.blob_bytes = measure.blob_bytes + bytes
+    measure.blob_seconds = measure.blob_seconds + (clock.now() - started)
+  end
+  return nil
+end
+
 local function recorded(
   watch: compute.Watch, mapped: Mapped, prefix: string, selected: {integer}
 )
@@ -3865,16 +3917,23 @@ local function feed_forward_block(
   graph_closed(made)
 
   local totals: {number} = {}
+  local chosen: {integer: boolean} = {}
   for index, probabilities in ipairs(votes) do
-    local chosen = chosen_experts(probabilities, geometry.experts_used)
+    local routed = chosen_experts(probabilities, geometry.experts_used)
     local total: number = 0
-    for _, expert in ipairs(chosen) do
+    for _, expert in ipairs(routed) do
       total = total + probabilities[expert + 1]
+      chosen[expert] = true
     end
     totals[index] = total
     if not (watchs is nil) then
-      recorded((watchs as {compute.Watch})[index], mapped, prefix, chosen)
+      recorded((watchs as {compute.Watch})[index], mapped, prefix, routed)
     end
+  end
+
+  local read_line = read_experts(mapped, prefix, chosen, experts, state.measure)
+  if not (read_line is nil) then
+    return nil, read_line
   end
 
   local second, second_failure = graph_run(
@@ -5839,6 +5898,9 @@ local function model_plan(
     ready = 0,
     routed = 0,
     routed_bytes = 0,
+    blob_reads = 0,
+    blob_bytes = 0,
+    blob_seconds = 0,
     graphs = 0,
   }
   local sized = function(rows: integer): {Build}

@@ -140,15 +140,17 @@ refusal lines through the second, and hands back the exit code. The `generation`
 - FR-005 (US-002) WHEN a length's turn produced at least one content frame after the first, THE
   SYSTEM SHALL write the line
   `token L: T ms, compute A ms, sampling B ms, ipc C ms` and the line
-  `experts L: K routed, X MB`, per token over those later frames, where T is the seconds from the
-  first content frame to the last content frame over the decode count, A and B are the `measure`
-  compute and sampling deltas between those two frames over that count, C is the sum over those
-  frames of the clock when the frame reached the bench minus the `measure` ready mark at that
-  moment over that count, K is the `measure` routed delta between the two frames over that count,
-  and X is the `measure` routed bytes delta over that count divided by 1000000; T, A, B and C are
-  each multiplied by 1000 and printed in milliseconds to three decimal places, K as a whole number
-  and X to one decimal place; and those three times it prints SHALL sum to within 20% of T, the
-  two compared as printed.
+  `experts L: K routed, X MB; per turn R reads, Y MB read, S ms`, per token over those later
+  frames, where T is the seconds from the first content frame to the last content frame over the
+  decode count, A and B are the `measure` compute and sampling deltas between those two frames over
+  that count, C is the sum over those frames of the clock when the frame reached the bench minus the
+  `measure` ready mark at that moment over that count, K is the `measure` routed delta between the
+  two frames over that count, and X is the `measure` routed bytes delta over that count divided by
+  1000000; R, Y and S are the turn's `34/FR-003` blob reads, blob bytes divided by 1000000 and blob
+  seconds in milliseconds, all read from the `measure` at the turn's end; T, A, B, C and S are each
+  multiplied by 1000 and printed in milliseconds to three decimal places, K and R as whole numbers
+  and X and Y to one decimal place; and those three times it prints SHALL sum to within 20% of T,
+  the two compared as printed.
 - FR-006 (US-001) IF a length's body is refused with status `BadRequest`, THEN THE SYSTEM SHALL
   write the line `skipped L: M` where L is the length and M is what the refusal body holds, and
   run the next length; IF a length's body is answered with any other status than `OK`, or with a
@@ -226,10 +228,12 @@ fixture with `context_length` 260, T-002 and T-004 also with 4096.
   stdout matching `^prompt 8: (%d+) tokens at (%d+%.%d) tok/s, first token (%d+%.%d) ms$`,
   `^decode 8: 7 tokens at (%d+%.%d) tok/s$`,
   `^token 8: (%d+%.%d%d%d) ms, compute (%d+%.%d%d%d) ms, sampling (%d+%.%d%d%d) ms, ipc (%d+%.%d%d%d) ms$`
-  and `^experts 8: (%d+) routed, (%d+%.%d) MB$`, with the prompt count at least
-  8, the routed count 1 and compute above `0.000`, that the printed compute, sampling and ipc sum
-  to within 20% of the printed total, that a second identical run returns 0 with the same prompt
-  count and the same experts line, and that on a copy whose `tokenizer.ggml.eos_token_id` is the
+  and
+  `^experts 8: (%d+) routed, (%d+%.%d) MB; per turn (%d+) reads, (%d+%.%d) MB read, (%d+%.%d%d%d) ms$`,
+  with the prompt count at least 8, the routed count 1 and compute above `0.000`, that the printed
+  compute, sampling and ipc sum to within 20% of the printed total, that a second identical run
+  returns 0 with the same prompt count and the same experts line apart from its milliseconds, and
+  that on a copy whose `tokenizer.ggml.eos_token_id` is the
   id that copy's scores put first, `bench P --prefill-tokens 8 --decode-tokens 8` returns 0 with
   the `prompt 8:` line, a `^decode 8: 0 tokens at 0.0 tok/s$` line, and no `token 8:` and no
   `experts 8:` line.

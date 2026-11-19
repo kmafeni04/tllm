@@ -12,7 +12,7 @@ local u32, u64, text = support.u32, support.u64, support.text
 local padded, f32, mint = support.padded, support.f32, support.mint
 local mfloat, mtext, mstrings, mint_array =
   support.mfloat, support.mtext, support.mstrings, support.mint_array
-local both = support.both
+local both, replaced = support.both, support.replaced
 
 local ROOT = os.tmpname()
 os.remove(ROOT)
@@ -234,7 +234,8 @@ local PROMPT_8 = "^prompt 8: (%d+) tokens at (%d+%.%d) tok/s, "
 local TOKEN_8 = "^token 8: (%d+%.%d%d%d) ms, compute (%d+%.%d%d%d) ms, "
   .. "sampling (%d+%.%d%d%d) ms, ipc (%d+%.%d%d%d) ms$"
 
-local EXPERTS_8 = "^experts 8: (%d+) routed, (%d+%.%d) MB$"
+local EXPERTS_8 = "^experts 8: (%d+) routed, (%d+%.%d) MB; per turn (%d+) "
+  .. "reads, (%d+%.%d) MB read, (%d+%.%d%d%d) ms$"
 
 test.it(
   "a rung reports and adds up",
@@ -272,7 +273,7 @@ test.it(
       math.abs(compute_time + sampling_time + ipc - total) <= total * 0.2,
       first.out[3]
     )
-    local routed = first.out[4]:match(EXPERTS_8)
+    local routed, _, _, _ = first.out[4]:match(EXPERTS_8)
     test.equal(tonumber(routed as string), 1, first.out[4])
 
     local second = run(args)
@@ -281,7 +282,18 @@ test.it(
     test.equal(
       tonumber((second.out[1]:match(PROMPT_8)) as string), prompt_count
     )
-    test.equal(second.out[4], first.out[4])
+    -- the milliseconds are a clock reading, so the two runs share every other
+    -- figure of the experts line
+    local again_routed, again_bytes, again_reads, again_read = second.out[4]:match(
+      EXPERTS_8
+    )
+    local _, first_bytes, first_reads, first_read = first.out[4]:match(
+      EXPERTS_8
+    )
+    test.equal(again_routed, routed, second.out[4])
+    test.equal(again_bytes, first_bytes, second.out[4])
+    test.equal(again_reads, first_reads, second.out[4])
+    test.equal(again_read, first_read, second.out[4])
 
     local stopped = meta_file(
       meta(260, first_id(file_path, FILLER), true), entries()
@@ -564,5 +576,82 @@ test.it(
     for index = 0, #lines - 1 do
       test.equal(seen[index], true, "no record for token " .. index)
     end
+  end
+)
+
+-- the expert tier of a fixture wide enough that its read figure is more than
+-- a rounding note
+local WIDE = 12500
+local WIDE_MATRIX = 2 * WIDE * 4
+
+local function wide_entries(): {Entry}
+  local empty: {number} = {}
+  for _ = 1, 4 * WIDE do
+    empty[#empty + 1] = 0
+  end
+  local stacked = replaced(
+    entries(),
+    "blk.0.ffn_up_exps.weight",
+    f32("blk.0.ffn_up_exps.weight", {2, WIDE, 2}, empty)
+  )
+  stacked = replaced(
+    stacked,
+    "blk.0.ffn_gate_exps.weight",
+    f32("blk.0.ffn_gate_exps.weight", {2, WIDE, 2}, empty)
+  )
+  return replaced(
+    stacked,
+    "blk.0.ffn_down_exps.weight",
+    f32("blk.0.ffn_down_exps.weight", {WIDE, 2, 2}, empty)
+  )
+end
+
+test.it(
+  "bench reports the expert reads",
+  function()
+    local file_path = meta_file(meta(260, nil, true), wide_entries())
+    local got = run(
+      {
+        "bench",
+        file_path,
+        "--prefill-tokens",
+        "8",
+        "--decode-tokens",
+        "8",
+      }
+    )
+    test.equal(got.code, 0)
+    test.equal(#got.out, 4, table.concat(got.out, "\n"))
+
+    local _, _, reads, read_bytes, ms = got.out[4]:match(EXPERTS_8)
+    test.truthy(reads, got.out[4])
+
+    -- the same load the bench server makes, run over this fixture here, so the
+    -- figures are compared with a measure rather than with a guess about this
+    -- machine: the turn routes one expert, as this pass does
+    local handle = weights.load(file_path) as weights.Handle
+    local backend = compute.load() as compute.Backend
+    local model = compute.model(backend, handle, nil, "f16", 1) as compute.Model
+    local planes, line = model:forward(0, 0)
+    test.equal(line, nil)
+    test.truthy(planes ~= nil, "the pass ran")
+    local whole = model.measure.blob_reads
+    test.equal(tonumber(reads as string), whole, got.out[4])
+    test.equal(
+      read_bytes,
+      string.format("%.1f", model.measure.blob_bytes / 1000000),
+      got.out[4]
+    )
+    if whole > 0 then
+      test.equal(
+        read_bytes,
+        string.format("%.1f", whole * WIDE_MATRIX / 1000000),
+        got.out[4]
+      )
+      test.truthy((tonumber(ms as string) as number) > 0, got.out[4])
+    end
+
+    model:close()
+    test.equal(handle.release(handle), nil)
   end
 )

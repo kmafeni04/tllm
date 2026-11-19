@@ -3,6 +3,7 @@ local test = require("lde-test")
 local support = require("tests.support")
 local clock = require("tllm.clock")
 local compute = require("tllm.compute")
+local gguf = require("tllm.gguf")
 local weights = require("tllm.weights")
 local type Entry = support.Entry
 local type Meta = support.Meta
@@ -1539,5 +1540,106 @@ test.it(
     local second = refused_rows(nil, next_line)
     test.includes(second, "blk.0.")
     test.includes(second, "position 0")
+  end
+)
+
+-- the router's vote rows, set so the fixture's two tokens both answer with the
+-- last expert, and its matrices last in the file so a cut reaches them
+local function read_entries(): {Entry}
+  local votes = replaced(
+    full_block("blk.0."),
+    "blk.0.ffn_gate_inp.weight",
+    f32("blk.0.ffn_gate_inp.weight", {2, 2}, {0, 0, 1, 0})
+  )
+  local body = without(votes, "blk.0.ffn_down_exps.weight")
+  local last = f32("blk.0.ffn_down_exps.weight", {2, 2, 2}, zeros(8))
+  return both(both(body, root_entries(2, {1, 0, 3, 4})), {last})
+end
+
+local function read_model(handle: weights.Handle): compute.Model
+  local model, failure = compute.model(backend, handle, 4, "f32")
+  test.equal(failure, nil)
+  test.equal((model as compute.Model):reserve("", 4), nil)
+  return model as compute.Model
+end
+
+local function read_rows(from: integer, to: integer): {compute.Input}
+  local rows: {compute.Input} = {}
+  for position = from, to do
+    rows[#rows + 1] = {
+      sequence = "",
+      token = position % 2,
+      position = position,
+    }
+  end
+  return rows
+end
+
+local function expert_bytes(handle: weights.Handle): integer
+  local total = 0
+  for _, name in ipairs(
+    {"ffn_up_exps.weight", "ffn_gate_exps.weight", "ffn_down_exps.weight"}
+  ) do
+    local tensor = handle.tensors["blk.0." .. name] as weights.Tensor
+    total = total + math.floor(tensor.bytes / (tensor.dims[3] as integer))
+  end
+  return total
+end
+
+test.it(
+  "a matrix is read once for the handle",
+  function()
+    local model = read_model(loaded(t001_meta(), read_entries()))
+    test.equal(model.measure.blob_reads, 0)
+
+    local rows, line = model:pass(read_rows(0, 1))
+    test.equal(line, nil)
+    test.truthy(rows ~= nil, "the pass ran")
+    test.equal(model.measure.blob_reads, 3, "one read per chosen matrix")
+
+    local later, later_line = model:pass(read_rows(2, 2))
+    test.equal(later_line, nil)
+    test.truthy(later ~= nil, "the pass ran")
+    test.equal(model.measure.blob_reads, 3, "the handle read them already")
+  end
+)
+
+test.it(
+  "a pass counts the expert reads",
+  function()
+    local handle = loaded(t001_meta(), read_entries())
+    local model = read_model(handle)
+    local rows, line = model:pass(read_rows(0, 0))
+    test.equal(line, nil)
+    test.truthy(rows ~= nil, "the pass ran")
+    test.equal(model.measure.blob_reads, 3)
+    test.equal(model.measure.blob_bytes, expert_bytes(handle))
+    test.greater(model.measure.blob_seconds, 0)
+  end
+)
+
+test.it(
+  "a short matrix read is refused with its tensor",
+  function()
+    local whole = fixture(t001_meta(), read_entries())
+    local info = gguf.read(whole) as gguf.Info
+    local content = fs.read(whole) as string
+    written = written + 1
+    local cut_path = ROOT .. "/cut" .. written .. ".gguf"
+    fs.write(cut_path, content:sub(1, #content - 8))
+
+    local handle, failure = weights.load(cut_path, info)
+    test.equal(failure, nil, cut_path)
+    local held = handle as weights.Handle
+    local down = held.tensors["blk.0.ffn_down_exps.weight"] as weights.Tensor
+    local last = (down.dims[3] as integer) - 1
+    local moved, at_fault = weights.read(held, down, last)
+    test.equal(moved, nil, at_fault)
+    local line = at_fault as string
+    test.includes(line, "blk.0.ffn_down_exps.weight")
+
+    local rows, pass_line = read_model(held):pass(read_rows(0, 0))
+    test.equal(rows, nil, pass_line)
+    test.equal(pass_line, line)
   end
 )

@@ -161,15 +161,81 @@ test.it(
     local table_bytes = header(1, 0) .. tensor("a", {2, 3}, 0, 0)
     local file_path = fixture(table_bytes .. string.rep("\0", 56))
 
-    local before = fd_count()
     local handle = load_file(file_path)
     test.truthy(mapped(file_path), file_path)
-    test.lessEqual(fd_count(), before)
 
     handle.release(handle)
     test.equal(mapped(file_path), false)
     handle.release(handle)
     test.equal(mapped(file_path), false)
+  end
+)
+
+local STACK = header(1, 0) .. tensor("stack.weight", {2, 2, 2}, 0, 0)
+
+local record Closing
+  close: function(integer): integer
+end
+
+test.it(
+  "a whole-matrix read returns the mapping's bytes",
+  function()
+    local file_path = fixture(
+      padded(STACK, 32) .. region(16, 17) .. region(16, 34)
+    )
+    local handle = load_file(file_path)
+    local stack = handle.tensors["stack.weight"] as weights.Tensor
+    local each = math.floor(stack.bytes / 2)
+
+    local moved, failure = weights.read(handle, stack, 1)
+    test.equal(moved, true, failure)
+    test.equal(handle.buffer_bytes, each)
+    test.equal(ffi.string(handle.buffer as ffi.CData, each), region(each, 34))
+    test.notEqual(
+      ffi.string(handle.buffer as ffi.CData, each), ffi.string(stack.data, each)
+    )
+    handle.release(handle)
+  end
+)
+
+test.it(
+  "a read that cannot be made is refused with its tensor",
+  function()
+    local file_path = fixture(padded(STACK, 32) .. region(32, 17))
+
+    local gone = load_file(file_path)
+    local stack = gone.tensors["stack.weight"] as weights.Tensor
+    gone.release(gone)
+    local moved, failure = weights.read(gone, stack, 0)
+    test.equal(moved, nil, failure)
+    test.includes(failure as string, "stack.weight")
+
+    -- a descriptor the whole read would go through, closed under the handle
+    local closed = load_file(file_path)
+    local kept = closed.tensors["stack.weight"] as weights.Tensor
+    (ffi.C as Closing).close(closed.descriptor)
+    local read, at_fault = weights.read(closed, kept, 0)
+    test.equal(read, nil, at_fault)
+    test.includes(at_fault as string, "stack.weight")
+  end
+)
+
+test.it(
+  "release closes the read descriptor and frees its buffer",
+  function()
+    local before = fd_count()
+    local file_path = fixture(padded(STACK, 32) .. region(32, 17))
+    local handle = load_file(file_path)
+    test.equal(fd_count(), before + 1, "one descriptor for the whole read")
+
+    local stack = handle.tensors["stack.weight"] as weights.Tensor
+    test.equal(weights.read(handle, stack, 0), true)
+    test.truthy(handle.buffer ~= nil, "the read's buffer")
+
+    handle.release(handle)
+    test.equal(fd_count(), before, "no descriptor left behind")
+    test.equal(handle.buffer, nil)
+    test.equal(handle.buffer_bytes, 0)
   end
 )
 

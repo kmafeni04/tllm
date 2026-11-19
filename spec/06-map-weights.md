@@ -108,9 +108,9 @@ offset that is not a page boundary, and a tensor offset is only aligned to `gene
 The mapping is the reason the handle exists: a 16-gigabyte model costs no heap, the kernel reads a
 tensor's pages when the engine first touches them, and one `release` gives the file back. Nothing
 is copied, so the pointer a tensor hands out stays valid until `release` and never after. The
-descriptor `mmap` needs is closed before `load` returns, on the failing path as well, so the
-handle holds the mapping and nothing else, which is what `US-004` asks: a load leaves nothing
-behind.
+descriptor `mmap` needs stays open on the handle, on the failing path closed before `load`
+returns, so the handle holds the mapping and that one descriptor, which is what `US-004` asks: a
+`release` leaves nothing behind. `34` reads whole matrices through that descriptor.
 
 `05` stops at the end of the tensor table and, as amended by this spec, exposes that position as
 `table_end`. The loader needs it to compute `data_start`: the first byte of tensor data is the
@@ -153,7 +153,7 @@ table is checked against the rows above.
   portably; the branch returns nil and one line holding the path and closes the descriptor, which a
   reader confirms by inspection.
 - FR-012 (US-003) IF more than one refusal applies to a file the reader accepts, THEN THE SYSTEM SHALL report the alignment before a tensor, and the first tensor in file order when several tensors are at fault.
-- FR-013 (US-004) WHEN the mapping succeeds, THE SYSTEM SHALL close the descriptor `load` opened for it before returning.
+- FR-013 (US-004) WHEN the mapping succeeds, THE SYSTEM SHALL keep the descriptor `load` opened for it on the handle, and the handle's `release` SHALL close it as it unmaps the file.
 
 ## Non-goals
 
@@ -168,7 +168,7 @@ table is checked against the rows above.
   case here repeats the table.
 - T-003 (FR-003, FR-005, FR-006): `tensors come back by name with their bytes`, proves on a fixture holding an f32 tensor of dimensions 2 and 3, a q4_0 tensor of dimensions 64 and 2 and an f32 tensor with no dimensions, with the data written at aligned offsets, that `path` is the fixture's path, that `tensors` holds exactly those three names, that each `dims` and `kind.name` is as the file states, that `elements` and `bytes` are 6 and 24 for the first, 128 and 72 for the second and 1 and 4 for the third, and that reading `bytes` from each `data` gives that tensor's bytes.
 - T-004 (FR-004): `alignment and the data start come from the file`, proves a fixture stating `general.alignment` 64 returns `alignment` 64 and a `data_start` at or after the `table_end` that `gguf.read` gives for it, a multiple of 64 and less than that `table_end` plus 64, and that the same tensor table with no `general.alignment` returns `alignment` 32 and a `data_start` at or after its `table_end`, a multiple of 32 and less than that `table_end` plus 32.
-- T-005 (FR-007, FR-013): `release unmaps the file`, proves the fixture's path appears in `/proc/self/maps` after `load`, no longer appears after `release`, that a second `release` returns with the path still absent, and that the process holds no more `/proc/self/fd` entries after `load` than before it.
+- T-005 (FR-007, FR-013): `release unmaps the file`, proves the fixture's path appears in `/proc/self/maps` after `load`, no longer appears after `release`, and that a second `release` returns with the path still absent. What the process holds of `/proc/self/fd` across `load` and `release` is `34/T-006`'s.
 - T-006 (FR-008): `a file the reader refuses is refused with its line`, proves a path that does not exist and a file whose first four bytes are `GGML` each return nil and one line holding the path.
 - T-007 (FR-009, FR-012): `an alignment that is not a positive integer is refused`, proves `general.alignment` as a string, as 0 and as 64.5 each return nil and one line holding `general.alignment`, and that a fixture stating `general.alignment` 0 with a tensor of type 4 returns the alignment line, not the tensor line.
 - T-009 (FR-014, FR-015): `release waits for its holders`, proves a handle `weights.attach` was

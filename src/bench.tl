@@ -49,6 +49,9 @@ local record Report
   started: number
   ended: number
   tokens: integer
+  reads: integer
+  read_bytes: integer
+  read_seconds: number
   frames: {Frame}
 end
 
@@ -90,6 +93,9 @@ local function zeroed(measure: compute.Measure)
   measure.ready = 0
   measure.routed = 0
   measure.routed_bytes = 0
+  measure.blob_reads = 0
+  measure.blob_bytes = 0
+  measure.blob_seconds = 0
 end
 
 local function driven(
@@ -144,6 +150,9 @@ local function driven(
     started = started,
     ended = ended,
     tokens = measure.tokens,
+    reads = measure.blob_reads,
+    read_bytes = measure.blob_bytes,
+    read_seconds = measure.blob_seconds,
     frames = frames,
   }
 end
@@ -218,7 +227,16 @@ local function reported(
   local routed = math.floor((last.routed - first.routed) / decode_count)
   local megabytes = (last.bytes - first.bytes) / decode_count / 1000000
   write_out(
-    string.format("experts %d: %d routed, %.1f MB\n", length, routed, megabytes)
+    string.format(
+      "experts %d: %d routed, %.1f MB; per turn %d reads, %.1f MB read, "
+        .. "%.3f ms\n",
+      length,
+      routed,
+      megabytes,
+      report.reads,
+      report.read_bytes / 1000000,
+      report.read_seconds * 1000
+    )
   )
 end
 
