@@ -348,11 +348,24 @@ local record compute
     close: function(LinearAttention)
   end
 
+  -- what one model holds on the card: the tensors it copies, the bytes it
+  -- charged for them, the experts it keeps there per block, and the rest
+  record Placement
+    budget: integer
+    reserve: integer
+    resident: {string: boolean}
+    resident_bytes: integer
+    slots: {integer}
+    slot_bytes: integer
+    unplaced_bytes: integer
+  end
+
   record Model
     positions: integer
     sequences: integer
     ubatch: integer
     measure: Measure
+    placement: Placement
     routing_sink: (function(Routing) | nil)
     forward: function(Model, integer, integer): {number} | nil, string | nil
     reserve: function(Model, string, integer): string | nil
@@ -377,13 +390,15 @@ local record compute
   linear_attention: function(
     Backend, weights.Handle, Geometry
   ): LinearAttention | nil, string | nil
+  place: function(weights.Handle, integer, integer): Placement
   model: function(
     Backend,
     weights.Handle,
     integer | nil,
     CacheType | nil,
     sequences?: integer,
-    ubatch?: integer
+    ubatch?: integer,
+    vram?: integer | nil
   ): Model | nil, string | nil
 end
 
@@ -417,6 +432,7 @@ local record Copy
   arena: ffi.CData
   buffer: ffi.CData
   tensors: {string: ffi.CData}
+  experts: {string: {ffi.CData | nil}} | nil
 end
 
 local record Loaded
@@ -458,6 +474,7 @@ local record Pool
   backend: ffi.CData | nil
   cpu: ffi.CData | nil
   device_bytes: {string: integer}
+  device_held: {string: integer}
   devices: {string: ffi.CData}
   held: {string: integer}
 end
@@ -484,6 +501,11 @@ local record Mapped
   device: Copy | nil
   arena: ffi.CData | nil
   ctx: ffi.CData | nil
+  -- a model's plan: the tensors its own buffer holds, the expert matrices it
+  -- holds, and the copy they live in; nil for every other entry point
+  resident: {string: boolean} | nil
+  experts: {string: {ffi.CData | nil}} | nil
+  plan: compute.Placement | nil
   hold: function()
   close: function()
 end
@@ -552,6 +574,8 @@ local record ModelPlan
   attention: compute.Attention | nil
   linear: compute.LinearAttention | nil
   feed_forward: compute.FeedForward
+  placement: compute.Placement
+  copy: Copy | nil
 end
 
 local record SequenceState
@@ -577,6 +601,8 @@ local record ModelState
   pool: Box
   sized: function(integer): {Build}
   measure: compute.Measure
+  placement: compute.Placement
+  copy: Copy | nil
 end
 
 local record BlockTensors
@@ -1015,6 +1041,7 @@ local function pool_new(
   copy: Copy | nil,
   host_bytes: integer,
   device_bytes: {string: integer},
+  device_held: {string: integer},
   rows: integer,
   tensors: integer,
   nodes: integer
@@ -1035,6 +1062,7 @@ local function pool_new(
     nodes = nodes,
     backend = device_of_copy(copy),
     device_bytes = device_bytes,
+    device_held = device_held,
     devices = {},
     held = {},
   } as Pool
@@ -1053,6 +1081,7 @@ local function pool_free(pool: Pool)
     pool.held[prefix] = nil
   end
   pool.device_bytes = {}
+  pool.device_held = {}
   local cpu = pool.cpu
   if not (cpu is nil) then
     pool.cpu = nil
@@ -1413,7 +1442,7 @@ local function footprint_of(
   device: boolean,
   build: function(Graph): {Output},
   tensors: integer
-): integer, integer, integer
+): integer, integer, integer, integer
   local buft: ffi.CData = lib.ggml_backend_cpu_buffer_type()
   local mode = "host"
   if device then
@@ -1441,7 +1470,7 @@ local function footprint_of(
   if not pcall(build, graph) then
     lib.ggml_free(ctx)
     libc.free(block)
-    return 0, 0, 0
+    return 0, 0, 0, 0
   end
 
   -- the graph object a pass's build makes comes out of the same arena, and
@@ -1452,17 +1481,22 @@ local function footprint_of(
     lib.ggml_backend_alloc_ctx_tensors_from_buft_size(ctx, buft)
   ) as integer
   local made = 0
+  local held = 0
   local tensor = lib.ggml_get_first_tensor(ctx)
   while not (tensor is nil) do
+    local view = tensor as TensorView
+    if device and view.data == nil and view.view_src == nil then
+      held = held + (tonumber(lib.ggml_nbytes(tensor)) as integer)
+    end
     made = made + 1
     tensor = lib.ggml_get_next_tensor(ctx, tensor)
   end
   lib.ggml_free(ctx)
   libc.free(block)
   if device then
-    return used, numbers, made
+    return used, numbers, made, held
   end
-  return used + numbers, 0, made
+  return used + numbers, 0, made, 0
 end
 
 -- the arena and the device buffers a handle holds, each the worst case of one
@@ -1485,9 +1519,10 @@ local function sized_pool(
 
   local host: integer = 0
   local device: {string: integer} = {}
+  local device_held: {string: integer} = {}
   local made = 0
   for _, entry in ipairs(builds) do
-    local host_bytes, device_bytes, count = footprint_of(
+    local host_bytes, device_bytes, count, held = footprint_of(
       lib, copy, false, entry.build, tensors
     )
     if host_bytes > host then
@@ -1497,7 +1532,7 @@ local function sized_pool(
       made = count
     end
     if copy is Copy then
-      host_bytes, device_bytes, count = footprint_of(
+      host_bytes, device_bytes, count, held = footprint_of(
         lib, copy, true, entry.build, tensors
       )
       if host_bytes > host then
@@ -1505,6 +1540,9 @@ local function sized_pool(
       end
       if device_bytes > (device[entry.kind] or 0) then
         device[entry.kind] = device_bytes
+      end
+      if held > (device_held[entry.kind] or 0) then
+        device_held[entry.kind] = held
       end
       if count > made then
         made = count
@@ -1517,7 +1555,7 @@ local function sized_pool(
   if host == 0 then
     return nil
   end
-  return pool_new(lib, copy, host, device, rows, made, tensors)
+  return pool_new(lib, copy, host, device, device_held, rows, made, tensors)
 end
 
 -- a graph built in the pool's arena and computed, its tensors readable until
@@ -1726,17 +1764,573 @@ local function holder(handle: weights.Handle): Holder
   }
 end
 
+local record Tiers
+  attention: {string}
+  linear: {string}
+  routers: {string}
+  shared: {string}
+  experts: {string}
+  block_numbers: function(weights.Handle): {integer}
+  fixed_order: function(weights.Handle): {string}
+  experts_held: function({string: Tensor}, string): integer
+  expert_charge: function({string: Tensor}, string, integer): integer
+  same_placement: function(compute.Placement, compute.Placement): boolean
+  place: function(weights.Handle, integer, integer): compute.Placement
+  reserve_of: function(Pool, {boolean}, integer): integer
+  placed_copy: function(Loaded, weights.Handle, compute.Placement): Copy | nil
+  mapped_with_copy: function(
+    Loaded, weights.Handle, Copy, compute.Placement
+  ): Mapped
+  borrowed: function(Mapped): Mapped
+  weight_of: function(Graph, Mapped, string, index?: integer): ffi.CData
+end
+
+local tier = (
+  function(): Tiers
+    -- the fixed tensors a budget may take, in the order the eight tiers give
+    local TIER_ATTENTION: {string} = {
+      "attn_norm.weight",
+      "attn_q.weight",
+      "attn_k.weight",
+      "attn_v.weight",
+      "attn_q_norm.weight",
+      "attn_k_norm.weight",
+      "attn_output.weight",
+      "post_attention_norm.weight",
+    }
+
+    local TIER_LINEAR: {string} = {
+      "attn_norm.weight",
+      "attn_qkv.weight",
+      "attn_gate.weight",
+      "ssm_beta.weight",
+      "ssm_alpha.weight",
+      "ssm_conv1d.weight",
+      "ssm_a",
+      "ssm_dt.bias",
+      "ssm_norm.weight",
+      "ssm_out.weight",
+      "post_attention_norm.weight",
+    }
+
+    local TIER_ROUTERS: {string} = {
+      "ffn_gate_inp.weight",
+      "ffn_gate_inp_shexp.weight",
+    }
+
+    local TIER_SHARED: {string} = {
+      "ffn_up_shexp.weight",
+      "ffn_gate_shexp.weight",
+      "ffn_down_shexp.weight",
+    }
+
+    local EXPERT_NAMES: {string} = {
+      "ffn_up_exps.weight",
+      "ffn_gate_exps.weight",
+      "ffn_down_exps.weight",
+    }
+
+    -- the block numbers a handle names, in block order
+    local function block_numbers(handle: weights.Handle): {integer}
+      local seen: {integer: boolean} = {}
+      for name in pairs(handle.tensors) do
+        local found = name:match("^blk%.(%d+)%.")
+        if found is string then
+          seen[tonumber(found) as integer] = true
+        end
+      end
+      local numbers: {integer} = {}
+      for number in pairs(seen) do
+        numbers[#numbers + 1] = number
+      end
+      table.sort(numbers)
+      return numbers
+    end
+
+    local function full_block(
+      tensors: {string: Tensor}, prefix: string
+    ): boolean
+      return tensors[prefix .. "attn_q.weight"] ~= nil
+    end
+
+    local function linear_shaped(
+      tensors: {string: Tensor}, prefix: string
+    ): boolean
+      return tensors[prefix .. "attn_qkv.weight"] ~= nil
+    end
+
+    local function fixed_order(handle: weights.Handle): {string}
+      local tensors = handle.tensors
+      local numbers = block_numbers(handle)
+      local order: {string} = {"token_embd.weight"}
+      local function add(prefix: string, names: {string})
+        for _, name in ipairs(names) do
+          local entered = tensors[prefix .. name]
+          if entered is Tensor then
+            order[#order + 1] = prefix .. name
+          end
+        end
+      end
+      for _, number in ipairs(numbers) do
+        local prefix = "blk." .. number .. "."
+        if full_block(tensors, prefix) then
+          add(prefix, TIER_ATTENTION)
+        end
+      end
+      for _, number in ipairs(numbers) do
+        local prefix = "blk." .. number .. "."
+        if linear_shaped(tensors, prefix) then
+          add(prefix, TIER_LINEAR)
+        end
+      end
+      for _, number in ipairs(numbers) do
+        add("blk." .. number .. ".", TIER_ROUTERS)
+      end
+      for _, number in ipairs(numbers) do
+        add("blk." .. number .. ".", TIER_SHARED)
+      end
+      order[#order + 1] = "output_norm.weight"
+      order[#order + 1] = "output.weight"
+      return order
+    end
+
+    -- the experts a block holds, or none when it holds no expert matrix
+    local function experts_held(
+      tensors: {string: Tensor}, prefix: string
+    ): integer
+      local most = 0
+      for _, name in ipairs(EXPERT_NAMES) do
+        local tensor = tensors[prefix .. name]
+        if tensor is Tensor and #tensor.dims >= 3 then
+          local count = tensor.dims[3] as integer
+          if count > most then
+            most = count
+          end
+        end
+      end
+      return most
+    end
+
+    -- what one expert is charged: its three matrices, each rounded up to 128
+    local function expert_charge(
+      tensors: {string: Tensor}, prefix: string, index: integer
+    ): integer
+      local total = 0
+      for _, name in ipairs(EXPERT_NAMES) do
+        local tensor = tensors[prefix .. name]
+        if tensor is Tensor and #tensor.dims >= 3 then
+          local count = tensor.dims[3] as integer
+          if index < count then
+            total = total + round_up(math.floor(tensor.bytes / count), 128)
+          end
+        end
+      end
+      return total
+    end
+
+    local function same_placement(
+      left: compute.Placement, right: compute.Placement
+    ): boolean
+      for name in pairs(left.resident) do
+        if not right.resident[name] then
+          return false
+        end
+      end
+      for name in pairs(right.resident) do
+        if not left.resident[name] then
+          return false
+        end
+      end
+      if #left.slots ~= #right.slots then
+        return false
+      end
+      for index, count in ipairs(left.slots) do
+        if right.slots[index] ~= count then
+          return false
+        end
+      end
+      return true
+    end
+
+    -- the plan for a budget and a reservation, over a handle's tensors
+    local function place(
+      handle: weights.Handle, budget: integer, reserve: integer
+    ): compute.Placement
+      local tensors = handle.tensors
+      local numbers = block_numbers(handle)
+      local placement: compute.Placement = {
+        budget = budget,
+        reserve = reserve,
+        resident = {},
+        resident_bytes = 0,
+        slots = {},
+        slot_bytes = 0,
+        unplaced_bytes = 0,
+      }
+      local total = 0
+      for _, tensor in pairs(tensors) do
+        total = total + tensor.bytes
+      end
+      local limits: {integer} = {}
+      for index, number in ipairs(numbers) do
+        placement.slots[index] = 0
+        limits[index] = experts_held(tensors, "blk." .. number .. ".")
+      end
+
+      local remaining = budget - reserve
+      for _, name in ipairs(fixed_order(handle)) do
+        local tensor = tensors[name]
+        if tensor is Tensor then
+          local charge = round_up(tensor.bytes, 128)
+          if charge <= remaining then
+            placement.resident[name] = true
+            placement.resident_bytes = placement.resident_bytes + charge
+            remaining = remaining - charge
+          end
+        end
+      end
+
+      while true do
+        local taken = 0
+        for index, number in ipairs(numbers) do
+          local expert = placement.slots[index]
+          if expert < limits[index] then
+            local charge = expert_charge(
+              tensors, "blk." .. number .. ".", expert
+            )
+            if charge <= remaining then
+              placement.slots[index] = expert + 1
+              placement.slot_bytes = placement.slot_bytes + charge
+              remaining = remaining - charge
+              taken = taken + 1
+            end
+          end
+        end
+        if taken == 0 then
+          break
+        end
+      end
+
+      placement.unplaced_bytes = math.max(
+        0, total - placement.resident_bytes - placement.slot_bytes
+      )
+      return placement
+    end
+
+    -- the bytes a pool's own graph buffers need: one per block and one for
+    -- the pass's embedding and score graphs together
+    local function reserve_of(
+      pool: Pool, kinds: {boolean}, count: integer
+    ): integer
+      local function held(kind: string): integer
+        local bytes = pool.device_held[kind]
+        if bytes is nil or bytes == 0 then
+          return 0
+        end
+        return round_up(bytes, ARENA_ALIGN)
+      end
+      -- one buffer serves every graph of one prefix: a block's three graphs,
+      -- and the pass's embedding and score graphs
+      local function most(names: {string}): integer
+        local bytes = 0
+        for _, name in ipairs(names) do
+          if held(name) > bytes then
+            bytes = held(name)
+          end
+        end
+        return bytes
+      end
+      local total = most({"embed", "scores"})
+      for index = 1, count do
+        local half = "linear"
+        if kinds[index] then
+          half = "attention"
+        end
+        total = total + most({half, "votes", "choice"})
+      end
+      return total
+    end
+
+    -- the device copy a model's placement names: the tensors it marks and every
+    -- expert matrix it places, in one buffer of the model's own
+    local function placed_copy(
+      loaded: Loaded, handle: weights.Handle, placement: compute.Placement
+    ): Copy | nil
+      local lib = loaded.lib
+      local tensors = handle.tensors
+      local numbers = block_numbers(handle)
+      local size = placement.resident_bytes + placement.slot_bytes
+      if size <= 0 then
+        return nil
+      end
+
+      local descriptor_count = 0
+      for _, name in ipairs(fixed_order(handle)) do
+        if placement.resident[name] then
+          descriptor_count = descriptor_count + 1
+        end
+      end
+      for index, number in ipairs(numbers) do
+        local prefix = "blk." .. number .. "."
+        local slots = placement.slots[index]
+        for _ = 0, slots - 1 do
+          for _, name in ipairs(EXPERT_NAMES) do
+            local entered = tensors[prefix .. name]
+            if entered is Tensor then
+              descriptor_count = descriptor_count + 1
+            end
+          end
+        end
+      end
+      if descriptor_count == 0 then
+        return nil
+      end
+
+      local found = loaded.device as ffi.CData
+      local backend = lib.ggml_backend_dev_init(found, nil)
+      if backend is nil then
+        return nil
+      end
+      local arena_size = arena_for(lib, descriptor_count, 0)
+      local arena = libc.aligned_alloc(ARENA_ALIGN, arena_size)
+      if arena is nil then
+        lib.ggml_backend_free(backend)
+        return nil
+      end
+      local ctx = lib.ggml_init(pool_params(arena_size, arena, true))
+      if ctx is nil then
+        libc.free(arena)
+        lib.ggml_backend_free(backend)
+        return nil
+      end
+      local buffer = lib.ggml_backend_alloc_buffer(backend, size)
+      if buffer is nil then
+        lib.ggml_free(ctx)
+        libc.free(arena)
+        lib.ggml_backend_free(backend)
+        return nil
+      end
+      local base = lib.ggml_backend_buffer_get_base(buffer)
+      local base_at = ffi.cast("intptr_t", base) as integer
+
+      local function failed(): nil
+        lib.ggml_backend_buffer_free(buffer)
+        lib.ggml_free(ctx)
+        libc.free(arena)
+        lib.ggml_backend_free(backend)
+        return nil
+      end
+
+      local descriptors: {string: ffi.CData} = {}
+      local experts: {string: {ffi.CData | nil}} = {}
+      local offset: integer = 0
+      local function give(
+        dims: {integer}, code: integer, location: ffi.CData, bytes: integer
+      ): ffi.CData | nil
+        local descriptor = tensor_in(lib, ctx, dims, code)
+        if descriptor is nil then
+          return nil
+        end
+        local address = ffi.cast("void *", base_at + offset) as ffi.CData
+        if lib.ggml_backend_tensor_alloc(buffer, descriptor, address) ~= 0 then
+          return nil
+        end
+        lib.ggml_backend_tensor_set(descriptor, location, 0, bytes)
+        offset = offset + round_up(bytes, 128)
+        return descriptor
+      end
+
+      for _, name in ipairs(fixed_order(handle)) do
+        if placement.resident[name] then
+          local tensor = tensors[name]
+          if tensor is Tensor then
+            local descriptor = give(
+              tensor.dims, tensor.kind.code, tensor.data, tensor.bytes
+            )
+            if descriptor is nil then
+              return failed()
+            end
+            descriptors[name] = descriptor
+          end
+        end
+      end
+
+      for index, number in ipairs(numbers) do
+        local prefix = "blk." .. number .. "."
+        local slots = placement.slots[index]
+        for expert = 0, slots - 1 do
+          for _, name in ipairs(EXPERT_NAMES) do
+            local tensor = tensors[prefix .. name]
+            if tensor is Tensor and #tensor.dims >= 3 then
+              local count = tensor.dims[3] as integer
+              local each = math.floor(tensor.bytes / count)
+              local from = ffi.cast("intptr_t", tensor.data) as integer
+              local location = ffi.cast("void *", from + expert * each)
+                as ffi.CData
+              local descriptor = give(
+                {tensor.dims[1] as integer, tensor.dims[2] as integer},
+                tensor.kind.code,
+                location,
+                each
+              )
+              if descriptor is nil then
+                return failed()
+              end
+              local held = experts[name]
+              if held is nil then
+                held = {}
+                experts[name] = held
+              end
+              held[expert + 1] = descriptor
+            end
+          end
+        end
+      end
+
+      return {
+        lib = lib,
+        backend = backend,
+        ctx = ctx,
+        arena = arena,
+        buffer = buffer,
+        tensors = descriptors,
+        experts = experts,
+      } as Copy
+    end
+    -- a mapped handle over a model's own placement copy
+    local function mapped_with_copy(
+      loaded: Loaded,
+      handle: weights.Handle,
+      copy: Copy,
+      placement: compute.Placement
+    ): Mapped
+      local mark = holder(handle)
+      return {
+        lib = loaded.lib,
+        tensors = handle.tensors,
+        descriptors = copy.tensors,
+        handle = handle,
+        device = copy,
+        resident = placement.resident,
+        experts = copy.experts,
+        plan = placement,
+        hold = mark.hold,
+        close = mark.close,
+      }
+    end
+
+    -- the mark one block takes on a handle a model has already mapped
+    local function borrowed(mapped: Mapped): Mapped
+      local mark = holder(mapped.handle)
+      return {
+        lib = mapped.lib,
+        tensors = mapped.tensors,
+        descriptors = mapped.descriptors,
+        handle = mapped.handle,
+        device = mapped.device,
+        arena = mapped.arena,
+        ctx = mapped.ctx,
+        resident = mapped.resident,
+        experts = mapped.experts,
+        plan = mapped.plan,
+        hold = mark.hold,
+        close = mark.close,
+      }
+    end
+
+    -- the descriptor a graph multiplies by: the model's device copy when its plan
+    -- marks the tensor, the mapping for the length of the call when it does not
+    local function weight_of(
+      graph: Graph, mapped: Mapped, name: string, index?: integer
+    ): ffi.CData
+      local tensor = mapped.tensors[name] as Tensor
+      local dims = tensor.dims
+      local plan = mapped.plan
+      if #dims < 3 then
+        if plan is compute.Placement and not plan.resident[name] then
+          return host_tensor(
+            graph, dims, tensor.kind.code, tensor.data, tensor.bytes
+          )
+        end
+        return mapped.descriptors[name]
+      end
+
+      if plan is compute.Placement then
+        local found = name:match("^blk%.(%d+)%.")
+        local slots = 0
+        if found is string then
+          local at = (tonumber(found) as integer) + 1
+          slots = plan.slots[at] or 0
+        end
+        local chosen = index or 0
+        local matrices = mapped.experts
+        if not (matrices is nil) and chosen < slots then
+          local held = matrices[name]
+          if not (held is nil) then
+            local matrix = held[chosen + 1]
+            if not (matrix is nil) then
+              return matrix
+            end
+          end
+        end
+      end
+
+      local stride = math.floor(tensor.bytes / (dims[3] as integer))
+      local base = ffi.cast("intptr_t", tensor.data) as integer
+      local location = ffi.cast("void *", base + (index or 0) * stride)
+        as ffi.CData
+      return host_tensor(
+        graph,
+        {dims[1] as integer, dims[2] as integer},
+        tensor.kind.code,
+        location,
+        stride
+      )
+    end
+
+    return {
+      attention = TIER_ATTENTION,
+      linear = TIER_LINEAR,
+      routers = TIER_ROUTERS,
+      shared = TIER_SHARED,
+      experts = EXPERT_NAMES,
+      block_numbers = block_numbers,
+      fixed_order = fixed_order,
+      experts_held = experts_held,
+      expert_charge = expert_charge,
+      same_placement = same_placement,
+      place = place,
+      reserve_of = reserve_of,
+      placed_copy = placed_copy,
+      mapped_with_copy = mapped_with_copy,
+      borrowed = borrowed,
+      weight_of = weight_of,
+    }
+  end
+)()
+
+function compute.place(
+  handle: weights.Handle, budget: integer, reserve: integer
+): compute.Placement
+  return tier.place(handle, budget, reserve)
+end
+
 local function mapped_of(
   backend: compute.Backend,
   loaded: Loaded,
   handle: weights.Handle,
-  operation: string
+  operation: string,
+  use_copy?: boolean
 ): Mapped | nil, string | nil
   local lib = loaded.lib
   backend.device = nil
   guard_release(handle)
   local found = loaded.device
-  if loaded.offload and not (found is nil) then
+  local offload = loaded.offload
+  if use_copy == false then
+    offload = false
+  end
+  if offload and not (found is nil) then
     local held = COPIES[handle]
     local copy: Copy | nil = nil
     if held is {compute.Backend: Copy} then
@@ -2689,7 +3283,7 @@ local function attention_build(
   local lib = graph.lib
   local ctx = graph.ctx
   local geometry = state.geometry
-  local descriptors = state.mapped.descriptors
+  local mapped = state.mapped
   local kind = cache_kind_of(geometry.cache_type) as CacheKind
   local heads = geometry.heads
   local kv_heads = geometry.kv_heads
@@ -2719,20 +3313,26 @@ local function attention_build(
           eps
         )
       ),
-      descriptors[prefix .. "attn_norm.weight"]
+      tier.weight_of(graph, mapped, prefix .. "attn_norm.weight")
     )
   )
   local query = node(
     graph,
-    lib.ggml_mul_mat(ctx, descriptors[prefix .. "attn_q.weight"], normalised)
+    lib.ggml_mul_mat(
+      ctx, tier.weight_of(graph, mapped, prefix .. "attn_q.weight"), normalised
+    )
   )
   local read_keys = node(
     graph,
-    lib.ggml_mul_mat(ctx, descriptors[prefix .. "attn_k.weight"], normalised)
+    lib.ggml_mul_mat(
+      ctx, tier.weight_of(graph, mapped, prefix .. "attn_k.weight"), normalised
+    )
   )
   local read_values = node(
     graph,
-    lib.ggml_mul_mat(ctx, descriptors[prefix .. "attn_v.weight"], normalised)
+    lib.ggml_mul_mat(
+      ctx, tier.weight_of(graph, mapped, prefix .. "attn_v.weight"), normalised
+    )
   )
 
   -- the query projection carries each head's query and gate side by side
@@ -2789,7 +3389,7 @@ local function attention_build(
         lib.ggml_mul(
           ctx,
           node(graph, lib.ggml_rms_norm(ctx, raw_queries, eps)),
-          descriptors[prefix .. "attn_q_norm.weight"]
+          tier.weight_of(graph, mapped, prefix .. "attn_q_norm.weight")
         )
       ),
       at_positions,
@@ -2817,7 +3417,7 @@ local function attention_build(
         lib.ggml_mul(
           ctx,
           node(graph, lib.ggml_rms_norm(ctx, read_keys_3d, eps)),
-          descriptors[prefix .. "attn_k_norm.weight"]
+          tier.weight_of(graph, mapped, prefix .. "attn_k_norm.weight")
         )
       ),
       at_positions,
@@ -2972,7 +3572,11 @@ local function attention_build(
     outputs[#outputs + 1] = {
       tensor = node(
         graph,
-        lib.ggml_mul_mat(ctx, descriptors[prefix .. "attn_output.weight"], flat)
+        lib.ggml_mul_mat(
+          ctx,
+          tier.weight_of(graph, mapped, prefix .. "attn_output.weight"),
+          flat
+        )
       ),
       count = #entry.hidden,
     }
@@ -3453,28 +4057,6 @@ local function chosen_experts(
   return taken
 end
 
--- the matrix the index selects of a three-dimensional weight, or the whole
--- descriptor otherwise, as `11/FR-002`'s matrix product reads it
-local function weight_of(
-  graph: Graph, mapped: Mapped, name: string, index?: integer
-): ffi.CData
-  local tensor = mapped.tensors[name] as Tensor
-  local dims = tensor.dims
-  if #dims < 3 then
-    return mapped.descriptors[name]
-  end
-  local stride = math.floor(tensor.bytes / (dims[3] as integer))
-  local base = ffi.cast("intptr_t", tensor.data) as integer
-  local location = ffi.cast("void *", base + (index or 0) * stride) as ffi.CData
-  return host_tensor(
-    graph,
-    {dims[1] as integer, dims[2] as integer},
-    tensor.kind.code,
-    location,
-    stride
-  )
-end
-
 -- the norm and the router of one row, whose softmax the host chooses from
 local function feed_forward_votes(
   state: FeedForwardState, graph: Graph, entry: compute.Row, prefix: string
@@ -3492,13 +4074,15 @@ local function feed_forward_votes(
           ctx, vector_of(graph, entry.hidden), state.geometry.eps
         )
       ),
-      mapped.descriptors[prefix .. "post_attention_norm.weight"]
+      tier.weight_of(graph, mapped, prefix .. "post_attention_norm.weight")
     )
   )
   local votes = node(
     graph,
     lib.ggml_mul_mat(
-      ctx, mapped.descriptors[prefix .. "ffn_gate_inp.weight"], normalised
+      ctx,
+      tier.weight_of(graph, mapped, prefix .. "ffn_gate_inp.weight"),
+      normalised
     )
   )
   return node(graph, lib.ggml_soft_max(ctx, votes))
@@ -3518,7 +4102,6 @@ local function feed_forward_choice(
   local lib = graph.lib
   local ctx = graph.ctx
   local mapped = state.mapped
-  local descriptors = mapped.descriptors
   local normalised = node(
     graph,
     lib.ggml_mul(
@@ -3529,7 +4112,7 @@ local function feed_forward_choice(
           ctx, vector_of(graph, entry.hidden), state.geometry.eps
         )
       ),
-      descriptors[prefix .. "post_attention_norm.weight"]
+      tier.weight_of(graph, mapped, prefix .. "post_attention_norm.weight")
     )
   )
 
@@ -3541,7 +4124,7 @@ local function feed_forward_choice(
       graph,
       lib.ggml_mul_mat(
         ctx,
-        weight_of(graph, mapped, prefix .. "ffn_up_exps.weight", expert),
+        tier.weight_of(graph, mapped, prefix .. "ffn_up_exps.weight", expert),
         normalised
       )
     )
@@ -3549,7 +4132,9 @@ local function feed_forward_choice(
       graph,
       lib.ggml_mul_mat(
         ctx,
-        weight_of(graph, mapped, prefix .. "ffn_gate_exps.weight", expert),
+        tier.weight_of(
+          graph, mapped, prefix .. "ffn_gate_exps.weight", expert
+        ),
         normalised
       )
     )
@@ -3558,7 +4143,9 @@ local function feed_forward_choice(
       graph,
       lib.ggml_mul_mat(
         ctx,
-        weight_of(graph, mapped, prefix .. "ffn_down_exps.weight", expert),
+        tier.weight_of(
+          graph, mapped, prefix .. "ffn_down_exps.weight", expert
+        ),
         mixed
       )
     )
@@ -3575,13 +4162,17 @@ local function feed_forward_choice(
   local shared_up = node(
     graph,
     lib.ggml_mul_mat(
-      ctx, descriptors[prefix .. "ffn_up_shexp.weight"], normalised
+      ctx,
+      tier.weight_of(graph, mapped, prefix .. "ffn_up_shexp.weight"),
+      normalised
     )
   )
   local shared_gate = node(
     graph,
     lib.ggml_mul_mat(
-      ctx, descriptors[prefix .. "ffn_gate_shexp.weight"], normalised
+      ctx,
+      tier.weight_of(graph, mapped, prefix .. "ffn_gate_shexp.weight"),
+      normalised
     )
   )
   local shared_mixed = node(
@@ -3590,13 +4181,17 @@ local function feed_forward_choice(
   local shared_down = node(
     graph,
     lib.ggml_mul_mat(
-      ctx, descriptors[prefix .. "ffn_down_shexp.weight"], shared_mixed
+      ctx,
+      tier.weight_of(graph, mapped, prefix .. "ffn_down_shexp.weight"),
+      shared_mixed
     )
   )
   local router = node(
     graph,
     lib.ggml_mul_mat(
-      ctx, descriptors[prefix .. "ffn_gate_inp_shexp.weight"], normalised
+      ctx,
+      tier.weight_of(graph, mapped, prefix .. "ffn_gate_inp_shexp.weight"),
+      normalised
     )
   )
   local gated = node(
@@ -3627,12 +4222,14 @@ local function feed_forward_row_scores(
         graph,
         lib.ggml_rms_norm(ctx, vector_of(graph, hidden), state.geometry.eps)
       ),
-      state.mapped.descriptors["output_norm.weight"]
+      tier.weight_of(graph, state.mapped, "output_norm.weight")
     )
   )
   return node(
     graph,
-    lib.ggml_mul_mat(ctx, state.mapped.descriptors["output.weight"], normalised)
+    lib.ggml_mul_mat(
+      ctx, tier.weight_of(graph, state.mapped, "output.weight"), normalised
+    )
   )
 end
 
@@ -3791,21 +4388,27 @@ local function read_experts(
   experts: integer,
   measure: compute.Measure | nil
 ): string | nil
+  local plan = mapped.plan
   local copy = mapped.device
-  if copy is Copy then
+  if plan is nil and copy is Copy then
     return nil
+  end
+  local slots = 0
+  if plan is compute.Placement then
+    local found = prefix:match("^blk%.(%d+)%.")
+    if found is string then
+      slots = plan.slots[(tonumber(found) as integer) + 1] or 0
+    end
   end
   local started = clock.now()
   local reads = 0
   local bytes = 0
-  for _, name in ipairs(
-    {"ffn_up_exps.weight", "ffn_gate_exps.weight", "ffn_down_exps.weight"}
-  ) do
+  for _, name in ipairs(tier.experts) do
     local tensor = mapped.tensors[prefix .. name]
     if tensor is Tensor and #tensor.dims >= 3 then
       local each = math.floor(tensor.bytes / (tensor.dims[3] as integer))
       for expert = 0, experts - 1 do
-        if chosen[expert] then
+        if chosen[expert] and expert >= slots then
           local moved, line = weights.read(mapped.handle, tensor, expert)
           if moved is nil then
             return line as string
@@ -4375,7 +4978,6 @@ local function linear_build(
   local lib = graph.lib
   local ctx = graph.ctx
   local mapped = state.mapped
-  local descriptors = mapped.descriptors
   local shape = state.shape
   local key_heads = shape.key_heads
   local key_length = shape.key_length
@@ -4395,16 +4997,24 @@ local function linear_build(
     lib.ggml_mul(
       ctx,
       node(graph, lib.ggml_rms_norm(ctx, vector_of(graph, entry.hidden), eps)),
-      descriptors[prefix .. "attn_norm.weight"]
+      tier.weight_of(graph, mapped, prefix .. "attn_norm.weight")
     )
   )
   local projected = node(
     graph,
-    lib.ggml_mul_mat(ctx, descriptors[prefix .. "attn_qkv.weight"], normalised)
+    lib.ggml_mul_mat(
+      ctx,
+      tier.weight_of(graph, mapped, prefix .. "attn_qkv.weight"),
+      normalised
+    )
   )
   local gates = node(
     graph,
-    lib.ggml_mul_mat(ctx, descriptors[prefix .. "attn_gate.weight"], normalised)
+    lib.ggml_mul_mat(
+      ctx,
+      tier.weight_of(graph, mapped, prefix .. "attn_gate.weight"),
+      normalised
+    )
   )
   local betas = node(
     graph,
@@ -4413,7 +5023,9 @@ local function linear_build(
       node(
         graph,
         lib.ggml_mul_mat(
-          ctx, descriptors[prefix .. "ssm_beta.weight"], normalised
+          ctx,
+          tier.weight_of(graph, mapped, prefix .. "ssm_beta.weight"),
+          normalised
         )
       )
     )
@@ -4437,15 +5049,19 @@ local function linear_build(
                   node(
                     graph,
                     lib.ggml_mul_mat(
-                      ctx, descriptors[prefix .. "ssm_alpha.weight"], normalised
+                      ctx,
+                      tier.weight_of(
+                        graph, mapped, prefix .. "ssm_alpha.weight"
+                      ),
+                      normalised
                     )
                   ),
-                  descriptors[prefix .. "ssm_dt.bias"]
+                  tier.weight_of(graph, mapped, prefix .. "ssm_dt.bias")
                 )
               )
             )
           ),
-          descriptors[prefix .. "ssm_a"]
+          tier.weight_of(graph, mapped, prefix .. "ssm_a")
         )
       )
     )
@@ -4503,7 +5119,9 @@ local function linear_build(
       node(
         graph,
         lib.ggml_ssm_conv(
-          ctx, window, descriptors[prefix .. "ssm_conv1d.weight"]
+          ctx,
+          window,
+          tier.weight_of(graph, mapped, prefix .. "ssm_conv1d.weight")
         )
       )
     )
@@ -4667,7 +5285,7 @@ local function linear_build(
         lib.ggml_mul(
           ctx,
           node(graph, lib.ggml_rms_norm(ctx, scanned, eps)),
-          descriptors[prefix .. "ssm_norm.weight"]
+          tier.weight_of(graph, mapped, prefix .. "ssm_norm.weight")
         )
       ),
       node(
@@ -4685,7 +5303,7 @@ local function linear_build(
     graph,
     lib.ggml_mul_mat(
       ctx,
-      descriptors[prefix .. "ssm_out.weight"],
+      tier.weight_of(graph, mapped, prefix .. "ssm_out.weight"),
       node(graph, lib.ggml_reshape_2d(ctx, gated, channels, 1))
     )
   )
@@ -5078,7 +5696,8 @@ local function attention_of(
   handle: weights.Handle,
   geometry: compute.Geometry,
   pool: Box,
-  measure: compute.Measure | nil
+  measure: compute.Measure | nil,
+  given?: Mapped
 ): compute.Attention | nil, string | nil
   local refusal = geometry_refusal(geometry)
   if refusal then
@@ -5089,14 +5708,21 @@ local function attention_of(
     return nil, "attend: backend was not loaded by compute.load"
   end
 
-  local mapped, map_failure = mapped_of(backend, loaded, handle, "attend")
-  if mapped is nil then
-    return nil, map_failure
+  local mapped: Mapped | nil = nil
+  if given is Mapped then
+    mapped = tier.borrowed(given)
+  else
+    local made, map_failure = mapped_of(backend, loaded, handle, "attend")
+    if made is nil then
+      return nil, map_failure
+    end
+    mapped = made
   end
-  mapped.hold()
+  local attachment = mapped as Mapped
+  attachment.hold()
 
   local state: AttentionState = {
-    mapped = mapped,
+    mapped = attachment,
     geometry = geometry,
     caches = {},
     capacities = {},
@@ -5210,7 +5836,8 @@ local function feed_forward_of(
   handle: weights.Handle,
   geometry: compute.Geometry,
   pool: Box,
-  measure: compute.Measure | nil
+  measure: compute.Measure | nil,
+  given?: Mapped
 ): compute.FeedForward | nil, string | nil
   local loaded = LOADED[backend]
   if loaded is nil then
@@ -5223,14 +5850,21 @@ local function feed_forward_of(
     return nil, "feed_forward: eps " .. geometry.eps
   end
 
-  local mapped, map_failure = mapped_of(backend, loaded, handle, "feed_forward")
-  if mapped is nil then
-    return nil, map_failure
+  local mapped: Mapped | nil = nil
+  if given is Mapped then
+    mapped = tier.borrowed(given)
+  else
+    local made, map_failure = mapped_of(backend, loaded, handle, "feed_forward")
+    if made is nil then
+      return nil, map_failure
+    end
+    mapped = made
   end
-  mapped.hold()
+  local attachment = mapped as Mapped
+  attachment.hold()
 
   local state: FeedForwardState = {
-    mapped = mapped,
+    mapped = attachment,
     geometry = geometry,
     pool = pool,
     measure = measure,
@@ -5289,7 +5923,8 @@ local function linear_of(
   handle: weights.Handle,
   geometry: compute.Geometry,
   pool: Box,
-  measure: compute.Measure | nil
+  measure: compute.Measure | nil,
+  given?: Mapped
 ): compute.LinearAttention | nil, string | nil
   local loaded = LOADED[backend]
   if loaded is nil then
@@ -5300,16 +5935,23 @@ local function linear_of(
     return nil, geometry_line
   end
 
-  local mapped, map_failure = mapped_of(
-    backend, loaded, handle, "linear_attention"
-  )
-  if mapped is nil then
-    return nil, map_failure
+  local mapped: Mapped | nil = nil
+  if given is Mapped then
+    mapped = tier.borrowed(given)
+  else
+    local made, map_failure = mapped_of(
+      backend, loaded, handle, "linear_attention"
+    )
+    if made is nil then
+      return nil, map_failure
+    end
+    mapped = made
   end
-  mapped.hold()
+  local attachment = mapped as Mapped
+  attachment.hold()
 
   local state: LinearState = {
-    mapped = mapped,
+    mapped = attachment,
     shape = shape,
     eps = geometry.eps,
     prefixes = {},
@@ -5454,7 +6096,9 @@ local function embedding_build(
   return node(
     graph,
     graph.lib.ggml_get_rows(
-      graph.ctx, mapped.descriptors["token_embd.weight"], ints_of(graph, ids)
+      graph.ctx,
+      tier.weight_of(graph, mapped, "token_embd.weight"),
+      ints_of(graph, ids)
     )
   )
 end
@@ -5558,7 +6202,9 @@ local function model_plan(
   handle: weights.Handle,
   positions: integer | nil,
   cache_type: compute.CacheType | nil,
-  sequences: integer
+  sequences: integer,
+  rows: integer,
+  vram: integer | nil
 ): ModelPlan | nil, string | nil
   local loaded = LOADED[backend]
   if loaded is nil then
@@ -5756,20 +6402,15 @@ local function model_plan(
     taken = positions
   end
 
-  local mapped, map_line = mapped_of(backend, loaded, handle, "model")
-  if mapped is nil then
-    return nil, map_line
-  end
-
   local head_length: integer = 1
   local kv_heads: integer = 1
   if has_full then
     local prefix = "blk." .. first_full .. "."
-    local query = mapped.tensors[prefix .. "attn_q.weight"]
+    local query = handle.tensors[prefix .. "attn_q.weight"]
     if query is nil then
       return nil, "model: no tensor " .. prefix .. "attn_q.weight"
     end
-    local key_tensor = mapped.tensors[prefix .. "attn_k.weight"]
+    local key_tensor = handle.tensors[prefix .. "attn_k.weight"]
     if key_tensor is nil then
       return nil, "model: no tensor " .. prefix .. "attn_k.weight"
     end
@@ -5888,8 +6529,219 @@ local function model_plan(
     cache_type = cached,
   }
 
+  -- the widest pass the model may be handed: ubatch rows, and no more than
+  -- every sequence at every position it holds
+  local widest = rows
+  local most_rows = sequences * taken
+  if widest > most_rows then
+    widest = most_rows
+  end
+
+  -- what the card may take, and the plan that says what sits there
+  local found = loaded.device
+  local use_device = loaded.offload and not (found is nil)
+  local budget: integer = 0
+  if use_device then
+    local free = backend:memory()
+    budget = free or 0
+    if not (vram is nil) and vram < budget then
+      budget = vram
+    end
+  end
+
+  local mapped: Mapped | nil = nil
+  local arena: Pool | nil = nil
+  local placement: compute.Placement | nil = nil
+  local copy: Copy | nil = nil
+
+  local function mapped_total(): integer
+    local sum = 0
+    for _, tensor in pairs(handle.tensors) do
+      sum = sum + tensor.bytes
+    end
+    return sum
+  end
+
+  local function on_the_cpu(
+    budget_bytes: integer, reserve_bytes: integer
+  ): string | nil
+    -- an empty resident set, keeping the numbers the card answered: FR-004
+    -- keeps the budget and the reservation, FR-011 clears only the tensors
+    local bare: compute.Placement = {
+      budget = budget_bytes,
+      reserve = reserve_bytes,
+      resident = {},
+      resident_bytes = 0,
+      slots = {},
+      slot_bytes = 0,
+      unplaced_bytes = mapped_total(),
+    }
+    for index = 1, count do
+      bare.slots[index] = 0
+    end
+    placement = bare
+    local plain = mapped_of(backend, loaded, handle, "model", false)
+    if plain is nil then
+      return "model: no context for its tensors"
+    end
+    plain.plan = placement
+    plain.resident = placement.resident
+    mapped = plain
+    local made = sized_pool(
+      plain.lib,
+      nil,
+      model_builds(
+        plain, geometry, kinds, count, math.floor(width), sequences
+      ),
+      sequences,
+      nil,
+      nil
+    )
+    if made is nil then
+      return "model: no arena for its graphs"
+    end
+    arena = made
+    return nil
+  end
+
+  if not use_device or budget < 1 then
+    local line = on_the_cpu(0, 0)
+    if line is string then
+      return nil, line
+    end
+  else
+    -- a model whose tensors the tier would place must hold every fixed tensor
+    -- of the blocks it runs; one that does not is refused before it copies
+    for index = 0, count - 1 do
+      local prefix = "blk." .. index .. "."
+      local full = kinds[index + 1]
+      local names = tier.linear
+      if full then
+        names = tier.attention
+      end
+      for _, name in ipairs(names) do
+        if handle.tensors[prefix .. name] == nil then
+          return nil, "model: no tensor " .. prefix .. name
+        end
+      end
+      for _, name in ipairs(BLOCK_NAMES) do
+        if handle.tensors[prefix .. name] == nil then
+          return nil, "model: no tensor " .. prefix .. name
+        end
+      end
+    end
+
+    local total_bytes = mapped_total()
+    placement = compute.place(handle, budget, 0)
+    local stable = false
+    local no_experts = false
+    for _ = 1, 24 do
+      local planned = placement as compute.Placement
+      copy = tier.placed_copy(loaded, handle, planned)
+      if copy is nil and planned.slot_bytes > 0 then
+        -- the card refused the expert slots: keep the tensors it already took
+        local bare = {
+          budget = planned.budget,
+          reserve = planned.reserve,
+          resident = planned.resident,
+          resident_bytes = planned.resident_bytes,
+          slots = {},
+          slot_bytes = 0,
+          unplaced_bytes = math.max(0, total_bytes - planned.resident_bytes),
+        } as compute.Placement
+        for index = 1, #planned.slots do
+          bare.slots[index] = 0
+        end
+        copy = tier.placed_copy(loaded, handle, bare)
+        if copy is Copy then
+          placement = bare
+          no_experts = true
+        end
+      end
+      if copy is nil then
+        local line = on_the_cpu(budget, planned.reserve)
+        if line is string then
+          return nil, line
+        end
+        stable = true
+        break
+      end
+      mapped = tier.mapped_with_copy(loaded, handle, copy, placement)
+      local probe = sized_pool(
+        mapped.lib,
+        copy,
+        model_builds(
+          mapped, geometry, kinds, count, math.floor(width), widest
+        ),
+        widest,
+        nil,
+        nil
+      )
+      if probe is nil then
+        free_copy(copy)
+        mapped.close()
+        return nil, "model: no arena for its graphs"
+      end
+      local reserve = tier.reserve_of(probe, kinds, count)
+      local following = compute.place(handle, budget, reserve)
+      if no_experts then
+        for index = 1, #following.slots do
+          following.slots[index] = 0
+        end
+        following.slot_bytes = 0
+        following.unplaced_bytes = math.max(
+          0, total_bytes - following.resident_bytes
+        )
+      end
+      if tier.same_placement(placement, following) then
+        placement = following
+        pool_free(probe)
+        arena = sized_pool(
+          mapped.lib,
+          copy,
+          model_builds(
+            mapped, geometry, kinds, count, math.floor(width), sequences
+          ),
+          sequences,
+          nil,
+          nil
+        )
+        if arena is nil then
+          free_copy(copy)
+          mapped.close()
+          return nil, "model: no arena for its graphs"
+        end
+        stable = true
+        break
+      end
+      pool_free(probe)
+      free_copy(copy)
+      copy = nil
+      mapped = nil
+      placement = following
+    end
+    if not stable then
+      -- a plan the card keeps changing is no plan; the CPU holds the model
+      local line = on_the_cpu(budget, (placement as compute.Placement).reserve)
+      if line is string then
+        return nil, line
+      end
+    end
+  end
+
+  local plan = placement as compute.Placement
+  local final_mapped = mapped as Mapped
+  local final_arena = arena as Pool
+  if use_device and (plan.resident_bytes > 0 or plan.slot_bytes > 0) then
+    backend.device = ffi.string(
+      loaded.lib.ggml_backend_dev_name(loaded.device as ffi.CData)
+    )
+  else
+    backend.device = nil
+  end
+
   -- the one arena the model's graphs are built in, sized from the largest
-  -- graph a pass builds at the model's whole position count
+  -- graph a pass of one row per sequence builds at the model's positions
   local measure: compute.Measure = {
     passes = 0,
     tokens = 0,
@@ -5903,32 +6755,39 @@ local function model_plan(
     blob_seconds = 0,
     graphs = 0,
   }
-  local sized = function(rows: integer): {Build}
-    return model_builds(mapped, geometry, kinds, count, math.floor(width), rows)
+  local sized = function(wanted: integer): {Build}
+    return model_builds(
+      final_mapped, geometry, kinds, count, math.floor(width), wanted
+    )
   end
-  local builds = sized(sequences)
-  local arena = sized_pool(
-    mapped.lib, mapped.device, builds, sequences, nil, nil
-  )
-  if arena is nil then
-    return nil, "model: no arena for its graphs"
+  local box: Box = {pool = final_arena, owned = false}
+
+  local function abandon()
+    if copy is Copy then
+      free_copy(copy)
+      copy = nil
+    end
+    final_mapped.close()
   end
-  local box: Box = {pool = arena, owned = false}
 
   local feed_forward, feed_line = feed_forward_of(
-    backend, handle, geometry, box, measure
+    backend, handle, geometry, box, measure, final_mapped
   )
   if feed_forward is nil then
-    pool_free(arena)
+    pool_free(final_arena)
+    abandon()
     return nil, "model: " .. (feed_line as string)
   end
 
   local attention: compute.Attention | nil = nil
   if has_full then
-    local made, line = attention_of(backend, handle, geometry, box, measure)
+    local made, line = attention_of(
+      backend, handle, geometry, box, measure, final_mapped
+    )
     if made is nil then
       feed_forward:close()
-      pool_free(arena)
+      pool_free(final_arena)
+      abandon()
       return nil, "model: " .. (line as string)
     end
     attention = made
@@ -5936,22 +6795,25 @@ local function model_plan(
 
   local linear: compute.LinearAttention | nil = nil
   if has_linear then
-    local made, line = linear_of(backend, handle, geometry, box, measure)
+    local made, line = linear_of(
+      backend, handle, geometry, box, measure, final_mapped
+    )
     if made is nil then
       feed_forward:close()
       local blocked = attention
       if blocked is compute.Attention then
         blocked:close()
       end
-      pool_free(arena)
+      pool_free(final_arena)
+      abandon()
       return nil, "model: " .. (line as string)
     end
     linear = made
   end
 
-  mapped.hold()
+  final_mapped.hold()
   return {
-    mapped = mapped,
+    mapped = final_mapped,
     kinds = kinds,
     count = count,
     width = math.floor(width),
@@ -5963,6 +6825,8 @@ local function model_plan(
     attention = attention,
     linear = linear,
     feed_forward = feed_forward as compute.FeedForward,
+    placement = plan,
+    copy = copy,
   }
 end
 
@@ -6298,11 +7162,15 @@ function compute.model(
   positions: integer | nil,
   cache_type: compute.CacheType | nil,
   sequences?: integer,
-  ubatch?: integer
+  ubatch?: integer,
+  vram?: integer | nil
 ): compute.Model | nil, string | nil
   local loaded = LOADED[backend]
   if loaded is nil then
     return nil, "model: backend was not loaded by compute.load"
+  end
+  if not (vram is nil) and vram < 1 then
+    return nil, "model: vram " .. vram
   end
   local limit = sequences or 1
   if limit < 1 then
@@ -6314,7 +7182,7 @@ function compute.model(
   end
   local cached: compute.CacheType = cache_type or "f16"
   local plan, plan_line = model_plan(
-    backend, handle, positions, cache_type, limit
+    backend, handle, positions, cache_type, limit, rows, vram
   )
   if plan is nil then
     return nil, plan_line
@@ -6349,6 +7217,8 @@ function compute.model(
     pool = plan.pool,
     sized = plan.sized,
     measure = plan.measure,
+    placement = plan.placement,
+    copy = plan.copy,
   }
 
   local model = {} as compute.Model
@@ -6356,6 +7226,7 @@ function compute.model(
   model.sequences = limit
   model.ubatch = rows
   model.measure = plan.measure
+  model.placement = plan.placement
   local measure = model.measure
   model.routing_sink = nil
   local finished = false
@@ -6451,11 +7322,16 @@ function compute.model(
       linear:close()
     end
     state.feed_forward:close()
-    state.mapped.close()
     local pool = state.pool.pool
     if pool is Pool then
       pool_free(pool)
       state.pool.pool = nil
+    end
+    state.mapped.close()
+    local copy = state.copy
+    if copy is Copy then
+      state.copy = nil
+      free_copy(copy)
     end
   end
   model.save = function(

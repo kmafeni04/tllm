@@ -207,7 +207,7 @@ rather than in `serve`.
   starts whole or leaves nothing behind.
 - FR-011 (US-004) WHEN `serve.build` builds a pool and the backend `compute.load` opens finds a
   device, THE SYSTEM SHALL compare that device's free bytes from `memory` with `workers` copies of
-  the sum of the model file's tensor byte lengths, SHALL drop that backend before it returns
+  the bytes the fixed tiers of `35/FR-001` charge, SHALL drop that backend before it returns
   whether or not the copies fit, and IF the free bytes are fewer, THEN THE SYSTEM SHALL return nil
   and one line naming the number of workers and the bytes the device has free, and start no
   worker.
@@ -318,8 +318,9 @@ built a pool. FR-008's non-streamed branch is not asserted: a case cannot kill a
 - T-008 (FR-011): `a pool the card cannot hold is refused at start`, proves, on a machine where
   `compute.load()` gives a backend whose `memory` returns free bytes `f` and a total, so the
   library found a device, that `serve.build` on a copy of the fixture whose `workers` is
-  `floor(f / t) + 1`, where `t` is that file's tensor byte sum, returns nil and one line holding
-  that number and a byte count no larger than `f`, with no worker process started; on a machine
+  `floor(f / t) + 1`, where `t` is the bytes the file's fixed tiers charge as `35/FR-001` gives
+  them, so the workers' dense weights alone exceed `f`, returns nil and one line holding that
+  number and a byte count no larger than `f`, with no worker process started; on a machine
   where `memory` gives nil and nil it skips with the line `no CUDA device`, as `21/T-001` does.
 
 - T-009 (FR-009): `a gguf is mapped at build and a bad file is refused`, proves over a server that

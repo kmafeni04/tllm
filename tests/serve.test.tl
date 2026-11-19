@@ -6,10 +6,9 @@ local support = require("tests.support")
 local cli = require("tllm.cli")
 local compute = require("tllm.compute")
 local generate = require("tllm.generate")
-local ggml = require("tllm.ggml")
-local gguf = require("tllm.gguf")
 local serve = require("tllm.serve")
 local tokenizer = require("tllm.tokenizer")
+local weights = require("tllm.weights")
 local tltp = require("tltp")
 local type Entry = support.Entry
 local type Meta = support.Meta
@@ -208,6 +207,8 @@ local function t001_entries(): {Entry}
 end
 
 local A_BODY = '{"messages":[{"role":"user","content":"a"}]}'
+
+local DEVICE_LINE = "^device: (.+), (%d+) bytes budget, (%d+) bytes held, (%d+) expert slots in (%d+) bytes, (%d+) bytes from the mapping$"
 
 local function body_with(name: string, value: string): string
   return '{"messages":[{"role":"user","content":"a"}],"'
@@ -1370,9 +1371,10 @@ test.it(
       function(line: string) written[#written + 1] = line end
     )
     test.equal(code, 1)
-    test.equal(#written, 1)
-    test.includes(written[1], "BIND")
-    test.equal(#(written[1]:match("(\n*)$") as string), 1)
+    test.equal(#written, 2)
+    test.equal((written[1]:gsub("\n$", "")):match(DEVICE_LINE) ~= nil, true)
+    test.includes(written[2], "BIND")
+    test.equal(#(written[2]:match("(\n*)$") as string), 1)
   end
 )
 
@@ -2506,22 +2508,9 @@ on_device(
   function()
     local bytes = meta_bytes(t001_meta(), t001_entries())
     local copy = fixture(bytes)
-    local info = gguf.read(copy) as gguf.Info
-    local each = 0
-    for _, tensor in ipairs(info.tensors) do
-      local kind = ggml.type_of(tensor.type_code) as ggml.Type
-      local first = 1
-      if #tensor.dims > 0 then
-        first = tensor.dims[1]
-      end
-      local rest = 1
-      for index = 2, #tensor.dims do
-        rest = rest * tensor.dims[index]
-      end
-      each = each + math.floor(
-        first / kind.block_elements
-      ) * kind.block_bytes * rest
-    end
+    local mapped = weights.load(copy) as weights.Handle
+    local each = compute.place(mapped, 4503599627370496, 0).resident_bytes
+    mapped.release(mapped)
     test.truthy(each > 0)
     local free = device_free as integer
     local count = math.floor(free / each) + 1
@@ -2554,6 +2543,162 @@ on_device(
     test.truthy(shown, why)
     test.truthy((shown as number) <= free)
     test.equal(calls, 0)
+  end
+)
+
+local function free_now(): integer | nil
+  local current = compute.load() as compute.Backend
+  local free = current:memory()
+  compute.unload(current)
+  return free
+end
+
+local function tensor_total(file_path: string): integer
+  local mapped = weights.load(file_path) as weights.Handle
+  local total = 0
+  for _, tensor in pairs(mapped.tensors) do
+    total = total + tensor.bytes
+  end
+  mapped.release(mapped)
+  return total
+end
+
+test.it(
+  "build reports what the card holds",
+  function()
+    local file_path = meta_file(t001_meta(), t001_entries())
+    local written: {string} = {}
+    local server = serve.build(
+      {
+        host = "127.0.0.1",
+        port = 9090,
+        name = "m",
+        path = file_path,
+        sessions = 4,
+        kv_cache = "f32",
+      },
+      nil,
+      function(line: string) written[#written + 1] = line end
+    )
+    test.truthy(server)
+    test.equal(#written, 1)
+    local line = (written[1] as string):gsub("\n$", "")
+    local name, budget, held_bytes, slots, slot_bytes, unplaced = line:match(
+      DEVICE_LINE
+    )
+    if device_free is nil then
+      test.equal(name, "none")
+      test.equal(tonumber(budget), 0)
+      test.equal(tonumber(held_bytes), 0)
+      test.equal(tonumber(slots), 0)
+      test.equal(tonumber(slot_bytes), 0)
+      test.equal(tonumber(unplaced), tensor_total(file_path))
+    else
+      test.truthy(name ~= "none" and #(name as string) > 0)
+      test.greater(tonumber(budget) as number, 0)
+      test.lessEqual(tonumber(held_bytes) as number, tonumber(budget) as number)
+      test.greaterEqual(tonumber(slot_bytes) as integer, 0)
+    end
+    serve.stop(server as tltp.Server)
+
+    local quiet: {string} = {}
+    local pool, pool_failure = serve.build(
+      {
+        host = "127.0.0.1",
+        port = 9090,
+        name = "m",
+        path = file_path,
+        sessions = 4,
+        kv_cache = "f32",
+        context_path = temp_dir(),
+        context_bytes = POOL_BUDGET,
+        workers = 2,
+      },
+      nil,
+      function(chunk: string) quiet[#quiet + 1] = chunk end
+    )
+    test.truthy(pool, pool_failure)
+    test.equal(pool_failure, nil)
+    test.equal(#quiet, 0)
+    serve.stop(pool as tltp.Server)
+
+    local plain = serve.build(
+      {
+        host = "127.0.0.1",
+        port = 9090,
+        name = "m",
+        path = file_path,
+        sessions = 4,
+        kv_cache = "f32",
+      }
+    )
+    test.truthy(plain)
+    serve.stop(plain as tltp.Server)
+  end
+)
+
+on_device(
+  "the cap reaches the model",
+  function()
+    local file_path = meta_file(t001_meta(), t001_entries())
+    local before = free_now() as integer
+    local capped = serve.build(
+      {
+        host = "127.0.0.1",
+        port = 9090,
+        name = "m",
+        path = file_path,
+        sessions = 4,
+        kv_cache = "f32",
+        vram = 1048576,
+      }
+    )
+    test.truthy(capped)
+    local model = serve.model_of(capped as tltp.Server) as serve.Model
+    test.equal(model.generation.placement.budget, math.min(1048576, before))
+    serve.stop(capped as tltp.Server)
+
+    local free_again = free_now() as integer
+    local open = serve.build(
+      {
+        host = "127.0.0.1",
+        port = 9090,
+        name = "m",
+        path = file_path,
+        sessions = 4,
+        kv_cache = "f32",
+      }
+    )
+    test.truthy(open)
+    local uncapped = serve.model_of(open as tltp.Server) as serve.Model
+    test.lessEqual(
+      math.abs(uncapped.generation.placement.budget - free_again),
+      16 * 1024 * 1024
+    )
+    serve.stop(open as tltp.Server)
+  end
+)
+
+test.it(
+  "start hands its writer to build",
+  function()
+    local file_path = meta_file(t001_meta(), t001_entries())
+    local written: {string} = {}
+    local code = serve.start(
+      {
+        host = "192.0.2.1",
+        port = 9090,
+        name = "m",
+        path = file_path,
+        sessions = 4,
+        kv_cache = "f32",
+      },
+      function(line: string) written[#written + 1] = line end
+    )
+    test.equal(code, 1)
+    test.equal(#written, 2)
+    test.equal((written[1]:gsub("\n$", "")):match(DEVICE_LINE) ~= nil, true)
+    test.includes(written[2], "BIND")
   end
 )
 

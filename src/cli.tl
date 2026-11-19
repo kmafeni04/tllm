@@ -246,6 +246,7 @@ local function serve_code(
       context_bytes = settings.context_bytes,
       workers = settings.workers or 1,
       ubatch = settings.ubatch or DEFAULT_UBATCH,
+      vram = settings.vram,
     },
     write_err
   )
@@ -340,6 +341,7 @@ local function bench_code(
       kv_cache = cache_type,
       routing_path = routing_path,
       ubatch = settings.ubatch or DEFAULT_UBATCH,
+      vram = settings.vram,
     },
     write_out,
     write_err

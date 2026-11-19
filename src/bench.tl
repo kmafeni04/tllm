@@ -14,6 +14,7 @@ local record bench
     kv_cache: compute.CacheType | nil
     routing_path: string | nil
     ubatch: integer | nil
+    vram: integer | nil
   end
 
   run: function(Settings, function(string), function(string)): integer
@@ -257,6 +258,7 @@ function bench.run(
       context_bytes = nil,
       workers = 1,
       ubatch = settings.ubatch,
+      vram = settings.vram,
     }
   )
   if server is nil then

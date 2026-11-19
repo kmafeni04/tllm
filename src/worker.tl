@@ -17,6 +17,7 @@ local record EndpointJson
   context_path: string | nil
   context_bytes: integer | nil
   ubatch: integer | nil
+  vram: integer | nil
 end
 
 local function write_frame(path: string, text: string)
@@ -44,6 +45,7 @@ local function endpoint_of(text: string): serve.Endpoint | nil
     context_path = decoded.context_path,
     context_bytes = decoded.context_bytes,
     ubatch = decoded.ubatch,
+    vram = decoded.vram,
   }
 end
 

@@ -3,7 +3,6 @@ local process = require("process")
 local chat = require("tllm.chat")
 local compute = require("tllm.compute")
 local generate = require("tllm.generate")
-local ggml = require("tllm.ggml")
 local gguf = require("tllm.gguf")
 local pause = require("tllm.pause")
 local tokenizer = require("tllm.tokenizer")
@@ -34,6 +33,7 @@ local record serve
     context_bytes: integer | nil
     workers: integer | nil
     ubatch: integer | nil
+    vram: integer | nil
   end
 
   record Worker
@@ -61,7 +61,7 @@ local record serve
 
   model_of: function(tltp.Server): Model | nil
   build: function(
-    endpoint: Endpoint, spawn?: process.Spawn
+    endpoint: Endpoint, spawn?: process.Spawn, write_out?: function(string)
   ): tltp.Server | nil, string | nil
   start: function(
     endpoint: Endpoint, write_err: function(string), spawn?: process.Spawn
@@ -196,9 +196,12 @@ local record EndpointFields
   context_path: string | nil
   context_bytes: integer | nil
   ubatch: integer | nil
+  vram: integer | nil
 end
 
 local DEFAULT_BUDGET: integer = 256
+-- more bytes than any model file holds, so place takes every fixed tensor
+local EVERY_FIXED: integer = 4503599627370496
 local CHAT_PATH = "/v1/chat/completions"
 local CONTEXT_SUFFIX = ".context"
 
@@ -1908,35 +1911,9 @@ local function endpoint_json(endpoint: serve.Endpoint): string
     context_path = endpoint.context_path,
     context_bytes = endpoint.context_bytes,
     ubatch = endpoint.ubatch,
+    vram = endpoint.vram,
   }
   return tltp.json_encode(fields) as string
-end
-
--- the bytes the file's tensors hold, read without mapping the file
-local function model_bytes(info: gguf.Info): integer | nil, string | nil
-  local total = 0
-  for _, tensor in ipairs(info.tensors) do
-    local kind = ggml.type_of(tensor.type_code)
-    if kind is nil then
-      return nil,
-        "build: tensor "
-          .. tensor.name
-          .. " is type code "
-          .. tostring(tensor.type_code)
-    end
-    local first = 1
-    if #tensor.dims > 0 then
-      first = tensor.dims[1]
-    end
-    local rest = 1
-    for index = 2, #tensor.dims do
-      rest = rest * tensor.dims[index]
-    end
-    total = total + math.floor(
-      first / kind.block_elements
-    ) * kind.block_bytes * rest
-  end
-  return total, nil
 end
 
 local function slot_under(base: string): string | nil
@@ -2005,14 +1982,12 @@ local function pool_build(
   local free = backend:memory()
   compute.unload(backend)
   if free is integer then
-    local info, read_failure = gguf.read(endpoint.path)
-    if info is nil then
-      return nil, read_failure
+    local mapped, map_failure = weights.load(endpoint.path)
+    if mapped is nil then
+      return nil, map_failure
     end
-    local each, byte_line = model_bytes(info)
-    if each is nil then
-      return nil, byte_line
-    end
+    local each = compute.place(mapped, EVERY_FIXED, 0).resident_bytes
+    mapped.release(mapped)
     local needed = each * count
     if needed > free then
       return nil,
@@ -2121,7 +2096,7 @@ function serve.stop(server: tltp.Server)
 end
 
 function serve.build(
-  endpoint: serve.Endpoint, spawn?: process.Spawn
+  endpoint: serve.Endpoint, spawn?: process.Spawn, write_out?: function(string)
 ): tltp.Server | nil, string | nil
   local count = endpoint.workers
   if count is integer and count > 1 then
@@ -2161,10 +2136,46 @@ function serve.build(
   end
 
   local generation, generation_failure = compute.model(
-    backend, handle, nil, endpoint.kv_cache, endpoint.sessions, endpoint.ubatch
+    backend,
+    handle,
+    nil,
+    endpoint.kv_cache,
+    endpoint.sessions,
+    endpoint.ubatch,
+    endpoint.vram
   )
   if generation is nil then
     return nil, generation_failure
+  end
+
+  if write_out is function then
+    local placement = generation.placement
+    local slots = 0
+    for _, each_slot in ipairs(placement.slots) do
+      slots = slots + each_slot
+    end
+    local name = "none"
+    local found = backend.device
+    if found is string then
+      name = found
+    end
+    write_out(
+      one_line(
+        "device: "
+          .. name
+          .. ", "
+          .. tostring(placement.budget)
+          .. " bytes budget, "
+          .. tostring(placement.resident_bytes)
+          .. " bytes held, "
+          .. tostring(slots)
+          .. " expert slots in "
+          .. tostring(placement.slot_bytes)
+          .. " bytes, "
+          .. tostring(placement.unplaced_bytes)
+          .. " bytes from the mapping"
+      )
+    )
   end
 
   local server = tltp.Server.new(
@@ -2189,7 +2200,7 @@ end
 function serve.start(
   endpoint: serve.Endpoint, write_err: function(string), spawn?: process.Spawn
 ): integer
-  local server, failure = serve.build(endpoint, spawn)
+  local server, failure = serve.build(endpoint, spawn, write_err)
   if server is nil then
     write_err(one_line(failure as string))
     return 1

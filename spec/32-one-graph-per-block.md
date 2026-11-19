@@ -141,7 +141,8 @@ record `29` declares, and `29/FR-009` is amended to say so.
   Not testable: reaching the branch needs an arena one tensor short, which the sizing makes
   unreachable from outside; the branch is the raise in `graph_tensor` and the `pcall` around a
   graph's build, confirmed by inspection, and `11/FR-016` states the same for one operation.
-- FR-008 (US-004) WHEN a block's graph runs on a backend whose weights are in device memory, THE
+- FR-008 (US-004) WHEN a block's graph runs on a backend whose weights are in device memory or
+  whose model's placement marks at least one tensor, whatever the block's own weights, THE
   SYSTEM SHALL allocate one device buffer for that block's graphs, sized by FR-005's rule as
   `33/FR-003` amends it from the largest graph that block builds at the geometry's `positions`, and
   reuse it for every later pass's graph of that block, a pass holding more rows replacing the

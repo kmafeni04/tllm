@@ -1,6 +1,6 @@
 # 35: The expert tier, a VRAM budget and what sits in it
 
-**Status**: pending   **Depends on**: 04, 06, 11, 18, 21, 24, 28, 29, 32, 33, 34
+**Status**: done   **Depends on**: 04, 06, 11, 18, 21, 24, 28, 29, 32, 33, 34
 
 ## Problem & context
 
@@ -147,13 +147,17 @@ a pool, whose models are the workers' own, writes no line at all.
   bytes charged for them, an expert's three matrices being placed together or not at all.
 - FR-003 (US-003) WHEN `place` returns, THE SYSTEM SHALL report in `resident_bytes` the bytes it
   charged for the tensors it marked and in `unplaced_bytes` the handle's tensor bytes it did not
-  mark, and `resident_bytes` plus `slot_bytes` SHALL be at most the budget less the reservation and
-  both SHALL be 0 when the reservation is at least the budget.
+  mark, never below 0 when the charges for the tensors it marked are more than those bytes hold, and
+  `resident_bytes` plus `slot_bytes` SHALL be at most the budget less the reservation and both
+  SHALL be 0 when the reservation is at least the budget.
 - FR-004 (US-004) WHEN `compute.model` is given a backend whose library found a device and which was
   not asked to stay on the CPU, THE SYSTEM SHALL take the tier's budget as the free bytes `memory`
   reports at that moment, or as the `vram` it is given when one is given and is the smaller, SHALL
-  set the model's reservation to the bytes its graphs need in device memory as `32/FR-008` sizes
-  them at the geometry's positions, SHALL copy the tensors its `place` marks and each resident
+  set the model's reservation to the bytes the tensors of the graph buffers `32/FR-008` gives a
+  block or the pass hold at the geometry's positions, measured for the widest pass the model's
+  `ubatch` allows and no more rows than its sessions at its positions hold, one sum for each of
+  those buffers, each sum rounded up to 16 rather than charged with the padded allocation each
+  tensor lands in, SHALL copy the tensors its `place` marks and each resident
   expert's three matrices into device memory in one buffer of the model's own sized to
   `resident_bytes` plus `slot_bytes`, and SHALL set the model's `placement` to that plan; WHEN the
   library found no device, or the backend was asked to stay on the CPU, THE SYSTEM SHALL set a
@@ -309,33 +313,4 @@ its three tokens, so its tensors hold about 44 MiB, which is what T-002 measures
 
 ## Amendments
 
-- `04/FR-006`: `vram` joins the accepted top-level keys, so a file naming it is read rather than
-  refused.
-- `04/FR-007`: `vram` set and not a whole number of one or more is a fault, checked after `ubatch`
-  in the order that requirement gives.
-- `04/FR-011`: the file's `vram` reaches `start` as the endpoint's `vram`, nil when the file sets
-  none or no file is read.
-- `21/FR-002`: a `compute.model` builds a copy of its own from its placement, being the tensors that
-  plan marks and the expert matrices it places in one device buffer sized to the plan's
-  `resident_bytes` plus its `slot_bytes` with the rest read from the mapping, while every other entry
-  point built from the handle keeps the whole-model copy that requirement states, so two models over
-  one handle share no copy.
-- `21/FR-003`: compute an operation on the CUDA backend when the model's placement marks at least one
-  tensor, and hand the graph a host tensor over the mapping for the length of a call for every
-  tensor the placement does not mark; the attention cache stays in host memory as stated.
-- `21/FR-009`: `device` names the device the maths runs on when the backend found one and was not
-  asked to stay on the CPU and its handle's weights are in device memory, or the model holds an
-  expert slot, whether those weights are the whole-model copy that requirement already describes or
-  the tensors a model's placement marks; it is nil otherwise.
-- `21/FR-010`: the handle's `release` frees the whole-model copies `21/FR-002` gives the entry points
-  built from that handle, and a copy a model made is freed by that model's `close`, which is
-  `35/FR-012`.
-- `28/FR-011`: compare that device's free bytes with `workers` copies of the bytes the fixed tiers of
-  `35/FR-001` charge, so a pool is refused only when even the dense weights cannot sit on the card,
-  and its case pins the refusal at a fixture whose fixed tensors alone exceed the free bytes.
-- `29/FR-011`: bench's endpoint carries the config file's `vram`, nil when the file sets none, so a
-  bench run measures the tier a server would have.
-- `32/FR-008`: a block's graph gets its device buffer when the model's placement marks at least one
-  tensor, whatever the block's own weights, and that buffer stays sized as the requirement says.
-- `34/FR-001`: a chosen matrix the model's placement marks resident is not read whole; every other
-  chosen matrix is read whole, whether or not the model's fixed weights are on the card.
+- None.

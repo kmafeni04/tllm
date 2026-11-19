@@ -194,9 +194,10 @@ refusal lines through the second, and hands back the exit code. The `generation`
 - FR-011 (US-004) THE SYSTEM SHALL build its server through `serve.build` with an endpoint whose
   `path` is the resolved model's path, whose `kv_cache` is the config file's value or `f16`, whose
   `sessions` is 1, whose `workers` is 1, whose `context_path` and `context_bytes` are nil, whose
-  `host` is `127.0.0.1`, whose `port` is 8080 and whose `ubatch` is the config file's `ubatch` or
-  512 when it names none, so a bench run binds no socket, starts no worker
-  process and creates no context directory.
+  `host` is `127.0.0.1`, whose `port` is 8080, whose `ubatch` is the config file's `ubatch` or
+  512 when it names none, and whose `vram` is the config file's `vram`, nil when it names none, so
+  a bench run measures the tier a server would have, binds no socket, starts no worker process and
+  creates no context directory.
   Not testable: `sessions`, `workers`, `context_path`, `context_bytes`, `host` and `port` exist
   only for serve's binding, spawning and context store, none of which a bench run uses, and
   `kv_cache` only shifts the numbers such a run prints, which no case pins; visible by hand,

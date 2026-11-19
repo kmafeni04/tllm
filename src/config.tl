@@ -23,6 +23,7 @@ local record Config
   context_bytes: integer | nil
   workers: integer | nil
   ubatch: integer | nil
+  vram: integer | nil
 end
 
 local DEFAULT_CONTEXT_BYTES: integer = 1073741824
@@ -92,6 +93,7 @@ local function unknown_key(fields: Fields): string | nil
     context = true,
     workers = true,
     ubatch = true,
+    vram = true,
   }
   local keys: {string} = {}
   for key in pairs(fields) do
@@ -305,6 +307,20 @@ local function parse(
   elseif not (ubatch is nil) then
     return fault(
       "config " .. file_path .. ": ubatch must be an integer of one or more"
+    )
+  end
+
+  local vram = fields.vram
+  if vram is number then
+    if not (vram % 1 == 0 and vram >= 1) then
+      return fault(
+        "config " .. file_path .. ": vram must be an integer of one or more"
+      )
+    end
+    settings.vram = vram as integer
+  elseif not (vram is nil) then
+    return fault(
+      "config " .. file_path .. ": vram must be an integer of one or more"
     )
   end
 
