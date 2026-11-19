@@ -110,17 +110,17 @@ local function penalised(
     local value = scores[index]
     local count = held[index - 1] or 0
     if count > 0 then
-      if not (repetition is nil) then
+      if repetition is number then
         if value > 0 then
           value = value / repetition
         elseif value < 0 then
           value = value * repetition
         end
       end
-      if not (presence is nil) then
+      if presence is number then
         value = value - presence
       end
-      if not (frequency is nil) then
+      if frequency is number then
         value = value - frequency * count
       end
     end
@@ -252,7 +252,7 @@ local function narrowed(
     end
     order = selected(values, size)
     top = values[order[1] + 1]
-  elseif not (top_p is nil) then
+  elseif top_p is number then
     order = ordered(values)
     top = values[order[1] + 1]
   else
@@ -274,7 +274,7 @@ local function narrowed(
     weights[index] = math.exp((values[order[index] + 1] - top) / temperature)
   end
 
-  if not (top_p is nil) then
+  if top_p is number then
     local total: number = 0
     for index = 1, count do
       total = total + weights[index]
@@ -289,7 +289,7 @@ local function narrowed(
     end
   end
 
-  if not (min_p is nil) then
+  if min_p is number then
     local highest = weights[1]
     for index = 2, count do
       if weights[index] > highest then
@@ -348,7 +348,7 @@ local function faulted(options: Options): string | nil
       .. " is below one"
   end
   local temperature = options.temperature
-  if not (temperature is nil) and temperature < 0 then
+  if temperature is number and temperature < 0 then
     return "generate: temperature " .. tostring(temperature) .. " is below zero"
   end
   local top_k = options.top_k
@@ -360,19 +360,19 @@ local function faulted(options: Options): string | nil
     return "generate: start " .. tostring(start) .. " is below zero"
   end
   local top_p = options.top_p
-  if not (top_p is nil) and (top_p <= 0 or top_p > 1) then
+  if top_p is number and (top_p <= 0 or top_p > 1) then
     return "generate: top_p "
       .. tostring(top_p)
       .. " is not above zero and at most one"
   end
   local min_p = options.min_p
-  if not (min_p is nil) and (min_p < 0 or min_p > 1) then
+  if min_p is number and (min_p < 0 or min_p > 1) then
     return "generate: min_p "
       .. tostring(min_p)
       .. " is not between zero and one"
   end
   local repetition = options.repetition_penalty
-  if not (repetition is nil) and repetition <= 0 then
+  if repetition is number and repetition <= 0 then
     return "generate: repetition_penalty "
       .. tostring(repetition)
       .. " is not above zero"
@@ -467,7 +467,7 @@ function generate.open_ids(
   sequence?: string
 ): generate.Run | nil, string | nil
   local fault = faulted(options)
-  if not (fault is nil) then
+  if fault is string then
     return nil, fault
   end
 
@@ -639,7 +639,7 @@ function generate.open(
   sequence?: string
 ): generate.Run | nil, string | nil
   local fault = faulted(options)
-  if not (fault is nil) then
+  if fault is string then
     return nil, fault
   end
   local ids, encode_line = tokens:encode(prompt)
@@ -665,7 +665,7 @@ function generate.text_ids(
 
   local name = sequence or ""
   local reserve_line = ensure_reserved(model, name)
-  if not (reserve_line is nil) then
+  if reserve_line is string then
     return nil, reserve_line
   end
 
@@ -682,16 +682,16 @@ function generate.text_ids(
     end
     local scores = rows as {{number}}
     local piece, accept_line = run.accept(run, scores[#scores])
-    if not (accept_line is nil) then
+    if accept_line is string then
       break
     end
-    if not (piece is nil) then
+    if piece is string then
       pieces[#pieces + 1] = piece
     end
   end
 
   local failure = run.failure
-  if not (failure is nil) then
+  if failure is string then
     return nil, failure
   end
 
@@ -707,7 +707,7 @@ function generate.text(
   sequence?: string
 ): generate.Text | nil, string | nil
   local fault = faulted(options)
-  if not (fault is nil) then
+  if fault is string then
     return nil, fault
   end
   local ids, encode_line = tokens:encode(prompt)

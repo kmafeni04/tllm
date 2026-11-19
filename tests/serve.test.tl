@@ -738,7 +738,7 @@ local function begun(
       return stream_fn(
         function(event: string | tltp.SSEMessage): string | nil, string | nil
           payloads[#payloads + 1] = event as string
-          if not (order is nil) then
+          if order is {string} then
             order[#order + 1] = tag
           end
           return nil, nil
@@ -1437,8 +1437,11 @@ local function stream_text(watcher: Watcher): string
   local parts: {string} = {}
   for _, event in ipairs(events_of(watcher.payloads)) do
     local delta = event.choices[1].delta
-    if not (delta is nil) and delta.content ~= nil then
-      parts[#parts + 1] = delta.content as string
+    if delta is StreamDelta then
+      local content = delta.content
+      if content is string then
+        parts[#parts + 1] = content
+      end
     end
   end
   return table.concat(parts)
@@ -2435,7 +2438,7 @@ test.it(
       name: string, args: {string} | nil, opts: process.Options | nil
     ): process.Child | nil, string | nil
       local child, failure = process.spawn(name, args, opts)
-      if not (child is nil) then
+      if child is process.Child then
         pids[#pids + 1] = child.pid
       end
       return child, failure
@@ -2803,10 +2806,10 @@ local function pieces(events: {StreamEvent}): {string}
   local parts: {string} = {}
   for _, event in ipairs(events) do
     local delta = event.choices[1].delta
-    if not (delta is nil) then
+    if delta is StreamDelta then
       local piece = delta.content
-      if not (piece is nil) then
-        parts[#parts + 1] = piece as string
+      if piece is string then
+        parts[#parts + 1] = piece
       end
     end
   end

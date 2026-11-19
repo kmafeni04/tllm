@@ -687,7 +687,7 @@ local function opened(
   test.equal(line, nil)
   test.truthy(run)
   local reserved = model:reserve("", model.positions)
-  if not (reserved is nil) then
+  if reserved is string then
     test.equal(reserved:find("is already held", 1, true), nil)
   end
   return run as generate.Run

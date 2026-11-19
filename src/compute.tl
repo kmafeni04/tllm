@@ -1196,7 +1196,7 @@ local function opened(
   local copy = mapped.device
   -- with a device copy the only host memory a graph needs is its arena
   local host_bytes = data_bytes
-  if not (copy is nil) then
+  if copy is Copy then
     host_bytes = 0
   end
 
@@ -1208,7 +1208,7 @@ local function opened(
 
   local params = arena_params(arena_size)
   params.mem_buffer = arena
-  if not (copy is nil) then
+  if copy is Copy then
     params.no_alloc = true
   end
   local ctx = lib.ggml_init(params)
@@ -1235,7 +1235,7 @@ local function computed(
 ): string | nil
   local lib = session.lib
   local pool = session.pool
-  if not (pool is nil) then
+  if pool is Pool then
     local engine = pool_backend(pool)
     if engine is nil then
       return operation .. ": no backend"
@@ -1260,7 +1260,7 @@ local function computed(
       end
     end
     local placed_line = placed(session)
-    if not (placed_line is nil) then
+    if placed_line is string then
       return operation .. ": " .. placed_line
     end
     for _, write in ipairs(session.graph.pending) do
@@ -1304,7 +1304,7 @@ end
 local function closed(session: Session)
   local lib = session.lib
   local pool = session.pool
-  if not (pool is nil) then
+  if pool is Pool then
     -- the pool's arena and device buffer outlive the graph that used them, and
     -- the buffer a graph's numbers were given was this call's own
     local buffer = session.buffer
@@ -1496,7 +1496,7 @@ local function sized_pool(
     if count > made then
       made = count
     end
-    if not (copy is nil) then
+    if copy is Copy then
       host_bytes, device_bytes, count = footprint_of(
         lib, copy, true, entry.build, tensors
       )
@@ -1571,7 +1571,7 @@ local function graph_run(
     closed(session)
     return nil, failure
   end
-  if not (measure is nil) then
+  if measure is compute.Measure then
     measure.graphs = measure.graphs + 1
   end
   return {
@@ -1739,12 +1739,12 @@ local function mapped_of(
   if loaded.offload and not (found is nil) then
     local held = COPIES[handle]
     local copy: Copy | nil = nil
-    if not (held is nil) then
+    if held is {compute.Backend: Copy} then
       copy = held[backend]
     end
     if copy is nil then
       copy = device_copy(loaded, handle)
-      if not (copy is nil) then
+      if copy is Copy then
         if held is nil then
           held = {}
           COPIES[handle] = held
@@ -1752,7 +1752,7 @@ local function mapped_of(
         held[backend] = copy
       end
     end
-    if not (copy is nil) then
+    if copy is Copy then
       backend.device = ffi.string(lib.ggml_backend_dev_name(found as ffi.CData))
       local mark = holder(handle)
       return {
@@ -2451,7 +2451,7 @@ local function cache_of(
 ): Cache | nil, string | nil
   local held = caches_in(state, sequence)
   local stored = held[prefix]
-  if not (stored is nil) then
+  if stored is Cache then
     return stored
   end
 
@@ -2556,13 +2556,13 @@ local function attention_snapshot(
 ): string | nil, string | nil
   local held = state.caches[sequence]
   local cache: Cache | nil = nil
-  if not (held is nil) then
+  if held is {string: Cache} then
     cache = held[prefix]
   end
   if cache is nil then
     return nil, prefix .. " holds no cache"
   end
-  local stored = cache as Cache
+  local stored = cache
   if stored.count ~= positions then
     return nil,
       prefix .. " took " .. stored.count .. " positions, not " .. positions
@@ -3130,14 +3130,14 @@ local function grown(
   if not owned then
     return held
   end
-  if not (held is nil) and held.rows >= rows then
+  if held is Pool and held.rows >= rows then
     return held
   end
   local wider = size(rows)
   if wider is nil then
     return nil
   end
-  if not (held is nil) then
+  if held is Pool then
     pool_free(held)
   end
   box.pool = wider
@@ -3191,14 +3191,14 @@ local function attention_block(
     end
     local cache: Cache | nil = nil
     local held = state.caches[entry.sequence]
-    if not (held is nil) then
+    if held is {string: Cache} then
       cache = held[prefix]
     end
     local expected = running[entry.sequence]
     if expected is nil then
       expected = 0
-      if not (cache is nil) then
-        expected = (cache as Cache).count
+      if cache is Cache then
+        expected = cache.count
       end
     end
     local bad_position = position_refusal(
@@ -3217,7 +3217,7 @@ local function attention_block(
   for _, entry in ipairs(rows) do
     local held = state.caches[entry.sequence]
     local cache: Cache | nil = nil
-    if not (held is nil) then
+    if held is {string: Cache} then
       cache = held[prefix]
     end
     if cache is nil then
@@ -3738,7 +3738,7 @@ local function feed_forward_ready(
     block_prefix = prefix_named(state.mapped, "post_attention_norm.weight")
   end
   local block_width = hidden_width(state.mapped, "post_attention_norm.weight")
-  if not (block_prefix is nil) and not (block_width is nil) then
+  if block_prefix is string and not (block_width is nil) then
     for _, entry in ipairs(
       feed_forward_block_builds(state, block_prefix, block_width, rows)
     ) do
@@ -3766,7 +3766,7 @@ local function expert_bytes(
     {"ffn_up_exps.weight", "ffn_gate_exps.weight", "ffn_down_exps.weight"}
   ) do
     local tensor = mapped.tensors[prefix .. name]
-    if not (tensor is nil) then
+    if tensor is Tensor then
       local count = 1
       if #tensor.dims >= 3 then
         count = tensor.dims[3] as integer
@@ -3802,7 +3802,7 @@ local function read_experts(
     {"ffn_up_exps.weight", "ffn_gate_exps.weight", "ffn_down_exps.weight"}
   ) do
     local tensor = mapped.tensors[prefix .. name]
-    if not (tensor is nil) and #tensor.dims >= 3 then
+    if tensor is Tensor and #tensor.dims >= 3 then
       local each = math.floor(tensor.bytes / (tensor.dims[3] as integer))
       for expert = 0, experts - 1 do
         if chosen[expert] then
@@ -3818,7 +3818,7 @@ local function read_experts(
       end
     end
   end
-  if reads > 0 and not (measure is nil) then
+  if reads > 0 and measure is compute.Measure then
     measure.blob_reads = measure.blob_reads + reads
     measure.blob_bytes = measure.blob_bytes + bytes
     measure.blob_seconds = measure.blob_seconds + (clock.now() - started)
@@ -3926,13 +3926,13 @@ local function feed_forward_block(
       chosen[expert] = true
     end
     totals[index] = total
-    if not (watchs is nil) then
-      recorded((watchs as {compute.Watch})[index], mapped, prefix, routed)
+    if watchs is {compute.Watch} then
+      recorded(watchs[index], mapped, prefix, routed)
     end
   end
 
   local read_line = read_experts(mapped, prefix, chosen, experts, state.measure)
-  if not (read_line is nil) then
+  if read_line is string then
     return nil, read_line
   end
 
@@ -4292,7 +4292,7 @@ local function linear_snapshot(
 ): string | nil, string | nil
   local held = state.prefixes[sequence]
   local kept: LinearKept | nil = nil
-  if not (held is nil) then
+  if held is {string: LinearKept} then
     kept = held[prefix]
   end
   if kept is nil and positions == 0 then
@@ -4301,7 +4301,7 @@ local function linear_snapshot(
   if kept is nil then
     return nil, prefix .. " holds no history"
   end
-  local active = kept as LinearKept
+  local active = kept
   if active.count ~= positions then
     return nil,
       prefix .. " took " .. active.count .. " positions, not " .. positions
@@ -4771,12 +4771,12 @@ local function linear_block(
     end
     local held = state.prefixes[entry.sequence]
     local kept: LinearKept | nil = nil
-    if not (held is nil) then
+    if held is {string: LinearKept} then
       kept = held[prefix]
     end
     local expected = 0
-    if not (kept is nil) then
-      expected = (kept as LinearKept).count
+    if kept is LinearKept then
+      expected = kept.count
     end
     if entry.position < 0 then
       return nil, "block: prefix " .. prefix .. " position " .. entry.position
@@ -4988,7 +4988,7 @@ function compute.attach(
     _: compute.Maths, name: string, vector: {number}, index?: integer
   ): {number} | nil, string | nil
     local line = shut("matvec")
-    if not (line is nil) then
+    if line is string then
       return nil, line
     end
     return matrix_vector(mapped, name, vector, index)
@@ -4997,7 +4997,7 @@ function compute.attach(
     _: compute.Maths, name: string, id: integer
   ): {number} | nil, string | nil
     local line = shut("row")
-    if not (line is nil) then
+    if line is string then
       return nil, line
     end
     return row(mapped, name, id)
@@ -5006,7 +5006,7 @@ function compute.attach(
     _: compute.Maths, vector: {number}, gain: string, eps: number
   ): {number} | nil, string | nil
     local line = shut("norm")
-    if not (line is nil) then
+    if line is string then
       return nil, line
     end
     return normalise(mapped, vector, gain, eps)
@@ -5019,7 +5019,7 @@ function compute.attach(
     base: number
   ): {number} | nil, string | nil
     local line = shut("rope")
-    if not (line is nil) then
+    if line is string then
       return nil, line
     end
     return rotary(mapped, vector, position, dimensions, base)
@@ -5028,7 +5028,7 @@ function compute.attach(
     _: compute.Maths, vector: {number}
   ): {number} | nil, string | nil
     local line = shut("softmax")
-    if not (line is nil) then
+    if line is string then
       return nil, line
     end
     return softmax(mapped, vector)
@@ -5037,7 +5037,7 @@ function compute.attach(
     _: compute.Maths, left: {number}, right: {number}
   ): {number} | nil, string | nil
     local line = shut("add")
-    if not (line is nil) then
+    if line is string then
       return nil, line
     end
     return add(mapped, left, right)
@@ -5046,7 +5046,7 @@ function compute.attach(
     _: compute.Maths, gate: {number}, up: {number}
   ): {number} | nil, string | nil
     local line = shut("swiglu")
-    if not (line is nil) then
+    if line is string then
       return nil, line
     end
     return swiglu(mapped, gate, up)
@@ -5055,7 +5055,7 @@ function compute.attach(
     _: compute.Maths, gate: {number}, values: {number}
   ): {number} | nil, string | nil
     local line = shut("sigmoid_gate")
-    if not (line is nil) then
+    if line is string then
       return nil, line
     end
     return sigmoid_gate(mapped, gate, values)
@@ -5117,7 +5117,7 @@ local function attention_of(
     _: compute.Attention, rows: {compute.Row}, prefix: string
   ): {{number}} | nil, string | nil
     local line = shut("block")
-    if not (line is nil) then
+    if line is string then
       return nil, line
     end
     return attention_block(state, rows, prefix)
@@ -5145,7 +5145,7 @@ local function attention_of(
     prefixes: {string}
   ): string | nil
     local line = shut("reserve")
-    if not (line is nil) then
+    if line is string then
       return line
     end
     return attention_reserve(state, sequence, positions, prefixes)
@@ -5160,7 +5160,7 @@ local function attention_of(
     _: compute.Attention, sequence: string, prefix: string, positions: integer
   ): string | nil, string | nil
     local line = shut("snapshot")
-    if not (line is nil) then
+    if line is string then
       return nil, line
     end
     return attention_snapshot(state, sequence, prefix, positions)
@@ -5173,7 +5173,7 @@ local function attention_of(
     payload: string
   ): string | nil
     local line = shut("restore")
-    if not (line is nil) then
+    if line is string then
       return line
     end
     return attention_restore(state, sequence, prefix, positions, payload)
@@ -5186,7 +5186,7 @@ local function attention_of(
     attention_closed(state)
     if state.owner then
       local held = state.pool.pool
-      if not (held is nil) then
+      if held is Pool then
         pool_free(held)
         state.pool.pool = nil
       end
@@ -5265,7 +5265,7 @@ local function feed_forward_of(
     state.mapped.close()
     if state.owner then
       local held = state.pool.pool
-      if not (held is nil) then
+      if held is Pool then
         pool_free(held)
         state.pool.pool = nil
       end
@@ -5330,7 +5330,7 @@ local function linear_of(
     _: compute.LinearAttention, rows: {compute.Row}, prefix: string
   ): {{number}} | nil, string | nil
     local line = shut("block")
-    if not (line is nil) then
+    if line is string then
       return nil, line
     end
     return linear_block(state, rows, prefix)
@@ -5348,7 +5348,7 @@ local function linear_of(
     positions: integer
   ): string | nil, string | nil
     local line = shut("snapshot")
-    if not (line is nil) then
+    if line is string then
       return nil, line
     end
     return linear_snapshot(state, sequence, prefix, positions)
@@ -5361,7 +5361,7 @@ local function linear_of(
     payload: string
   ): string | nil
     local line = shut("restore")
-    if not (line is nil) then
+    if line is string then
       return line
     end
     return linear_restore(state, sequence, prefix, positions, payload)
@@ -5374,7 +5374,7 @@ local function linear_of(
     linear_closed(state)
     if state.owner then
       local held = state.pool.pool
-      if not (held is nil) then
+      if held is Pool then
         pool_free(held)
         state.pool.pool = nil
       end
@@ -5507,7 +5507,7 @@ local function model_builds(
   }
   local full_prefix = prefix_named(mapped, "post_attention_norm.weight")
   local hidden_count = hidden_width(mapped, "post_attention_norm.weight")
-  if not (full_prefix is nil) and not (hidden_count is nil) then
+  if full_prefix is string and not (hidden_count is nil) then
     for _, entry in ipairs(
       feed_forward_builds(feed_forward_state, full_prefix, hidden_count, rows)
     ) do
@@ -5526,7 +5526,7 @@ local function model_builds(
     local prefix = "blk." .. (first_full as integer) .. "."
     if holds(mapped, prefixed(prefix, ATTENTION_NAMES)) then
       local entry = attention_measure(attention_state, prefix, rows)
-      if not (entry is nil) then
+      if entry is Build then
         builds[#builds + 1] = entry
       end
     end
@@ -5940,7 +5940,7 @@ local function model_plan(
     if made is nil then
       feed_forward:close()
       local blocked = attention
-      if not (blocked is nil) then
+      if blocked is compute.Attention then
         blocked:close()
       end
       pool_free(arena)
@@ -6025,9 +6025,9 @@ local function sequence_reserve(
     return "reserve: positions " .. positions .. " for " .. sequence
   end
   local attention = state.attention
-  if not (attention is nil) and #state.full_prefixes > 0 then
+  if attention is compute.Attention and #state.full_prefixes > 0 then
     local line = attention:reserve(sequence, positions, state.full_prefixes)
-    if not (line is nil) then
+    if line is string then
       return named_failure("reserve", line)
     end
   end
@@ -6040,11 +6040,11 @@ local function sequence_release(state: ModelState, sequence: string)
     return
   end
   local attention = state.attention
-  if not (attention is nil) then
+  if attention is compute.Attention then
     attention:release(sequence)
   end
   local linear = state.linear
-  if not (linear is nil) then
+  if linear is compute.LinearAttention then
     linear:release(sequence)
   end
   state.sequences[sequence] = nil
@@ -6176,7 +6176,7 @@ local function model_pass(
     return nil, "pass: no rows"
   end
   local refusal = group_refusal(state, inputs)
-  if not (refusal is nil) then
+  if refusal is string then
     return nil, refusal
   end
   local arena, no_room = pass_arena(state, #inputs)
@@ -6190,7 +6190,7 @@ local function model_pass(
   local ids: {integer} = {}
   for index, input in ipairs(inputs) do
     local refused = embedding_refusal(state.mapped, state.width, input.token)
-    if not (refused is nil) then
+    if refused is string then
       return nil, refused
     end
     ids[index] = input.token
@@ -6370,12 +6370,12 @@ function compute.model(
     _: compute.Model, token_id: integer, position: integer
   ): {number} | nil, string | nil
     local closed_line = shut("forward")
-    if not (closed_line is nil) then
+    if closed_line is string then
       return nil, closed_line
     end
     if state.sequences[""] == nil then
       local line = sequence_reserve(state, "", state.positions)
-      if not (line is nil) then
+      if line is string then
         return nil, line
       end
     end
@@ -6399,7 +6399,7 @@ function compute.model(
     _: compute.Model, sequence: string, capacity: integer
   ): string | nil
     local closed_line = shut("reserve")
-    if not (closed_line is nil) then
+    if closed_line is string then
       return closed_line
     end
     return sequence_reserve(state, sequence, capacity)
@@ -6443,17 +6443,17 @@ function compute.model(
     end
     finished = true
     local attention = state.attention
-    if not (attention is nil) then
+    if attention is compute.Attention then
       attention:close()
     end
     local linear = state.linear
-    if not (linear is nil) then
+    if linear is compute.LinearAttention then
       linear:close()
     end
     state.feed_forward:close()
     state.mapped.close()
     local pool = state.pool.pool
-    if not (pool is nil) then
+    if pool is Pool then
       pool_free(pool)
       state.pool.pool = nil
     end
@@ -6462,7 +6462,7 @@ function compute.model(
     _: compute.Model, sequence: string, ids: {integer}, path: string
   ): string | nil
     local closed_line = shut("save")
-    if not (closed_line is nil) then
+    if closed_line is string then
       return closed_line
     end
     local held = state.sequences[sequence]
@@ -6549,7 +6549,7 @@ function compute.model(
     _: compute.Model, sequence: string, path: string
   ): {integer} | nil, string | nil
     local closed_line = shut("load")
-    if not (closed_line is nil) then
+    if closed_line is string then
       return nil, closed_line
     end
     local source = fs.read(path)
@@ -6628,7 +6628,7 @@ function compute.model(
     end
 
     local reserve_line = sequence_reserve(state, sequence, capacity)
-    if not (reserve_line is nil) then
+    if reserve_line is string then
       return nil, reserve_line
     end
     local function give_up(reason: string): string
@@ -6677,8 +6677,8 @@ function compute.model(
           sequence, prefix, took, payload
         )
       end
-      if not (line is nil) then
-        return nil, give_up(line as string)
+      if line is string then
+        return nil, give_up(line)
       end
     end
     (state.sequences[sequence] as SequenceState).taken = taken
@@ -6688,7 +6688,7 @@ function compute.model(
     _: compute.Model, inputs: {compute.Input}
   ): {{number}} | nil, string | nil
     local closed_line = shut("pass")
-    if not (closed_line is nil) then
+    if closed_line is string then
       return nil, closed_line
     end
     return model_pass(state, inputs, measure, model.routing_sink)

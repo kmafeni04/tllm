@@ -349,14 +349,13 @@ local function request_of(body: string): Request | nil, string | nil
 
   local temperature: number | nil = nil
   local temperature_value = fields.temperature
-  if not (temperature_value is nil) then
-    if not (temperature_value is number) then
-      return nil, "temperature: not a number"
-    end
+  if temperature_value is number then
     if temperature_value < 0 then
       return nil, "temperature: below zero"
     end
     temperature = temperature_value
+  elseif not (temperature_value is nil) then
+    return nil, "temperature: not a number"
   end
 
   local top_k: integer | nil = nil
@@ -390,74 +389,67 @@ local function request_of(body: string): Request | nil, string | nil
 
   local stream = false
   local stream_value = fields.stream
-  if not (stream_value is nil) then
-    if not (stream_value is boolean) then
-      return nil, "stream: not a boolean"
-    end
-    stream = stream_value as boolean
+  if stream_value is boolean then
+    stream = stream_value
+  elseif not (stream_value is nil) then
+    return nil, "stream: not a boolean"
   end
 
   local session_id: string | nil = nil
   local session_value = fields.session_id
-  if not (session_value is nil) then
-    if not (session_value is string) then
-      return nil, "session_id: not a string"
-    end
-    session_id = session_value as string
+  if session_value is string then
+    session_id = session_value
+  elseif not (session_value is nil) then
+    return nil, "session_id: not a string"
   end
 
   local top_p: number | nil = nil
   local top_p_value = fields.top_p
-  if not (top_p_value is nil) then
-    if not (top_p_value is number) then
-      return nil, "top_p: not a number"
-    end
+  if top_p_value is number then
     if top_p_value <= 0 or top_p_value > 1 then
       return nil, "top_p: not above zero and at most one"
     end
     top_p = top_p_value
+  elseif not (top_p_value is nil) then
+    return nil, "top_p: not a number"
   end
 
   local min_p: number | nil = nil
   local min_p_value = fields.min_p
-  if not (min_p_value is nil) then
-    if not (min_p_value is number) then
-      return nil, "min_p: not a number"
-    end
+  if min_p_value is number then
     if min_p_value < 0 or min_p_value > 1 then
       return nil, "min_p: not between zero and one"
     end
     min_p = min_p_value
+  elseif not (min_p_value is nil) then
+    return nil, "min_p: not a number"
   end
 
   local repetition_penalty: number | nil = nil
   local repetition_value = fields.repetition_penalty
-  if not (repetition_value is nil) then
-    if not (repetition_value is number) then
-      return nil, "repetition_penalty: not a number"
-    end
+  if repetition_value is number then
     if repetition_value <= 0 then
       return nil, "repetition_penalty: not above zero"
     end
     repetition_penalty = repetition_value
+  elseif not (repetition_value is nil) then
+    return nil, "repetition_penalty: not a number"
   end
 
   local presence_penalty: number | nil = nil
   local presence_value = fields.presence_penalty
-  if not (presence_value is nil) then
-    if not (presence_value is number) then
-      return nil, "presence_penalty: not a number"
-    end
+  if presence_value is number then
     presence_penalty = presence_value
+  elseif not (presence_value is nil) then
+    return nil, "presence_penalty: not a number"
   end
 
   local frequency_penalty: number | nil = nil
   local frequency_value = fields.frequency_penalty
-  if not (frequency_value is nil) then
-    if not (frequency_value is number) then
-      return nil, "frequency_penalty: not a number"
-    end
+  if frequency_value is number then
     frequency_penalty = frequency_value
+  elseif not (frequency_value is nil) then
+    return nil, "frequency_penalty: not a number"
   end
 
   local stop: {string} | nil = nil
@@ -522,7 +514,7 @@ end
 
 local function is_held(server: tltp.Server, name: string): boolean
   local marks = held[server]
-  return not (marks is nil) and marks[name] == true
+  return marks is {string: boolean} and marks[name] == true
 end
 
 local function mark_held(server: tltp.Server, name: string)
@@ -544,7 +536,7 @@ end
 
 local function is_reserved(server: tltp.Server, name: string): boolean
   local marks = reservations[server]
-  return not (marks is nil) and marks[name] == true
+  return marks is {string: boolean} and marks[name] == true
 end
 
 local function free_slots(server: tltp.Server): integer
@@ -554,7 +546,7 @@ local function free_slots(server: tltp.Server): integer
   end
   local count = 0
   local marks = reservations[server]
-  if not (marks is nil) then
+  if marks is {string: boolean} then
     for _ in pairs(marks) do
       count = count + 1
     end
@@ -564,11 +556,11 @@ end
 
 local function release_name(server: tltp.Server, name: string)
   local model = models[server]
-  if not (model is nil) then
+  if model is serve.Model then
     model.generation:release(name)
   end
   local marks = reservations[server]
-  if not (marks is nil) then
+  if marks is {string: boolean} then
     marks[name] = nil
   end
 end
@@ -613,8 +605,8 @@ local function context_files(dir: string): {ContextFile}
     if name:sub(-#CONTEXT_SUFFIX) == CONTEXT_SUFFIX then
       -- the file's own mode tells its type, where a directory entry's may not
       local details = fs.stat(dir .. "/" .. name)
-      if not (details is nil) then
-        local info = details as fs.Stat
+      if details is fs.Stat then
+        local info = details
         if info.type == "file" then
           files[#files + 1] = {
             name = name,
@@ -689,7 +681,7 @@ local function stored(
     return
   end
   local line = model.generation:save(sequence, ids, path)
-  if not (line is nil) then
+  if line is string then
     return
   end
   trimmed(model, file_name(id))
@@ -775,7 +767,7 @@ local function evict_one(server: tltp.Server, store: Store): boolean
   for _, id in ipairs(store.order) do
     local held_conversation = store.held[id]
     if
-      not (held_conversation is nil)
+      held_conversation is Held
       and not is_held(server, held_conversation.session.sequence)
     then
       forgotten(store, id)
@@ -826,7 +818,7 @@ end
 local function too_many(server: tltp.Server): Fault
   local store = stores[server]
   local limit = 0
-  if not (store is nil) then
+  if store is Store then
     limit = store.limit
   end
   return {
@@ -881,7 +873,7 @@ local function prepared(
 
   if id is string and store is Store then
     local found = store.held[id]
-    if not (found is nil) then
+    if found is Held then
       local session = found.session
       if
         session.length < #ids
@@ -900,8 +892,8 @@ local function prepared(
       end
       if #store.order < store.limit then
         local revived = restored_session(server, id, ids, needed)
-        if not (revived is nil) then
-          local hold = revived as Held
+        if revived is Held then
+          local hold = revived
           store.held[id] = hold
           used(store, id)
           found_session = hold.session
@@ -910,7 +902,7 @@ local function prepared(
     end
   end
 
-  if not (found_session is nil) then
+  if found_session is serve.Session then
     sequence = found_session.sequence
     positions = found_session.positions
     cached = found_session.length
@@ -1019,9 +1011,7 @@ local function kept(ready: Prepared, sampled: {integer}, cut: boolean)
   local id = ready.request.session_id
   if id is string and store is Store then
     local existing = store.held[id]
-    if
-      not (existing is nil) and existing.session.sequence ~= ready.sequence
-    then
+    if existing is Held and existing.session.sequence ~= ready.sequence then
       forgotten(store, id)
       if not is_held(ready.server, existing.session.sequence) then
         release_name(ready.server, existing.session.sequence)
@@ -1054,9 +1044,7 @@ local function lost(ready: Prepared)
   local id = ready.request.session_id
   if id is string and store is Store then
     local existing = store.held[id]
-    if
-      not (existing is nil) and existing.session.sequence == ready.sequence
-    then
+    if existing is Held and existing.session.sequence == ready.sequence then
       forgotten(store, id)
     end
   end
@@ -1196,7 +1184,7 @@ end
 -- a wait that ends even when a dying worker writes no file
 local function pool_pause(state: PoolState)
   local watcher = state.watcher
-  if not (watcher is nil) then
+  if watcher is fs.Watcher then
     watcher:poll()
   end
   pause.milliseconds(2)
@@ -1475,7 +1463,7 @@ local function pool_advance(state: PoolState, worker: PoolWorker)
       worker.kind = "json"
     elseif header.kind == "json" then
       local send = turn.emit
-      if not (send is nil) then
+      if send is tltp.EmitFn then
         send(header.body or "")
       end
       worker.kind = "json"
@@ -1487,7 +1475,7 @@ local function pool_advance(state: PoolState, worker: PoolWorker)
   local parts = absorbed(worker)
   for _, part in ipairs(parts) do
     local send = turn.emit
-    if not (send is nil) then
+    if send is tltp.EmitFn then
       send(part)
     end
   end
@@ -1518,7 +1506,7 @@ local function pool_reap(state: PoolState)
     if ended(worker) then
       worker.child:wait()
       local turn = worker.turn
-      if not (turn is nil) then
+      if turn is PoolTurn then
         dropped_turn(state, turn)
       end
       table.remove(state.workers, index)
@@ -1535,7 +1523,7 @@ local function pool_dispatch(state: PoolState)
   for _, turn in ipairs(state.turns) do
     if turn.live and not turn.assigned then
       local worker = choose_worker(state, turn.session_id)
-      if not (worker is nil) then
+      if worker is PoolWorker then
         dispatched(state, worker, turn)
       end
     end
@@ -1679,7 +1667,7 @@ end
 
 function serve.step(server: tltp.Server): integer
   local state = pools[server]
-  if not (state is nil) then
+  if state is PoolState then
     return pool_step(state)
   end
   local list = turns[server]
@@ -1712,7 +1700,7 @@ function serve.step(server: tltp.Server): integer
   local with_rows = 0
   for _, turn in ipairs(list) do
     local driven = turn.run
-    if turn.live and not turn.waiting and not (driven is nil) then
+    if turn.live and not turn.waiting and driven is generate.Run then
       with_rows = with_rows + 1
     end
   end
@@ -1730,10 +1718,10 @@ function serve.step(server: tltp.Server): integer
   for _, turn in ipairs(list) do
     if turn.live and not turn.waiting then
       local run = turn.run
-      if not (run is nil) then
+      if run is generate.Run then
         local rows = run.next(run, share)
-        if not (rows is nil) then
-          for _, input in ipairs(rows as {compute.Input}) do
+        if rows is {compute.Input} then
+          for _, input in ipairs(rows) do
             inputs[#inputs + 1] = input
           end
           active[#active + 1] = turn
@@ -1755,11 +1743,11 @@ function serve.step(server: tltp.Server): integer
       for index, turn in ipairs(active) do
         local run = turn.run as generate.Run
         local piece, accept_line = run.accept(run, planes[lasts[index]])
-        if not (accept_line is nil) then
+        if accept_line is string then
           lost(turn.ready)
           dropped(server, turn)
         else
-          if not (piece is nil) then
+          if piece is string then
             local data = event_data({index = 0, delta = {content = piece}})
             if data is nil then
               lost(turn.ready)
@@ -1801,11 +1789,11 @@ end
 function serve.round(server: tltp.Server): string | nil
   local list = turns[server]
   local timeout = -1
-  if not (list is nil) and #list > 0 then
+  if list is {Turn} and #list > 0 then
     timeout = 0
   end
   local state = pools[server]
-  if not (state is nil) and #state.turns > 0 then
+  if state is PoolState and #state.turns > 0 then
     timeout = 0
   end
   local _, line = server:poll(timeout)
@@ -1815,7 +1803,7 @@ end
 
 function serve.answer(server: tltp.Server, body: string): serve.Reply
   local state = pools[server]
-  if not (state is nil) then
+  if state is PoolState then
     return pool_answer(server, state, body)
   end
   local ready, refusal = prepared(server, body)
@@ -1832,7 +1820,7 @@ function serve.stream(
   server: tltp.Server, body: string
 ): tltp.Response, tltp.StreamFn | nil
   local state = pools[server]
-  if not (state is nil) then
+  if state is PoolState then
     return pool_stream(server, state, body)
   end
   local ready, refusal = prepared(server, body)
@@ -1984,7 +1972,7 @@ local function scratch_directory(): string | nil, string | nil
   bases[#bases + 1] = "/tmp"
   for _, base in ipairs(bases) do
     local dir = slot_under(base)
-    if not (dir is nil) then
+    if dir is string then
       -- 0700: fs.mkdir applies the umask, which leaves the directory readable
       -- by every local user on a machine with no runtime directory
       if not fs.chmod(dir, 448) then
@@ -2104,10 +2092,10 @@ end
 -- the model itself or behind a pool
 function serve.stop(server: tltp.Server)
   local state = pools[server]
-  if not (state is nil) then
+  if state is PoolState then
     pools[server] = nil
     local watcher = state.watcher
-    if not (watcher is nil) then
+    if watcher is fs.Watcher then
       watcher:close()
     end
     for _, worker in ipairs(state.workers) do
@@ -2120,7 +2108,7 @@ function serve.stop(server: tltp.Server)
   end
 
   local model = models[server]
-  if not (model is nil) then
+  if model is serve.Model then
     model.generation:close()
     model.handle.release(model.handle)
     compute.unload(model.backend)
@@ -2213,7 +2201,7 @@ function serve.start(
       local result = 0
       while result == 0 do
         local line = serve.round(server as tltp.Server)
-        if not (line is nil) then
+        if line is string then
           write_err(one_line(line))
           result = 1
         end

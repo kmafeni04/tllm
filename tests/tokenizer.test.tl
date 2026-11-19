@@ -203,7 +203,7 @@ local function encoding_file(
     pair("tokenizer.ggml.tokens", 9, strings(pieces)),
     pair("tokenizer.ggml.token_type", 9, ints(unit_kinds(#pieces))),
   }
-  if not (pre is nil) then
+  if pre is string then
     parts[#parts + 1] = pair("tokenizer.ggml.pre", 8, text(pre))
   end
   for _, entry in ipairs(extra) do

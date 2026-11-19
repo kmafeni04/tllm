@@ -557,11 +557,11 @@ local function split_atoms(source: string): {Atom} | nil, string | nil
   local walk: Cursor = {at = 1}
   while walk.at <= #source do
     local atom, failure = next_atom(source, walk)
-    if not (failure is nil) then
+    if failure is string then
       return nil, failure
     end
-    if not (atom is nil) then
-      atoms[#atoms + 1] = atom as Atom
+    if atom is Atom then
+      atoms[#atoms + 1] = atom
     end
   end
   atoms[#atoms + 1] = {form = "done", text = "", num = 0}
@@ -800,13 +800,13 @@ local function read_postfix(parser: Parser): Expr | nil, string | nil
       else
         parser.mark = parser.mark + 1
         local stop, stop_failure = read_bound(parser)
-        if not (stop_failure is nil) then
+        if stop_failure is string then
           return nil, stop_failure
         end
         local stride: Expr | nil = nil
         if take_sign(parser, ":") then
           local tail, tail_failure = read_bound(parser)
-          if not (tail_failure is nil) then
+          if tail_failure is string then
             return nil, tail_failure
           end
           stride = tail
@@ -1158,9 +1158,9 @@ local function read_set(body: string): Node | nil, string | nil
   end
   local held = new_node("set")
   held.value = expression
-  if not (word is nil) then
-    held.binding = word as string
-    held.member = member as string
+  if word is string then
+    held.binding = word
+    held.member = member
     return held, nil
   end
   if name:match("^%a[%w_]*$") == nil then
@@ -1352,12 +1352,12 @@ end
 -- Evaluation
 local function lookup(frame: Scope | nil, name: string): Val
   local walk = frame
-  while not (walk is nil) do
-    local held = (walk as Scope).names[name]
-    if not (held is nil) then
+  while walk is Scope do
+    local held = walk.names[name]
+    if held is Val then
       return held
     end
-    walk = (walk as Scope).parent
+    walk = walk.parent
   end
   return UNBOUND
 end
@@ -1408,7 +1408,7 @@ local function slice_spots(
   size: integer, low: Val | nil, high: Val | nil, stride: Val | nil
 ): {integer} | nil, string | nil
   local step = 1
-  if not (stride is nil) then
+  if stride is Val then
     if stride.kind ~= "number" then
       return nil, "a slice step must be a number"
     end
@@ -1419,7 +1419,7 @@ local function slice_spots(
   end
   local start: integer | nil = nil
   local to: integer | nil = nil
-  if not (low is nil) then
+  if low is Val then
     if low.kind ~= "number" then
       return nil, "a slice bound must be a number"
     end
@@ -1428,7 +1428,7 @@ local function slice_spots(
       start = size + start
     end
   end
-  if not (high is nil) then
+  if high is Val then
     if high.kind ~= "number" then
       return nil, "a slice bound must be a number"
     end
@@ -1872,8 +1872,8 @@ local function call_macro(
   end
   for _, name in ipairs(held.params) do
     local default = held.optional[name]
-    if not (default is nil) then
-      names[name] = evaluate(run, default as Expr)
+    if default is Expr then
+      names[name] = evaluate(run, default)
       if run.broken then
         return UNBOUND
       end
@@ -1905,7 +1905,7 @@ local function call_macro(
   run.depth = run.depth - 1
   run.frame = saved_frame
   run.parts = saved_parts
-  if not (failure is nil) then
+  if failure is string then
     run.broken = true
     run.fault = failure
     return UNBOUND
@@ -2211,7 +2211,7 @@ walk_nodes = function(run: Runner, nodes: {Node}): string | nil
         end
         if taken then
           local failure = walk_nodes(run, branch.body)
-          if not (failure is nil) then
+          if failure is string then
             return failure
           end
           break
@@ -2234,7 +2234,7 @@ walk_nodes = function(run: Runner, nodes: {Node}): string | nil
         frame.names[node.binding] = list[position]
         frame.names.loop = loop_object(#list, position, list)
         local failure = walk_nodes(run, node.body)
-        if not (failure is nil) then
+        if failure is string then
           run.frame = saved
           return failure
         end
@@ -2306,7 +2306,7 @@ function chat.render(
   local block = templates[template as string]
   if block is nil then
     local refused_template = template_failures[template as string]
-    if not (refused_template is nil) then
+    if refused_template is string then
       return nil, refused_template
     end
     local pieces, lex_failure = split_pieces(template as string)
@@ -2328,7 +2328,7 @@ function chat.render(
 
   local held_block = block as Block
   local stop = held_block.stop
-  if not (stop is nil) then
+  if stop is Piece then
     return nil, fault("tag '" .. tostring(stop.name) .. "' is out of place")
   end
 
@@ -2340,8 +2340,8 @@ function chat.render(
     messages = as_list(items),
     add_generation_prompt = as_boolean(true),
   }
-  if not (tools is nil) then
-    names.tools = of_json(tools as json.Value)
+  if tools is json.Value then
+    names.tools = of_json(tools)
   end
   local root: Scope = {names = names, parent = nil}
   local run: Runner = {
@@ -2353,7 +2353,7 @@ function chat.render(
     depth = 0,
   }
   local failure = walk_nodes(run, held_block.nodes)
-  if not (failure is nil) then
+  if failure is string then
     return nil, failure
   end
   return table.concat(run.parts), nil

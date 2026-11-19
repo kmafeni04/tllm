@@ -331,11 +331,10 @@ function bench.run(
           server, stream_fn as tltp.StreamFn, measure, started
         )
         generation.routing_sink = nil
-        local dump = lines
-        if not (dump is nil) then
+        if lines is {string} then
           local text = ""
-          if #dump > 0 then
-            text = table.concat(dump, "\n") .. "\n"
+          if #lines > 0 then
+            text = table.concat(lines, "\n") .. "\n"
           end
           fs.write(routing_path as string, text)
         end

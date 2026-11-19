@@ -80,15 +80,15 @@ end
 
 local function described(entry: gguf.Value): string
   local entry_text = entry.text
-  if not (entry_text is nil) then
+  if entry_text is string then
     return printable(entry_text)
   end
   local entry_scalar = entry.scalar
-  if not (entry_scalar is nil) then
+  if entry_scalar is number then
     return tostring(entry_scalar)
   end
   local entry_flag = entry.flag
-  if not (entry_flag is nil) then
+  if entry_flag is boolean then
     return tostring(entry_flag)
   end
   return entry.kind
@@ -701,7 +701,7 @@ local function encode_text(
     local failure = append_word(
       vocabulary, path, text:sub(points.starts[word[1]], stop), ranks, ids
     )
-    if not (failure is nil) then
+    if failure is string then
       return nil, failure
     end
   end
@@ -750,7 +750,7 @@ function tokenizer.load(
   }
   local template_entry = info.metadata[TEMPLATE_KEY]
   local template: string | nil = nil
-  if not (template_entry is nil) then
+  if template_entry is gguf.Value then
     template = template_entry.text
   end
 

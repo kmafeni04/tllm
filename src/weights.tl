@@ -277,7 +277,7 @@ function weights.read(
   end
 
   local seen = handle.read_matrices[tensor.name]
-  if not (seen is nil) and seen[index] then
+  if seen is {integer: boolean} and seen[index] then
     return false
   end
 

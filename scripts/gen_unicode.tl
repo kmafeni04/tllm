@@ -59,7 +59,7 @@ local span_first: integer | nil = nil
 
 for line in unicode_data:gmatch("[^\r\n]+") do
   local codepoint, name, category = line:match("^(%x+);([^;]*);([^;]+);")
-  if not (codepoint is nil) and not (name is nil) and not (category is nil) then
+  if codepoint is string and name is string and category is string then
     local value = tonumber(codepoint, 16) as integer
     local ranges = class_ranges(category)
     if ranges is nil then
@@ -81,13 +81,13 @@ end
 for line in prop_list:gmatch("[^\r\n]+") do
   local body = line:match("^([^#]*)") as string
   local first, last = body:match("^(%x+)%.%.(%x+)%s*;%s*White_Space")
-  if not (first is nil) and not (last is nil) then
+  if first is string and last is string then
     add(
       whitespace, tonumber(first, 16) as integer, tonumber(last, 16) as integer
     )
   else
     local single = body:match("^(%x+)%s*;%s*White_Space")
-    if not (single is nil) then
+    if single is string then
       local value = tonumber(single, 16) as integer
       add(whitespace, value, value)
     end

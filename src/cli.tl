@@ -223,7 +223,7 @@ local function serve_code(
 
   local cache_type: compute.CacheType = "f16"
   local file_cache = settings.kv_cache
-  if not (file_cache is nil) then
+  if file_cache is compute.CacheType then
     cache_type = file_cache
   end
 
@@ -327,7 +327,7 @@ local function bench_code(
 
   local cache_type: compute.CacheType = "f16"
   local file_cache = settings.kv_cache
-  if not (file_cache is nil) then
+  if file_cache is compute.CacheType then
     cache_type = file_cache
   end
 
