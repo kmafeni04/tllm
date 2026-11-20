@@ -42,8 +42,8 @@ local record compute
     CacheType | nil,
     sequences?: integer,
     ubatch?: integer,
-    vram?: integer | nil,
-    profile?: string | nil
+    vram?: integer,
+    profile?: string
   ): Model | nil, string | nil
 end
 

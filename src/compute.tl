@@ -398,7 +398,7 @@ local record compute
     CacheType | nil,
     sequences?: integer,
     ubatch?: integer,
-    vram?: integer | nil
+    vram?: integer
   ): Model | nil, string | nil
 end
 
@@ -5696,7 +5696,7 @@ local function attention_of(
   handle: weights.Handle,
   geometry: compute.Geometry,
   pool: Box,
-  measure: compute.Measure | nil,
+  measure?: compute.Measure,
   given?: Mapped
 ): compute.Attention | nil, string | nil
   local refusal = geometry_refusal(geometry)
@@ -5836,7 +5836,7 @@ local function feed_forward_of(
   handle: weights.Handle,
   geometry: compute.Geometry,
   pool: Box,
-  measure: compute.Measure | nil,
+  measure?: compute.Measure,
   given?: Mapped
 ): compute.FeedForward | nil, string | nil
   local loaded = LOADED[backend]
@@ -5923,7 +5923,7 @@ local function linear_of(
   handle: weights.Handle,
   geometry: compute.Geometry,
   pool: Box,
-  measure: compute.Measure | nil,
+  measure?: compute.Measure,
   given?: Mapped
 ): compute.LinearAttention | nil, string | nil
   local loaded = LOADED[backend]
@@ -7163,7 +7163,7 @@ function compute.model(
   cache_type: compute.CacheType | nil,
   sequences?: integer,
   ubatch?: integer,
-  vram?: integer | nil
+  vram?: integer
 ): compute.Model | nil, string | nil
   local loaded = LOADED[backend]
   if loaded is nil then
