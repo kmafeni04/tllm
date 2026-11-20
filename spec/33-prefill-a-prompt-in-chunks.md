@@ -149,7 +149,8 @@ bound of its own.
   Not testable: nothing a model publishes reports its arena's size, how many allocations it made or
   which arena or buffer a graph's tensors landed in, and making an allocation fail needs a memory
   limit the suite cannot set portably; a reader confirms the sizing, the replacement of the arena and
-  of the block buffers, the free at `close` and the failed growth in `src/compute.tl`, as `32/FR-005`,
+  of the block buffers, the free at `close` in `src/compute/engine.tl` and the failed growth in
+  `src/compute/blocks.tl`, as `32/FR-005`,
   `32/FR-006`, `32/FR-008` and `32/FR-009` state the same for one row per sequence.
 - FR-004 (US-002) WHEN a pass holds more than one row of one sequence, THE SYSTEM SHALL take each
   row's attention weights as the softmax of that row's scores over its own sequence's positions zero

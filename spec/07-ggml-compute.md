@@ -108,7 +108,7 @@ each graph runs in and the numbers it gives back are `11`'s contract.
 - FR-004 (US-002) WHEN `compute.load` returns a handle, THE SYSTEM SHALL set `version` to the version string the library reports for itself, which is `0.29.0` for the pinned source.
 - FR-014 (US-004) IF the version the library reports is not `0.29.0`, THEN THE SYSTEM SHALL return nil and one line holding the path, the version it reported and the version this project mirrors.
   Not testable: the only library the suite has is the pinned build, so no case can reach the refusal;
-  a reader confirms the comparison in `src/compute.tl`.
+  a reader confirms the comparison in `src/compute/init.tl`.
 - FR-005 (US-003) IF the file to open cannot be loaded, THEN THE SYSTEM SHALL return nil and one line holding that path.
 
 

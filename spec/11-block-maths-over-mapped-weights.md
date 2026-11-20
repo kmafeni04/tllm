@@ -178,7 +178,7 @@ end
   build reads through the NULL.
   Not testable: reaching the branch needs an operation whose constant is wrong, which the suite
   would have to ship; a reader confirms the raise in `graph_tensor` and the `pcall` around the build
-  in `gathered` in `src/compute.tl`.
+  in `gathered` in `src/compute/engine.tl`.
 - FR-017 (US-001) WHEN a maths handle's `close` is called, THE SYSTEM SHALL give back its hold on the
   weights handle, so that a handle whose last maths handle is closed can be released, and a second
   `close` SHALL return without doing it again; IF an operation is called on a closed handle, THEN

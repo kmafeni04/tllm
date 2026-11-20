@@ -30,7 +30,8 @@ cache behind the pointer `weight_of` already hands out, so a matrix costs its co
 handle's lifetime and a later zero-copy read path over that same mapping stays open.
 
 The seam already exists. `compute` chooses a block's experts on the host between the block's votes
-graph and its choice graph (`src/compute.tl:3920`), and `expert_bytes` already takes the chosen set
+graph and its choice graph (`feed_forward_choice`, `src/compute/feed_forward.tl`), and
+`expert_bytes` already takes the chosen set
 apart into the three matrices an expert holds, so their offsets and sizes are known before the graph
 that reads them is built. What is missing is the descriptor to read from (`weights.load` closes the
 one it opened for `mmap`, which `06/FR-013` now keeps open on the handle), the buffer a read lands

@@ -5,7 +5,7 @@
 ## Problem & context
 
 `12` keeps each block's keys and values in two `float[?]` arrays per prefix (`cache_of`,
-`src/compute.tl`) and scores them and weights the values in a hand-written triple loop per query
+`src/compute/attention.tl`) and scores them and weights the values in a hand-written triple loop per query
 head. Two things are wrong with that. Nothing a person runs can trade memory for precision: f32 is
 the only option, 4 bytes per cached number, so a position costs 40 KB across the local file's 10
 attention blocks and `23`'s 910-position conversation holds 37.3 MB. And no ggml kernel touches the

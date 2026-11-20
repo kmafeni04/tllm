@@ -7,7 +7,7 @@
 Every operation the engine runs builds a ggml graph of its own. `matrix_vector`, `normalise`,
 `rotary`, `softmax`, `add`, `swiglu` and `sigmoid_gate` each aligned_alloc an arena, call
 `ggml_init` over it, build a graph of a few nodes, compute, read the result back into a Lua table
-and free the context and the buffer. `gathered`, `run` and `opened` in `src/compute.tl` are that
+and free the context and the buffer. `gathered`, `run` and `opened` in `src/compute/engine.tl` are that
 cycle, and `29` quotes it at 16 us of alloc, build and free. One row through one full-attention
 block of the local file builds 58 of those cycles for the attention half, 36 of them one norm and
 one rope per head, and 43 for the feed-forward; a token lands near `29`'s 1,250 graphs, which at
