@@ -113,14 +113,14 @@ end
 - FR-002 (US-001) WHEN `maths:matvec(name, vector, index)` is called with a vector whose length is
   the named tensor's first dimension, THE SYSTEM SHALL return one number per row of the matrix that
   tensor names, each the sum over the row's positions of the row's decoded number times the
-  vector's number at that position, where a f32, q8_0, q4_K or q5_K tensor's row numbers are the
-  values ggml decodes from its stored bytes, a one-dimensional tensor is one row, and a
+  vector's number at that position, where a tensor of any type `40` lists has row numbers that are
+  the values ggml decodes from its stored bytes, a one-dimensional tensor is one row, and a
   three-dimensional tensor's `index`, counting from zero, selects the matrix at that position along
   its third dimension, and a tensor with no dimensions is one row of one number; for a non-f32
   tensor ggml converts the vector to the format its kernel uses for that weight type before the
   product, so the returned number is the sum over the vector as that format holds it.
-- FR-003 (US-001) WHEN `maths:row(name, id)` is called on a two-dimensional f32, q8_0, q4_K or q5_K
-  tensor with `id` counting from zero and less than its second dimension, THE SYSTEM SHALL return
+- FR-003 (US-001) WHEN `maths:row(name, id)` is called on a two-dimensional tensor of any type
+  `40` lists, with `id` counting from zero and less than its second dimension, THE SYSTEM SHALL return
   the `id`-th row's decoded numbers in order.
 - FR-004 (US-002) WHEN `maths:norm(vector, gain, eps)` is called with a non-empty vector and with
   `gain` naming a one-dimensional f32 tensor of the vector's length, THE SYSTEM SHALL return, for
@@ -191,9 +191,9 @@ end
   and no layer name, head count or model family is known here.
 - No SSM operations, no M-RoPE section positions and no vision: conv1d, softplus, the delta-net
   scan, and positions that differ between rope sections are later specs.
-- No other type and no prefill batch: weights are f32, q8_0, q4_K or q5_K and every operation takes
-  one vector. A maths handle reads the weights handle's mapping and `close` is the only lifetime
-  step it takes; `06` owns what `release` refuses while a handle is still held.
+- No prefill batch: every operation takes one vector. A maths handle reads the weights handle's
+  mapping and `close` is the only lifetime step it takes; `06` owns what `release` refuses while a
+  handle is still held.
 
 ## Tests
 
@@ -227,9 +227,10 @@ end
   `{1, 2.924234390258789}`.
 - T-004 (FR-011, FR-012, FR-014): `a name, type or shape that does not fit is refused with one
   line`, proves that `matvec("missing", {1})`, `matvec("missing", {1,1}, -1)` and
-  `row("missing", 0)` return nil and a line holding `missing`, that `matvec("half", {1,1})`,
-  `row("half", 0)` and `norm({1,2}, "half", 0)` on the fixture's two-dimensional f16 tensor `half`
-  return nil and a line holding `half` and `f16`, that each of `matvec("plain", {1,1})`,
+  `row("missing", 0)` return nil and a line holding `missing`, that `matvec("half", {1,1})`
+  returns `{3, 7}` and `row("half", 0)` returns `{1, 2}` on the fixture's two-dimensional f16
+  tensor `half`, while `norm({1,2}, "half", 0)` returns nil and a line holding `half` and `f16`,
+  that each of `matvec("plain", {1,1})`,
   `matvec("expert", {1,1})`, `matvec("expert", {1,1}, 2)`, `matvec("expert", {1,1}, -1)`,
   `matvec("plain", {1,1}, 0)`, `matvec("deep", {1,1})`, `row("bias", 0)`, `row("plain", 2)`,
   `row("plain", -1)`, `norm({1,2,3}, "gain", 0)`, `norm({1,2}, "plain", 0)`, `norm({}, "gain", 0)`,

@@ -220,9 +220,8 @@ the refusal line.
   `linear_value_heads`, `linear_value_length`, `linear_conv_kernel`, `eps`.
 - FR-012 (US-003) IF a tensor `block` reads is not in the handle, or is a tensor whose
   type is not `f32` for `attn_norm.weight`, `ssm_beta.weight`, `ssm_alpha.weight`,
-  `ssm_conv1d.weight`, `ssm_a`, `ssm_dt.bias` or `ssm_norm.weight`, or is not `f32`,
-  `q8_0`, `q4_K` or `q5_K` for `attn_qkv.weight`, `attn_gate.weight` or
-  `ssm_out.weight`, THEN THE SYSTEM SHALL return nil and one line naming `block`, the
+  `ssm_conv1d.weight`, `ssm_a`, `ssm_dt.bias` or `ssm_norm.weight`, or is not a type `40`
+  lists for `attn_qkv.weight`, `attn_gate.weight` or `ssm_out.weight`, THEN THE SYSTEM SHALL return nil and one line naming `block`, the
   first tensor in this order that the handle does not hold and, no tensor being missing,
   the first whose type is at fault together with that type's name: `attn_norm.weight`,
   `attn_qkv.weight`, `attn_gate.weight`, `ssm_beta.weight`, `ssm_alpha.weight`,
@@ -322,9 +321,9 @@ the refusal line.
   and the number or, for the 3 value heads, `linear_value_heads`; that
   `block({1,1}, "blk.9.", 0)` is refused with one line holding
   `blk.9.attn_norm.weight`; that each of `blk.0.`'s ten tensors removed in turn is
-  refused with one line holding its name; that an f16 `attn_qkv.weight`, an f16
-  `ssm_beta.weight` and an f16 `ssm_out.weight` are each refused with one line holding
-  the tensor's name and `f16`; that `block({1}, "blk.0.", 0)` and
+  refused with one line holding its name; that an f64 `attn_qkv.weight` and an f64
+  `ssm_out.weight` are each refused with one line holding the tensor's name and `f64`, and an
+  f16 `ssm_beta.weight` is refused with one line holding its name and `f16`; that `block({1}, "blk.0.", 0)` and
   `block({1,1,1}, "blk.0.", 0)`, an `attn_qkv.weight` with 11 rows, an
   `attn_gate.weight` with 3 rows, an `ssm_beta.weight` with 1 row, an `ssm_alpha.weight`
   with 3 rows, an `ssm_a` with 1 number, an `ssm_dt.bias` with 3 numbers, an
@@ -335,8 +334,8 @@ the refusal line.
   fault; that `block({1,1}, "blk.0.", -1)` and, on a fresh handle,
   `block({1,1}, "blk.0.", 2)` are refused with one line holding `blk.0.` and the
   position; that with `ssm_out.weight` removed and an f16 `attn_qkv.weight` the line
-  holds `ssm_out.weight`, with an f16 `attn_qkv.weight` and an 11-row `attn_gate.weight`
-  the line holds `attn_qkv` and `f16`, with an 11-row `attn_gate.weight` and an 11-row
+  holds `ssm_out.weight`, with an f64 `attn_qkv.weight` and an 11-row `attn_gate.weight`
+  the line holds `attn_qkv` and `f64`, with an 11-row `attn_gate.weight` and an 11-row
   `attn_qkv.weight` the line holds `attn_qkv.weight`, and with an 11-row
   `attn_gate.weight` and position 2 the line holds `attn_gate.weight`; and that a
   refused call leaves the history and state where they were: on a fresh handle, after

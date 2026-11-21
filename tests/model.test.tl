@@ -215,6 +215,124 @@ local function t002_entries(): {Entry}
   return both(entries, root_entries(3, {1, 0, 3, 4, 1, 1}))
 end
 
+local WEIGHT_WIDTH = 256
+local UNCHANGED: {string: boolean} = {
+  ["attn_q_norm.weight"] = true,
+  ["attn_k_norm.weight"] = true,
+  ["ssm_norm.weight"] = true,
+}
+local WIDTHS: {string: integer} = {
+  ["ssm_a"] = 128,
+  ["ssm_dt.bias"] = 128,
+  ["ssm_conv1d.weight"] = 2,
+}
+local ROWS: {string: integer} = {
+  ["attn_q.weight"] = 512,
+  ["attn_output.weight"] = 256,
+  ["ffn_up_exps.weight"] = 256,
+  ["ffn_gate_exps.weight"] = 256,
+  ["ffn_down_exps.weight"] = 256,
+  ["ffn_up_shexp.weight"] = 256,
+  ["ffn_gate_shexp.weight"] = 256,
+  ["ffn_down_shexp.weight"] = 256,
+  ["attn_qkv.weight"] = 264,
+  ["attn_gate.weight"] = 256,
+  ["ssm_beta.weight"] = 128,
+  ["ssm_alpha.weight"] = 128,
+  ["ssm_conv1d.weight"] = 264,
+  ["ssm_out.weight"] = 256,
+}
+local MULTIPLIED: {string: boolean} = {
+  ["attn_q.weight"] = true,
+  ["attn_k.weight"] = true,
+  ["attn_v.weight"] = true,
+  ["attn_output.weight"] = true,
+  ["ffn_up_exps.weight"] = true,
+  ["ffn_gate_exps.weight"] = true,
+  ["ffn_down_exps.weight"] = true,
+  ["ffn_up_shexp.weight"] = true,
+  ["ffn_gate_shexp.weight"] = true,
+  ["ffn_down_shexp.weight"] = true,
+  ["attn_qkv.weight"] = true,
+  ["attn_gate.weight"] = true,
+  ["ssm_out.weight"] = true,
+  ["output.weight"] = true,
+}
+
+local function named(names: {string: boolean}, name: string): boolean
+  for suffix in pairs(names) do
+    if name:sub(-#suffix) == suffix then
+      return true
+    end
+  end
+  return false
+end
+
+local function wanted_value(
+  values: {string: integer}, name: string
+): integer | nil
+  for suffix, found in pairs(values) do
+    if name:sub(-#suffix) == suffix then
+      return found
+    end
+  end
+  return nil
+end
+
+local function resized(entry: Entry, width: integer, rows: integer): Entry
+  local dims: {integer} = {}
+  for index, dimension in ipairs(entry.dims) do
+    dims[index] = dimension
+  end
+  local old_width = dims[1]
+  local old_rows = dims[2] or 1
+  local parts: {string} = {}
+  for first = 1, #entry.bytes, old_width * 4 do
+    parts[#parts + 1] = string.rep(
+      entry.bytes:sub(first, first + old_width * 4 - 1),
+      math.floor(width / old_width)
+    )
+  end
+  dims[1] = width
+  if #dims > 1 then
+    dims[2] = rows
+  end
+  return {
+    name = entry.name,
+    dims = dims,
+    code = 0,
+    bytes = string.rep(table.concat(parts), math.floor(rows / old_rows)),
+  }
+end
+
+local function weight_type_entries(quantized: boolean): {Entry}
+  local entries: {Entry} = {}
+  for _, entry in ipairs(t002_entries()) do
+    local changed = entry
+    if not named(UNCHANGED, entry.name) then
+      changed = resized(
+        entry,
+        wanted_value(WIDTHS, entry.name) or WEIGHT_WIDTH,
+        wanted_value(ROWS, entry.name) or entry.dims[2] or 1
+      )
+    end
+    if quantized and named(MULTIPLIED, changed.name) then
+      changed = support.q6_K(changed)
+    end
+    entries[#entries + 1] = changed
+  end
+  return entries
+end
+
+local function weight_type_meta(): {Meta}
+  local meta = with_integer(
+    t002_meta(), "qwen35moe.embedding_length", WEIGHT_WIDTH
+  )
+  meta = with_integer(meta, "qwen35moe.attention.head_count", 128)
+  meta = with_integer(meta, "qwen35moe.ssm.time_step_rank", 128)
+  return with_integer(meta, "qwen35moe.ssm.inner_size", 256)
+end
+
 local function linear_only_meta(): {Meta}
   local meta = t002_meta()
   meta = without_meta(meta, "qwen35moe.full_attention_interval")
@@ -345,6 +463,72 @@ test.it(
       loaded(linear_only_meta(), linear_only_entries()), 2
     )
     close(forward(linear_only, 1, 0), {0.8485281, 1.1313708, 1.9798990}, 1e-5)
+  end
+)
+
+test.it(
+  "a model of q6_K matrices gives the scores its f32 twin gives",
+  function()
+    local plain = model_of(
+      loaded(weight_type_meta(), weight_type_entries(false)), 2
+    )
+    local quantized = model_of(
+      loaded(weight_type_meta(), weight_type_entries(true)), 2
+    )
+    local expected = forward(plain, 2, 0)
+    local actual = forward(quantized, 2, 0)
+    test.equal(#actual, #expected)
+    local largest: number = 0
+    for _, value in ipairs(expected) do
+      largest = math.max(largest, value)
+    end
+    for index, value in ipairs(actual) do
+      local difference = math.abs(value - expected[index])
+      test.lessEqual(difference, 1e-2 * largest)
+    end
+  end
+)
+
+test.it(
+  "a type ggml cannot multiply is refused by its name",
+  function()
+    local entries = replaced(
+      weight_type_entries(false),
+      "output.weight",
+      {
+        name = "output.weight",
+        dims = {WEIGHT_WIDTH, 3},
+        code = 15,
+        bytes = string.rep("\0", 3 * 292),
+      }
+    )
+    local model = model_of(loaded(weight_type_meta(), entries), 2)
+    local line = refused_forward(model, 2, 0)
+    test.includes(line, "scores")
+    test.includes(line, "output.weight")
+    test.includes(line, "q8_K")
+  end
+)
+
+test.it(
+  "a tensor read on the host stays f32",
+  function()
+    local entries = replaced(
+      weight_type_entries(false),
+      "blk.0.ffn_gate_inp.weight",
+      support.q6_K(
+        f32(
+          "blk.0.ffn_gate_inp.weight",
+          {WEIGHT_WIDTH, 2},
+          zeros(WEIGHT_WIDTH * 2)
+        )
+      )
+    )
+    local model = model_of(loaded(weight_type_meta(), entries), 2)
+    local line = refused_forward(model, 2, 0)
+    test.includes(line, "block")
+    test.includes(line, "blk.0.ffn_gate_inp.weight")
+    test.includes(line, "q6_K")
   end
 )
 

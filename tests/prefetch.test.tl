@@ -696,7 +696,7 @@ on_device(
 )
 
 local function config_file(
-  name: string, path: string, prefetch_value: string | nil
+  name: string, path: string, prefetch_value: string | nil, vram?: integer
 ): string
   written = written + 1
   local location = ROOT .. "/" .. name .. written .. ".json"
@@ -704,8 +704,28 @@ local function config_file(
   if prefetch_value is string then
     body = body .. ',"prefetch":' .. prefetch_value
   end
+  if not (vram is nil) then
+    body = body .. ',"vram":' .. vram
+  end
   fs.write(location, body .. "}")
   return location
+end
+
+-- the vram that holds every fixed tensor and leaves no expert slot, so the
+-- experts a turn routes are misses the read ahead can predict, on a machine
+-- whose card would otherwise keep them all resident
+local function no_slot_vram(path: string): integer
+  local card = compute.load() as compute.Backend
+  local handle, failure = weights.load(path)
+  test.equal(failure, nil)
+  local held = handle as weights.Handle
+  local model = compute.model(card, held, nil, "f16") as compute.Model
+  local placement = model.placement
+  local vram = placement.resident_bytes + placement.reserve
+  model:close()
+  test.equal(held.release(held), nil)
+  compute.unload(card)
+  return vram
 end
 
 local record Ran
@@ -900,7 +920,11 @@ needs_interface(
     )
 
     local two = fixture(bench_meta(2), bench_entries(2)).path
-    local on = config_file("on", two, "true")
+    local vram: integer | nil = nil
+    if support.found_device() then
+      vram = no_slot_vram(two)
+    end
+    local on = config_file("on", two, "true", vram)
     local ahead = ran(
       {
         "bench",
@@ -917,10 +941,9 @@ needs_interface(
     line = experts_at(ahead.out, 8) as string
     test.truthy(line, table.concat(ahead.out, "\n"))
     test.truthy(
-      ends(
-        line,
-        "; 3 ahead, 100.0% landed; read ahead open; 0.0% over PCIe, "
-          .. "pool 0.0 GB/s, link 0.0 GB/s"
+      line:match(
+        "; 3 ahead, 100%.0%% landed; read ahead open; "
+          .. "%d+%.%d%% over PCIe, pool %d+%.%d GB/s, link %d+%.%d GB/s$"
       ),
       line
     )

@@ -36,9 +36,34 @@ local CACHE_KINDS: {string: CacheKind} = {
 }
 local WEIGHTS: {string: boolean} = {
   f32 = true,
+  f16 = true,
+  bf16 = true,
+  q4_0 = true,
+  q4_1 = true,
+  q5_0 = true,
+  q5_1 = true,
   q8_0 = true,
+  q2_K = true,
+  q3_K = true,
   q4_K = true,
   q5_K = true,
+  q6_K = true,
+  iq2_xxs = true,
+  iq2_xs = true,
+  iq2_s = true,
+  iq3_xxs = true,
+  iq3_s = true,
+  iq1_s = true,
+  iq1_m = true,
+  iq4_nl = true,
+  iq4_xs = true,
+  tq1_0 = true,
+  tq2_0 = true,
+  q1_0 = true,
+  q2_0 = true,
+  mxfp4 = true,
+  nvfp4 = true,
+  f8_e4m3 = true,
 }
 local F32_ONLY: {string: boolean} = {f32 = true}
 local BLOCK_NAMES: {string} = {
@@ -76,6 +101,15 @@ local ATTENTION_NAMES: {string} = {
   "attn_q_norm.weight",
   "attn_k_norm.weight",
   "attn_output.weight",
+}
+local ATTENTION_TYPES: {string: {string: boolean}} = {
+  ["attn_norm.weight"] = F32_ONLY,
+  ["attn_q.weight"] = WEIGHTS,
+  ["attn_k.weight"] = WEIGHTS,
+  ["attn_v.weight"] = WEIGHTS,
+  ["attn_q_norm.weight"] = F32_ONLY,
+  ["attn_k_norm.weight"] = F32_ONLY,
+  ["attn_output.weight"] = WEIGHTS,
 }
 local LINEAR_NAMES: {string} = {
   "attn_norm.weight",
@@ -510,12 +544,12 @@ local function prefixed(prefix: string, suffixes: {string}): {string}
 end
 
 return {
-  WEIGHTS = WEIGHTS,
   BLOCK_NAMES = BLOCK_NAMES,
   BLOCK_TYPES = BLOCK_TYPES,
   SCORE_NAMES = SCORE_NAMES,
   SCORE_TYPES = SCORE_TYPES,
   ATTENTION_NAMES = ATTENTION_NAMES,
+  ATTENTION_TYPES = ATTENTION_TYPES,
   LINEAR_NAMES = LINEAR_NAMES,
   LINEAR_TYPES = LINEAR_TYPES,
   matrix_vector = matrix_vector,

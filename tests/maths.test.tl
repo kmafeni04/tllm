@@ -162,6 +162,7 @@ local location = fixture(
     {name = "embd", dims = {32, 2}, code = 8, bytes = q8_0(1, 2)},
     {name = "quart", dims = {256, 2}, code = 12, bytes = q4_K(2)},
     {name = "five", dims = {256, 2}, code = 13, bytes = q5_K(2)},
+    support.q6_K(support.f32("six", {256, 2}, filled(1, 512))),
   }
 )
 
@@ -191,6 +192,14 @@ test.it(
     test.deepEqual(mapped:matvec("quart", filled(1, 256)), {256, 256})
     test.deepEqual(mapped:row("five", 0), filled(1, 256))
     test.deepEqual(mapped:matvec("five", filled(1, 256)), {256, 256})
+  end
+)
+
+test.it(
+  "a q6_K tensor multiplies and gathers like its f32 twin",
+  function()
+    test.deepEqual(maths:row("six", 0), filled(1, 256))
+    test.deepEqual(maths:matvec("six", filled(1, 256)), {256, 256})
   end
 )
 
@@ -248,16 +257,11 @@ test.it(
       test.includes(message, "missing")
     end
 
-    for _, message in ipairs(
-      {
-        refused(maths:matvec("half", {1, 1})),
-        refused(maths:row("half", 0)),
-        refused(maths:norm({1, 2}, "half", 0)),
-      }
-    ) do
-      test.includes(message, "half")
-      test.includes(message, "f16")
-    end
+    test.deepEqual(maths:matvec("half", {1, 1}), {3, 7})
+    test.deepEqual(maths:row("half", 0), {1, 2})
+    local half_line = refused(maths:norm({1, 2}, "half", 0))
+    test.includes(half_line, "half")
+    test.includes(half_line, "f16")
 
     refused(maths:matvec("plain", {1, 1}))
     refused(maths:matvec("expert", {1, 1}))

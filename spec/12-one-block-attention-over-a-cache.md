@@ -140,10 +140,12 @@ end
 - FR-008 (US-003) IF `compute.attend` is given a backend that `compute.load` did not return, or a
   `geometry` holding a number FR-001 does not admit, THEN THE SYSTEM SHALL return nil and one line
   naming `attend` and the number at fault.
-- FR-009 (US-003) IF a tensor `block` reads is not in the handle, or is a tensor whose type is
-  not `f32`, `q8_0`, `q4_K` or `q5_K`, THEN THE SYSTEM SHALL return nil and one line naming
-  `block`, the first tensor in the order FR-003 to FR-007 read them that the handle does not hold
-  and, no tensor being missing, the first whose type is at fault together with that type's name.
+- FR-009 (US-003) IF a tensor `block` reads is not in the handle, or `attn_norm.weight`,
+  `attn_q_norm.weight` or `attn_k_norm.weight` is not `f32`, or `attn_q.weight`, `attn_k.weight`,
+  `attn_v.weight` or `attn_output.weight` is not a type `40` lists, THEN THE SYSTEM SHALL return
+  nil and one line naming `block`, the first tensor in the order FR-003 to FR-007 read them that
+  the handle does not hold and, no tensor being missing, the first whose type is at fault together
+  with that type's name.
 - FR-010 (US-003) IF a tensor's shape does not fit the geometry, that is if `attn_q.weight` does
   not hold `heads * head_length * 2` rows, `attn_k.weight` or `attn_v.weight` does not hold
   `kv_heads * head_length` rows, `attn_output.weight` does not hold `heads * head_length` numbers
@@ -230,15 +232,15 @@ Every case's geometry sets `cache_type` `f32`, so the numbers below stand as rec
   with one line holding `attend`,
   that `block({1,1,1,1}, "blk.9.", 0)` is refused with one line holding `blk.9.attn_norm.weight`,
   that each of `blk.0.`'s seven tensors removed in turn is refused with one line holding its name,
-  that an f16 `attn_k.weight` is refused with one line holding `attn_k` and `f16`, that
+  that an f64 `attn_k.weight` is refused with one line holding `attn_k` and `f64`, that
   `block({1,1}, "blk.0.", 0)`, `block({1,1,1}, "blk.0.", 0)`, `attn_q.weight` with 7 rows,
   `attn_k.weight` with 3 rows, `attn_q_norm.weight` with 3 numbers, `attn_output.weight` 3 by 4,
   `attn_q.weight` holding dimensions 4, 8 and 1 and `attn_norm.weight` holding dimensions 4 and 1
   are each refused with one line holding the tensor or the number at fault, that
   `block({1,1,1,1}, "blk.0.", -1)` and `block({1,1,1,1}, "blk.0.", 4)` are refused with one line
   holding `blk.0.` and the position, that with `attn_k.weight` missing and an f16 `attn_q.weight`
-  the line holds `attn_k.weight`, with an f16 `attn_k.weight` and a 7-row `attn_q.weight` the line
-  holds `attn_k` and `f16`, and with a 7-row `attn_q.weight` and position 5 the line holds
+  the line holds `attn_k.weight`, with an f64 `attn_k.weight` and a 7-row `attn_q.weight` the line
+  holds `attn_k` and `f64`, and with a 7-row `attn_q.weight` and position 5 the line holds
   `attn_q.weight`, and that a refused call leaves the cache where it was: after
   `block({1,1}, "blk.0.", 0)` and `block({1,1,1,1}, "blk.0.", 1)` are refused on one fresh handle,
   `block({1,1,1,1}, "blk.0.", 0)` on that handle returns `{1,2,0,0}`.

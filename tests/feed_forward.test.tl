@@ -5,7 +5,8 @@ local compute = require("tllm.compute")
 local weights = require("tllm.weights")
 local type Entry = support.Entry
 local u32, u64, text = support.u32, support.u64, support.text
-local padded, f32, zeros = support.padded, support.f32, support.zeros
+local padded, f32, f64, zeros =
+  support.padded, support.f32, support.f64, support.zeros
 local ones, halves, without, replaced =
   support.ones, support.halves, support.without, support.replaced
 local first, first_row, refused =
@@ -291,12 +292,7 @@ test.it(
         replaced(
           toy_entries(),
           "blk.0.ffn_up_exps.weight",
-          {
-            name = "blk.0.ffn_up_exps.weight",
-            dims = {2, 2, 4},
-            code = 1,
-            bytes = halves(16),
-          }
+          f64("blk.0.ffn_up_exps.weight", {2, 2, 4}, zeros(16))
         )
       ),
       shape
@@ -305,26 +301,19 @@ test.it(
       first(half_up.block(half_up, first_row({1, 1}, 0), "blk.0."))
     )
     test.includes(half_up_line, "ffn_up_exps")
-    test.includes(half_up_line, "f16")
+    test.includes(half_up_line, "f64")
 
     local half_output = forwarded(
       loaded(
         replaced(
-          toy_entries(),
-          "output.weight",
-          {
-            name = "output.weight",
-            dims = {2, 3},
-            code = 1,
-            bytes = halves(6),
-          }
+          toy_entries(), "output.weight", f64("output.weight", {2, 3}, zeros(6))
         )
       ),
       shape
     )
     local half_output_line = refused(score_one(half_output, {1, 1}))
     test.includes(half_output_line, "output")
-    test.includes(half_output_line, "f16")
+    test.includes(half_output_line, "f64")
 
     for _, hidden in ipairs({ones(1), ones(3)}) do
       local short_line = refused(

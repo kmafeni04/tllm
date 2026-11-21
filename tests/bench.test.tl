@@ -733,7 +733,7 @@ test.it(
     test.truthy(
       line:match(
         "; 0%.0%% hit; 0 ahead, 0%.0%% landed; read ahead (%a+); "
-          .. "0%.0%% over PCIe, pool 0%.0 GB/s, link 0%.0 GB/s$"
+          .. "%d+%.%d%% over PCIe, pool %d+%.%d GB/s, link %d+%.%d GB/s$"
       ),
       line
     )

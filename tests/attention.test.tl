@@ -5,8 +5,8 @@ local compute = require("tllm.compute")
 local weights = require("tllm.weights")
 local type Entry = support.Entry
 local u32, u64, text = support.u32, support.u64, support.text
-local padded, floats, f32, zeros =
-  support.padded, support.floats, support.f32, support.zeros
+local padded, floats, f32, f64, zeros =
+  support.padded, support.floats, support.f32, support.f64, support.zeros
 local ones, halves, without, replaced =
   support.ones, support.halves, support.without, support.replaced
 local first, first_row, refused =
@@ -348,21 +348,21 @@ test.it(
       test.includes(missing_line, suffix)
     end
 
-    local half = replaced(
+    local doubled = replaced(
       toy_entries(),
       "blk.0.attn_k.weight",
-      {name = "blk.0.attn_k.weight", dims = {4, 2}, code = 1, bytes = halves(8)}
+      f64("blk.0.attn_k.weight", {4, 2}, zeros(8))
     )
-    local half_attention = attended(loaded(half), shape)
-    local half_line = refused(
+    local double_attention = attended(loaded(doubled), shape)
+    local double_line = refused(
       first(
-        half_attention.block(
-          half_attention, first_row({1, 1, 1, 1}, 0), "blk.0."
+        double_attention.block(
+          double_attention, first_row({1, 1, 1, 1}, 0), "blk.0."
         )
       )
     )
-    test.includes(half_line, "attn_k")
-    test.includes(half_line, "f16")
+    test.includes(double_line, "attn_k")
+    test.includes(double_line, "f64")
 
     local shapes = {
       {{1, 1}, "attn_norm.weight"},
@@ -488,7 +488,7 @@ test.it(
     local mistyped = replaced(
       toy_entries(),
       "blk.0.attn_k.weight",
-      {name = "blk.0.attn_k.weight", dims = {4, 2}, code = 1, bytes = halves(8)}
+      f64("blk.0.attn_k.weight", {4, 2}, zeros(8))
     )
     mistyped = replaced(
       mistyped,
@@ -509,7 +509,7 @@ test.it(
       )
     )
     test.includes(mistyped_line, "attn_k")
-    test.includes(mistyped_line, "f16")
+    test.includes(mistyped_line, "f64")
 
     local wrong_rows = replaced(
       toy_entries(),

@@ -124,8 +124,8 @@ this handle with no caches of its own to free.
   being at fault, the number.
 - FR-012 (US-004) IF a tensor `block` or `scores` reads is not in the handle, or is a tensor
   whose type is not `f32` for `post_attention_norm.weight`, `ffn_gate_inp.weight`,
-  `ffn_gate_inp_shexp.weight` or `output_norm.weight`, or is not `f32`, `q8_0`, `q4_K` or
-  `q5_K` for the other seven, THEN THE SYSTEM SHALL return nil and one line naming the
+  `ffn_gate_inp_shexp.weight` or `output_norm.weight`, or is not a type `40` lists for the other
+  seven, THEN THE SYSTEM SHALL return nil and one line naming the
   operation, the first tensor in this order that the handle does not hold, and, no tensor
   being missing, the first whose type is at fault together with that type's name:
   `post_attention_norm.weight`, `ffn_gate_inp.weight`, `ffn_up_exps.weight`,
@@ -217,9 +217,9 @@ this handle with no caches of its own to free.
   `blk.9.post_attention_norm.weight`; that with `blk.0.ffn_gate_inp.weight` removed
   `block({1,1}, "blk.0.")` is refused with one line holding `ffn_gate_inp.weight`; that an
   f16 `ffn_gate_inp.weight` is refused with one line holding `ffn_gate_inp` and `f16`; that
-  an f16 `ffn_up_exps.weight` is refused with one line holding `ffn_up_exps` and `f16`; that
-  an f16 `output.weight` is refused by `scores({1,1})` with one line holding `output` and
-  `f16`; that `block({1}, "blk.0.")` and `block({1,1,1}, "blk.0.")` are refused with one line
+  an f64 `ffn_up_exps.weight` is refused with one line holding `ffn_up_exps` and `f64`; that
+  an f64 `output.weight` is refused by `scores({1,1})` with one line holding `output` and
+  `f64`; that `block({1}, "blk.0.")` and `block({1,1,1}, "blk.0.")` are refused with one line
   holding `post_attention_norm.weight`; that an `ffn_gate_inp.weight` with 1 number per row is
   refused with one line holding `ffn_gate_inp.weight`; that an `ffn_down_exps.weight` with 2
   dimensions is refused with one line holding `ffn_down_exps.weight`; that an

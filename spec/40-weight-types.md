@@ -1,6 +1,6 @@
 # 40: The weight types a block multiplies from
 
-**Status**: pending   **Depends on**: 05, 06, 11, 12, 13, 14, 15
+**Status**: done   **Depends on**: 05, 06, 11, 12, 13, 14, 15
 
 ## Problem & context
 
@@ -95,14 +95,19 @@ rows are not whole blocks never reaches a multiply; nothing here reads quantized
   `11` asserts for its `q4_K` twin `quart`, so a type outside the four is decoded and multiplied
   and not read as bytes.
 - T-002 (FR-002): `a model of q6_K matrices gives the scores its f32 twin gives`, proves the build
-  half for both kinds of block on `15/T-002`'s fixture, whose metadata, `ssm` keys and tensor names
-  it keeps, raised to `embedding_length` 256 with every tensor grown along the axis its width sits
-  on and the numbers that fixture holds tiled along it, so each shape is the one `12/FR-010`,
-  `13/FR-013` and `14/FR-013` ask of a 256-wide model: a matrix whose row is the hidden row, which
-  is most of them, carries 256 numbers a row, and one whose row is a projection of the hidden row,
-  `ffn_down_exps.weight`, `ffn_down_shexp.weight`, `ssm_out.weight` and `attn_output.weight`, keeps
-  that fixture's row and gains rows to 256. Every norm whose length is the hidden width, that is
-  `attn_norm.weight`, `post_attention_norm.weight` and `output_norm.weight`, is 256 ones;
+  half for both kinds of block on `15/T-002`'s fixture, whose metadata keys and tensor names it
+  keeps, raised to `embedding_length` 256, `attention.head_count` 128, `ssm.time_step_rank` 128 and
+  `ssm.inner_size` 256, with every tensor's numbers tiled as its dimensions grow, so each shape is
+  the one `12/FR-010`, `13/FR-013` and `14/FR-013` asks of that model. Every hidden input is 256
+  numbers a row. The 128 attention heads keep 2 numbers each, so `attn_output.weight` has a
+  256-number input; the expert and shared-expert lengths are 256, so both down projections have a
+  256-number input; and the 128 SSM value heads keep 2 numbers each, so `ssm_out.weight` does too.
+  The query projection has 512 rows, the linear query/key/value projection 264 and the linear gate
+  256, while the routers keep 2 rows and the token and score projections keep their original rows.
+  `ssm_a` and `ssm_dt.bias` grow to 128 numbers, the alpha and beta projections to 128 rows and the
+  convolution to 264 rows with its 2 taps unchanged. Every norm whose length is the hidden width,
+  that is `attn_norm.weight`,
+  `post_attention_norm.weight` and `output_norm.weight`, is 256 ones;
   `attn_q_norm.weight` and `attn_k_norm.weight` keep the 2 numbers `12/FR-010` asks of this
   fixture's head length, and `ssm_norm.weight` the 2 numbers `14/FR-013` asks of its value length.
   Every multiplied matrix is stated twice, once as `f32` and once as `q6_K` blocks
@@ -126,25 +131,4 @@ rows are not whole blocks never reaches a multiply; nothing here reads quantized
 
 ## Amendments
 
-- `11/FR-002`: a `matvec` tensor's row numbers are what ggml decodes for any of the types this spec
-  lists, not only `f32`, `q8_0`, `q4_K` or `q5_K`, and `11`'s non-goal holding those four stops
-  holding. Its case `11/T-004` keeps the refusals but moves the type at fault off `f16`, which now
-  multiplies: `matvec("half", {1,1})` answers `{3, 7}`, that tensor holding 1 to 4 in two rows of
-  two, and `norm({1,2}, "half", 0)` still refuses it.
-- `11/FR-003`: the same for `row`, and `11/T-004`'s `row("half", 0)` answers `{1, 2}`.
-- `12/FR-009`: `attn_norm.weight`, `attn_q_norm.weight` and `attn_k_norm.weight` stay `f32` and are
-  still refused by `block`, naming `block`, the tensor and the type; `attn_q.weight`, `attn_k.weight`,
-  `attn_v.weight` and `attn_output.weight` accept any type this spec lists, and any other type is
-  refused naming `block`, the tensor and the type. `12/T-003`'s two `f16` `attn_k.weight` and
-  `attn_q.weight` cases state `f64` instead, one number per block and no vector dot, so the file
-  still maps and the check that refuses it is the type check; its missing-`attn_k.weight` case is
-  unchanged.
-- `13/FR-012`: `post_attention_norm.weight`, `ffn_gate_inp.weight`, `ffn_gate_inp_shexp.weight` and
-  `output_norm.weight` stay `f32`; `ffn_up_exps.weight`, `ffn_gate_exps.weight`,
-  `ffn_down_exps.weight`, `ffn_up_shexp.weight`, `ffn_gate_shexp.weight`, `ffn_down_shexp.weight`
-  and `output.weight` accept any type this spec lists. `13/T-005`'s `f16` `ffn_up_exps.weight` and
-  `f16` `output.weight` cases state `f64` instead; its two `f16` `ffn_gate_inp.weight` cases hold.
-- `14/FR-012`: `attn_norm.weight`, `ssm_beta.weight`, `ssm_alpha.weight`, `ssm_conv1d.weight`,
-  `ssm_a`, `ssm_dt.bias` and `ssm_norm.weight` stay `f32`; `attn_qkv.weight`, `attn_gate.weight`
-  and `ssm_out.weight` accept any type this spec lists. `14/T-003`'s `f16` `attn_qkv.weight` and
-  `f16` `ssm_out.weight` cases state `f64` instead, and its `f16` `ssm_beta.weight` case holds.
+- None.

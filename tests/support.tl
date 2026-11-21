@@ -32,6 +32,8 @@ local record support
   padded: function(string, integer): string
   floats: function({number}): string
   f32: function(string, {integer}, {number}): Entry
+  f64: function(string, {integer}, {number}): Entry
+  q6_K: function(Entry): Entry
   zeros: function(integer): {number}
   ones: function(integer): {number}
   halves: function(integer): string
@@ -120,6 +122,46 @@ function support.f32(
   name: string, dims: {integer}, values: {number}
 ): support.Entry
   return {name = name, dims = dims, code = 0, bytes = support.floats(values)}
+end
+
+function support.f64(
+  name: string, dims: {integer}, values: {number}
+): support.Entry
+  local parts: {string} = {}
+  local cell = ffi.new("double[1]") as Floats
+  for _, value in ipairs(values) do
+    cell[0] = value
+    parts[#parts + 1] = ffi.string(cell as ffi.CData, 8)
+  end
+  return {name = name, dims = dims, code = 28, bytes = table.concat(parts)}
+end
+
+local record Quantizer
+  ggml_quantize_chunk: function(
+    integer, ffi.CData, ffi.CData, integer, integer, integer, ffi.CData | nil
+  ): integer
+end
+
+function support.q6_K(entry: support.Entry): support.Entry
+  local lib = ffi.load("target/tllm/libggml.so") as Quantizer
+  local width = entry.dims[1]
+  test.equal(#entry.bytes % (width * FLOAT_BYTES), 0)
+  test.equal(width % 256, 0)
+  local rows = math.floor(#entry.bytes / (width * FLOAT_BYTES))
+  local bytes = math.floor(width / 256) * 210 * rows
+  local source = ffi.new("float[?]", width * rows) as ffi.CData
+  local destination = ffi.new("uint8_t[?]", bytes) as ffi.CData
+  ffi.copy(source, entry.bytes, #entry.bytes)
+  local written = lib.ggml_quantize_chunk(
+    14, source, destination, 0, rows, width, nil
+  )
+  test.equal(written, bytes)
+  return {
+    name = entry.name,
+    dims = entry.dims,
+    code = 14,
+    bytes = ffi.string(destination, bytes),
+  }
 end
 
 function support.zeros(count: integer): {number}

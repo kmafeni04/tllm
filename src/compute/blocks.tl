@@ -21,12 +21,8 @@ local libc = engine.libc
 local pool_free = engine.pool_free
 
 local ATTENTION_NAMES = mathx.ATTENTION_NAMES
-local WEIGHTS = mathx.WEIGHTS
-local prefixed = mathx.prefixed
+local ATTENTION_TYPES = mathx.ATTENTION_TYPES
 
-local function tensor_names(prefix: string): {string}
-  return prefixed(prefix, ATTENTION_NAMES)
-end
 local function count_line(
   operation: string, name: string, got: integer, wanted: integer, unit: string
 ): string
@@ -48,24 +44,38 @@ local function count_refusal(
   end
   return nil
 end
+local function first_fault(
+  mapped: Mapped,
+  operation: string,
+  prefix: string,
+  names: {string},
+  types: {string: {string: boolean}}
+): string | nil
+  for _, suffix in ipairs(names) do
+    local tensor = mapped.tensors[prefix .. suffix]
+    if tensor is nil then
+      return operation .. ": no tensor " .. prefix .. suffix
+    end
+  end
+  for _, suffix in ipairs(names) do
+    local kind = (mapped.tensors[prefix .. suffix] as Tensor).kind.name
+    if not types[suffix][kind] then
+      return operation .. ": tensor " .. prefix .. suffix .. " is " .. kind
+    end
+  end
+  return nil
+end
 local function read_tensors(
   mapped: Mapped,
   prefix: string,
   hidden_count: integer,
   geometry: compute.Geometry
 ): BlockTensors | nil, string | nil
-  local names = tensor_names(prefix)
-  for _, name in ipairs(names) do
-    local tensor = mapped.tensors[name]
-    if tensor is nil then
-      return nil, "block: no tensor " .. name
-    end
-  end
-  for _, name in ipairs(names) do
-    local kind = (mapped.tensors[name] as Tensor).kind.name
-    if not WEIGHTS[kind] then
-      return nil, "block: tensor " .. name .. " is " .. kind
-    end
+  local fault = first_fault(
+    mapped, "block", prefix, ATTENTION_NAMES, ATTENTION_TYPES
+  )
+  if fault then
+    return nil, fault
   end
 
   local norm_name = prefix .. "attn_norm.weight"
@@ -276,27 +286,6 @@ local function grown(
   end
   box.pool = wider
   return wider
-end
-local function first_fault(
-  mapped: Mapped,
-  operation: string,
-  prefix: string,
-  names: {string},
-  types: {string: {string: boolean}}
-): string | nil
-  for _, suffix in ipairs(names) do
-    local tensor = mapped.tensors[prefix .. suffix]
-    if tensor is nil then
-      return operation .. ": no tensor " .. prefix .. suffix
-    end
-  end
-  for _, suffix in ipairs(names) do
-    local kind = (mapped.tensors[prefix .. suffix] as Tensor).kind.name
-    if not types[suffix][kind] then
-      return operation .. ": tensor " .. prefix .. suffix .. " is " .. kind
-    end
-  end
-  return nil
 end
 return {
   count_line = count_line,

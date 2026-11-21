@@ -5,8 +5,8 @@ local compute = require("tllm.compute")
 local weights = require("tllm.weights")
 local type Entry = support.Entry
 local u32, u64, text = support.u32, support.u64, support.text
-local padded, floats, f32, zeros =
-  support.padded, support.floats, support.f32, support.zeros
+local padded, floats, f32, f64, zeros =
+  support.padded, support.floats, support.f32, support.f64, support.zeros
 local halves, without, replaced, first =
   support.halves, support.without, support.replaced, support.first
 local first_row, refused = support.first_row, support.refused
@@ -370,31 +370,41 @@ test.it(
       test.includes(missing_line, suffix)
     end
 
-    local halves_cases = {
-      {"blk.0.attn_qkv.weight", {2, 12}, 24},
-      {"blk.0.ssm_beta.weight", {2, 2}, 4},
-      {"blk.0.ssm_out.weight", {4, 2}, 8},
-    }
-    for _, half_case in ipairs(halves_cases) do
-      local name = half_case[1] as string
-      local half = replaced(
-        toy_entries(),
-        name,
+    local wrong_types = {
+      {
+        "blk.0.attn_qkv.weight",
+        f64("blk.0.attn_qkv.weight", {2, 12}, zeros(24)),
+        "f64",
+      },
+      {
+        "blk.0.ssm_beta.weight",
         {
-          name = name,
-          dims = half_case[2] as {integer},
+          name = "blk.0.ssm_beta.weight",
+          dims = {2, 2},
           code = 1,
-          bytes = halves(half_case[3] as integer),
-        }
-      )
-      local half_attention = linear(loaded(half), shape)
-      local half_line = refused(
+          bytes = halves(4),
+        },
+        "f16",
+      },
+      {
+        "blk.0.ssm_out.weight",
+        f64("blk.0.ssm_out.weight", {4, 2}, zeros(8)),
+        "f64",
+      },
+    }
+    for _, wrong in ipairs(wrong_types) do
+      local name = wrong[1] as string
+      local changed = replaced(toy_entries(), name, wrong[2] as Entry)
+      local changed_attention = linear(loaded(changed), shape)
+      local wrong_line = refused(
         first(
-          half_attention.block(half_attention, first_row({1, 1}, 0), "blk.0.")
+          changed_attention.block(
+            changed_attention, first_row({1, 1}, 0), "blk.0."
+          )
         )
       )
-      test.includes(half_line, name)
-      test.includes(half_line, "f16")
+      test.includes(wrong_line, name)
+      test.includes(wrong_line, wrong[3] as string)
     end
 
     local shapes = {
@@ -487,12 +497,7 @@ test.it(
     local mistyped = replaced(
       toy_entries(),
       "blk.0.attn_qkv.weight",
-      {
-        name = "blk.0.attn_qkv.weight",
-        dims = {2, 12},
-        code = 1,
-        bytes = halves(24),
-      }
+      f64("blk.0.attn_qkv.weight", {2, 12}, zeros(24))
     )
     mistyped = replaced(
       mistyped,
@@ -513,7 +518,7 @@ test.it(
       )
     )
     test.includes(mistyped_line, "attn_qkv")
-    test.includes(mistyped_line, "f16")
+    test.includes(mistyped_line, "f64")
 
     local wrong_rows = replaced(
       toy_entries(),
