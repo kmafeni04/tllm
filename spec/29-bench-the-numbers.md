@@ -151,7 +151,8 @@ refusal lines through the second, and hands back the exit code. The `generation`
   multiplied by 1000 and printed in milliseconds to three decimal places, K and R as whole numbers
   and X and Y to one decimal place, and the line SHALL end with `; H% hit`, H being the
   turn's `measure.expert_hits` over its `measure.routed` times 100 to one decimal, printed
-  `0.0` when `routed` is 0, followed by the ahead text `38/FR-011` appends; and those three
+  `0.0` when `routed` is 0, followed by the ahead text `38/FR-011` appends and then by the
+  miss-policy text `39/FR-009` appends after the read-ahead text; and those three
   times it prints SHALL sum to within 20% of T,
   the two compared as printed.
 - FR-006 (US-001) IF a length's body is refused with status `BadRequest`, THEN THE SYSTEM SHALL

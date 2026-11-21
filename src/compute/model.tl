@@ -15,6 +15,7 @@ local mathx = require("tllm.compute.maths")
 local oncard = require("tllm.compute.placement")
 local defs = require("tllm.compute.types")
 local gguf = require("tllm.gguf")
+local missx = require("tllm.miss")
 local prefetch = require("tllm.prefetch")
 local reads = require("tllm.reads")
 local weights = require("tllm.weights")
@@ -32,6 +33,7 @@ local type LinearShape = defs.LinearShape
 local type LinearState = defs.LinearState
 local type Mapped = defs.Mapped
 local type ExpertCache = defs.ExpertCache
+local type MissWindow = defs.MissWindow
 local type ModelPlan = defs.ModelPlan
 local type ModelState = defs.ModelState
 local type Output = defs.Output
@@ -694,6 +696,21 @@ local function model_plan(
   -- the queue read-ahead hands reads to, after every fault the model's own
   -- keys and shapes name and before the profile is read
   local ahead = read_ahead_of(handle, geometry.experts_used, forced)
+  local miss: MissWindow = {
+    policy = {
+      share = 0,
+      pool = 0,
+      link = 0,
+      windows = 0,
+      cpu = 0,
+      dma = 0,
+      cpu_bytes = 0,
+      cpu_seconds = 0,
+      dma_bytes = 0,
+      dma_seconds = 0,
+    },
+    missed = false,
+  }
   local function give_up(line: string): nil, string
     give_back(ahead)
     return nil, line
@@ -964,7 +981,7 @@ local function model_plan(
   end
 
   local feed_forward, feed_line = feed_forward_of(
-    backend, handle, geometry, box, measure, final_mapped, ahead
+    backend, handle, geometry, box, measure, final_mapped, ahead, miss
   )
   if feed_forward is nil then
     pool_free(final_arena)
@@ -1024,6 +1041,7 @@ local function model_plan(
     placement = plan,
     copy = copy,
     ahead = ahead,
+    miss = miss,
   }
 end
 -- what the embedding row of this token refuses, before any graph is built
@@ -1215,6 +1233,27 @@ local function pass_arena(
   box.pool = wider
   return wider, nil
 end
+-- the pass is a calibration window when it missed: its measured bytes and
+-- seconds refine the share the next misses use, and the sixteenth leaves the
+-- policy where it stands
+local function calibrated(work: MissWindow)
+  if not work.missed then
+    return
+  end
+  work.missed = false
+  local policy = work.policy
+  if policy.windows >= 16 then
+    return
+  end
+  policy.windows = policy.windows + 1
+  if policy.cpu_seconds > 0 then
+    policy.pool = policy.cpu_bytes / policy.cpu_seconds / 1000000000
+  end
+  if policy.windows >= 2 and policy.dma_seconds > 0 then
+    policy.link = policy.dma_bytes / policy.dma_seconds / 1000000000
+    policy.share = missx.share(policy.link, policy.pool)
+  end
+end
 local function model_pass(
   state: ModelState,
   inputs: {compute.Input},
@@ -1355,6 +1394,7 @@ local function model_pass(
       return nil, copy_line
     end
   end
+  calibrated(state.miss)
 
   for _, input in ipairs(inputs) do
     local held = state.sequences[input.sequence] as SequenceState
@@ -1440,6 +1480,7 @@ local function build(
     placement = plan.placement,
     copy = plan.copy,
     ahead = plan.ahead,
+    miss = plan.miss,
   }
 
   local model = {} as compute.Model
@@ -1449,6 +1490,7 @@ local function build(
   model.measure = plan.measure
   model.placement = plan.placement
   model.read_ahead = plan.ahead.published
+  model.miss = plan.miss.policy
   local measure = model.measure
   model.routing_sink = nil
   local finished = false

@@ -1,6 +1,6 @@
 # 39: The miss policy: compute on the CPU or DMA to the card
 
-**Status**: pending   **Depends on**: 21, 29, 34, 35, 36, 38
+**Status**: done   **Depends on**: 21, 29, 34, 35, 36, 38
 
 ## Problem & context
 
@@ -184,9 +184,11 @@ device case gates on `on_device` as `35`'s cases gate.
   --prefill-tokens 8 --decode-tokens 8` on a config naming `29`'s fixture and a `vram` of 1048576
   writes an `experts 8:` line ending `; S% over PCIe, pool R GB/s, link L GB/s`, with all three
   numbers at zero on a machine without a device, and on a device with a `vram` of a first model's
-  `resident_bytes` plus its `reserve`, S between 10.0 and 95.0 and both rates above 0.0, so the
-  report carries the chosen policy and the rates measured from real misses rather than a
-  quantization preset.
+  `resident_bytes` plus its `reserve`, S between 10.0 and 95.0 and both rates printed as numbers at
+  or above 0.0, so the report carries the chosen policy and the rates measured from real misses
+  rather than a quantization preset. The fixture's expert matrices are tens of bytes, so the two
+  rates it measures print as `0.0`: what the case proves of them is that the line carries a measured
+  figure and the chosen share, not that the link is fast.
 - T-005 (FR-002, FR-003): `a held expert is not a miss and a hit is not a window`, proves on
   `36`'s cache fixture built with that case's one-slot cap and a profile whose lines route expert
   0, on a device, that a pass of token 0 at position 0 leaves `MissPolicy.windows`,
@@ -203,12 +205,4 @@ are the comparison for that claim.
 
 ## Amendments
 
-- `21/FR-003`: a partially resident model may compute a block's chosen misses in CPU and CUDA
-  subsets under `39`; every graph that runs on CUDA still has no host data pointer while computed,
-  and the dense and resident-expert device path is unchanged.
-- `29/FR-005`: the `experts` line additionally ends with the miss-policy text `39/FR-009` appends
-  after the read-ahead text.
-- `36/FR-010`: the hit-rate text is followed by the ahead text and then by the miss-policy text
-  `39/FR-009` appends.
-- `38/FR-011`: the ahead text is followed by the miss-policy text `39/FR-009` appends rather than
-  ending the `experts` line.
+- None.

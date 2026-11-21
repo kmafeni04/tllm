@@ -823,7 +823,13 @@ needs_interface(
     test.equal(got.code, 0, table.concat(got.err, "\n"))
     local line = experts_at(got.out, 8) as string
     test.truthy(line, table.concat(got.out, "\n"))
-    test.truthy(ends(line, "read ahead open"), line)
+    test.truthy(
+      ends(
+        line,
+        "read ahead open; 0.0% over PCIe, pool 0.0 GB/s, " .. "link 0.0 GB/s"
+      ),
+      line
+    )
 
     -- serve gives the endpoint's value to the model it builds
     local server, failure = serve.build(
@@ -884,7 +890,14 @@ needs_interface(
     test.equal(got.code, 0, table.concat(got.err, "\n"))
     local line = experts_at(got.out, 8) as string
     test.truthy(line, table.concat(got.out, "\n"))
-    test.truthy(ends(line, "; 0 ahead, 0.0% landed; read ahead closed"), line)
+    test.truthy(
+      ends(
+        line,
+        "; 0 ahead, 0.0% landed; read ahead closed; 0.0% over PCIe, "
+          .. "pool 0.0 GB/s, link 0.0 GB/s"
+      ),
+      line
+    )
 
     local two = fixture(bench_meta(2), bench_entries(2)).path
     local on = config_file("on", two, "true")
@@ -903,7 +916,14 @@ needs_interface(
     test.equal(ahead.code, 0, table.concat(ahead.err, "\n"))
     line = experts_at(ahead.out, 8) as string
     test.truthy(line, table.concat(ahead.out, "\n"))
-    test.truthy(ends(line, "; 3 ahead, 100.0% landed; read ahead open"), line)
+    test.truthy(
+      ends(
+        line,
+        "; 3 ahead, 100.0% landed; read ahead open; 0.0% over PCIe, "
+          .. "pool 0.0 GB/s, link 0.0 GB/s"
+      ),
+      line
+    )
   end
 )
 

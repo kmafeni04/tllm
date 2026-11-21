@@ -550,12 +550,14 @@ local tier = (
       local base = ffi.cast("intptr_t", tensor.data) as integer
       local location = ffi.cast("void *", base + (index or 0) * stride)
         as ffi.CData
+      -- a missed expert's matrix: its copy is what the miss policy times
       return host_tensor(
         graph,
         {dims[1] as integer, dims[2] as integer},
         tensor.kind.code,
         location,
-        stride
+        stride,
+        true
       )
     end
 

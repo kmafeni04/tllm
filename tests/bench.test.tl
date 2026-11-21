@@ -236,7 +236,8 @@ local TOKEN_8 = "^token 8: (%d+%.%d%d%d) ms, compute (%d+%.%d%d%d) ms, "
 
 local EXPERTS_8 = "^experts 8: (%d+) routed, (%d+%.%d) MB; per turn (%d+) "
   .. "reads, (%d+%.%d) MB read, (%d+%.%d%d%d) ms; (%d+%.%d)%% hit; "
-  .. "(%d+) ahead, (%d+%.%d)%% landed; read ahead (%a+)$"
+  .. "(%d+) ahead, (%d+%.%d)%% landed; read ahead (%a+); "
+  .. "(%d+%.%d)%% over PCIe, pool (%d+%.%d) GB/s, link (%d+%.%d) GB/s$"
 
 test.it(
   "a rung reports and adds up",
@@ -730,7 +731,10 @@ test.it(
     local line = experts_at(got.out, 4) as string
     test.truthy(line, table.concat(got.out, "\n"))
     test.truthy(
-      line:match("; 0%.0%% hit; 0 ahead, 0%.0%% landed; read ahead (%a+)$"),
+      line:match(
+        "; 0%.0%% hit; 0 ahead, 0%.0%% landed; read ahead (%a+); "
+          .. "0%.0%% over PCIe, pool 0%.0 GB/s, link 0%.0 GB/s$"
+      ),
       line
     )
 
@@ -755,7 +759,10 @@ test.it(
     line = experts_at(default.out, 4) as string
     test.truthy(line, table.concat(default.out, "\n"))
     test.truthy(
-      line:match("; 100%.0%% hit; 0 ahead, 0%.0%% landed; read ahead (%a+)$"),
+      line:match(
+        "; 100%.0%% hit; 0 ahead, 0%.0%% landed; read ahead (%a+); "
+          .. "0%.0%% over PCIe, pool 0%.0 GB/s, link 0%.0 GB/s$"
+      ),
       line
     )
 
@@ -775,8 +782,69 @@ test.it(
     line = experts_at(ladder.out, 2048) as string
     test.truthy(line, table.concat(ladder.out, "\n"))
     test.truthy(
-      line:match("; 100%.0%% hit; 0 ahead, 0%.0%% landed; read ahead (%a+)$"),
+      line:match(
+        "; 100%.0%% hit; 0 ahead, 0%.0%% landed; read ahead (%a+); "
+          .. "0%.0%% over PCIe, pool 0%.0 GB/s, link 0%.0 GB/s$"
+      ),
       line
     )
+  end
+)
+
+-- the vram that holds every fixed tensor and the reservation and leaves no
+-- expert slot, so every expert a turn routes is a miss
+local function no_slot_vram(file_path: string): integer
+  local handle = weights.load(file_path) as weights.Handle
+  local backend = compute.load() as compute.Backend
+  local model = compute.model(backend, handle, nil, "f16", 1) as compute.Model
+  local placement = model.placement
+  local vram = placement.resident_bytes + placement.reserve
+  model:close()
+  compute.unload(backend)
+  test.equal(handle.release(handle), nil)
+  return vram
+end
+
+test.it(
+  "bench reports the split and its evidence",
+  function()
+    local file_path = meta_file(meta(260, nil, true), entries())
+    local on_card = support.found_device()
+    local vram = 1048576
+    if on_card then
+      vram = no_slot_vram(file_path)
+    end
+    local config_path = path_for("c") .. ".json"
+    fs.write(
+      config_path,
+      '{"models":{"m":{"path":"' .. file_path .. '"}},"vram":' .. vram .. "}"
+    )
+    local got = run(
+      {
+        "bench",
+        "m",
+        "--config",
+        config_path,
+        "--prefill-tokens",
+        "8",
+        "--decode-tokens",
+        "8",
+      }
+    )
+    test.equal(got.code, 0, table.concat(got.err, "\n"))
+    local line = experts_at(got.out, 8) as string
+    test.truthy(line, table.concat(got.out, "\n"))
+    local share, pool, link = line:match(
+      "; (%d+%.%d)%% over PCIe, pool (%d+%.%d) GB/s, link (%d+%.%d) GB/s$"
+    )
+    test.truthy(share, line)
+    if not on_card then
+      test.equal(share, "0.0")
+      test.equal(pool, "0.0")
+      test.equal(link, "0.0")
+      return
+    end
+    local percent = tonumber(share as string) as number
+    test.truthy(percent >= 10.0 and percent <= 95.0, line)
   end
 )

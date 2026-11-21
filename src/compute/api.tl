@@ -103,6 +103,22 @@ local record compute
     bytes: integer
   end
 
+  -- the share of a block's missed experts that goes by DMA over the link, the
+  -- two measured rates it balances, and the misses and calibration totals the
+  -- model's passes have settled
+  record MissPolicy
+    share: number
+    pool: number
+    link: number
+    windows: integer
+    cpu: integer
+    dma: integer
+    cpu_bytes: integer
+    cpu_seconds: number
+    dma_bytes: integer
+    dma_seconds: number
+  end
+
   record Routing
     layer: integer
     token: integer
@@ -157,6 +173,7 @@ local record compute
     measure: Measure
     placement: Placement
     read_ahead: ReadAhead
+    miss: MissPolicy
     routing_sink: (function(Routing) | nil)
     forward: function(Model, integer, integer): {number} | nil, string | nil
     reserve: function(Model, string, integer): string | nil

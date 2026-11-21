@@ -3,6 +3,7 @@
 -- graphs live in, the graph lifecycle, and the copies of weights on a device
 
 local ffi = require("ffi")
+local clock = require("tllm.clock")
 local compute = require("tllm.compute.api")
 local defs = require("tllm.compute.types")
 local weights = require("tllm.weights")
@@ -11,6 +12,7 @@ local type Floats = {integer: number}
 local type Ints = {integer: integer}
 
 local type ArenaError = defs.ArenaError
+local type Builder = defs.Builder
 local type Build = defs.Build
 local type Computed = defs.Computed
 local type Copy = defs.Copy
@@ -110,6 +112,8 @@ ggml_tensor *ggml_get_first_tensor(const ggml_context *ctx);
 ggml_tensor *ggml_get_next_tensor(const ggml_context *ctx, ggml_tensor *tensor);
 void ggml_backend_free(ggml_backend *backend);
 int ggml_backend_graph_compute(ggml_backend *backend, ggml_cgraph *cgraph);
+int ggml_backend_graph_compute_async(ggml_backend *backend, ggml_cgraph *cgraph);
+void ggml_backend_synchronize(ggml_backend *backend);
 ggml_backend_dev_t ggml_backend_dev_by_type(int type);
 void ggml_backend_load_all_from_path(const char *dir_path);
 ggml_backend *ggml_backend_dev_init(ggml_backend_dev_t device, const char *params);
@@ -412,7 +416,8 @@ local function host_tensor(
   dims: {integer},
   code: integer,
   location: ffi.CData,
-  bytes: integer
+  bytes: integer,
+  counted?: boolean
 ): ffi.CData
   local tensor = graph_tensor(graph, dims, code)
   if graph.measure == "device" then
@@ -423,7 +428,11 @@ local function host_tensor(
     (tensor as TensorView).data = location
   else
     graph.pending[#graph.pending + 1] = function()
+      local started = clock.now()
       graph.lib.ggml_backend_tensor_set(tensor, location, 0, bytes)
+      if counted == true then
+        graph.copied = (graph.copied or 0) + (clock.now() - started)
+      end
     end
   end
   return tensor
@@ -653,7 +662,7 @@ end
 -- the graph's own tensors are allocated here, in device memory when the
 -- weights are there, so that no tensor of the graph holds a host pointer
 local function computed(
-  session: Session, operation: string, cgraph: ffi.CData
+  session: Session, operation: string, cgraph: ffi.CData, issued?: boolean
 ): string | nil
   local lib = session.lib
   local pool = session.pool
@@ -688,7 +697,12 @@ local function computed(
     for _, write in ipairs(session.graph.pending) do
       write()
     end
-    local status = lib.ggml_backend_graph_compute(engine, cgraph)
+    local status: integer
+    if issued == true then
+      status = lib.ggml_backend_graph_compute_async(engine, cgraph)
+    else
+      status = lib.ggml_backend_graph_compute(engine, cgraph)
+    end
     if status ~= GGML_STATUS_SUCCESS then
       return operation .. ": compute returned " .. status
     end
@@ -954,7 +968,8 @@ local function graph_run(
   kind: string,
   operation: string,
   measure: compute.Measure | nil,
-  build: function(Graph): {Output}
+  build: Builder,
+  issued?: boolean
 ): Computed | nil, string | nil
   local session, open_line = pooled(pool, prefix, kind)
   if session is nil then
@@ -982,7 +997,7 @@ local function graph_run(
     session.lib.ggml_build_forward_expand(cgraph, output.tensor)
   end
 
-  local failure = computed(session, operation, cgraph)
+  local failure = computed(session, operation, cgraph, issued)
   if failure then
     closed(session)
     return nil, failure
@@ -996,6 +1011,15 @@ local function graph_run(
     outputs = outputs,
     session = session,
   } as Computed
+end
+-- waits for a graph issued on a device, which its numbers are read after
+local function graph_wait(made: Computed)
+  local session = made.session
+  local backend = session.backend
+  if backend is nil then
+    return
+  end
+  session.lib.ggml_backend_synchronize(backend)
 end
 local function graph_closed(made: Computed)
   closed(made.session)
@@ -1156,6 +1180,7 @@ return {
   run = run,
   sized_pool = sized_pool,
   graph_run = graph_run,
+  graph_wait = graph_wait,
   graph_closed = graph_closed,
   graph_numbers = graph_numbers,
   graph_planes = graph_planes,

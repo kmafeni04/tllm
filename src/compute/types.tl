@@ -89,6 +89,8 @@ local record Types
     ): ffi.CData
     ggml_backend_free: function(ffi.CData)
     ggml_backend_graph_compute: function(ffi.CData, ffi.CData): integer
+    ggml_backend_graph_compute_async: function(ffi.CData, ffi.CData): integer
+    ggml_backend_synchronize: function(ffi.CData)
     ggml_backend_dev_by_type: function(integer): ffi.CData
     ggml_backend_load_all_from_path: function(string)
     ggml_backend_dev_init: function(ffi.CData, ffi.CData | nil): ffi.CData
@@ -160,12 +162,17 @@ local record Types
     ctx: ffi.CData
     device: ffi.CData | nil
     pending: {function()}
+    -- the seconds the graph spent copying expert matrices to the device
+    copied: number | nil
     measure: string | nil
     label: string | nil
     -- a context that places no number of its own has no tensor to write into
     -- until the graph's buffer holds them, so every input waits in `pending`
     deferred: boolean
   end
+
+  -- one graph's build: the tensors it answers with, in the order they are read
+  type Builder = function(Graph): {Output}
 
   -- the one host arena a handle writes its graphs over, and the device buffers
   -- its graphs run in, one per block, each sized from the largest graph built in
@@ -294,6 +301,17 @@ local record Types
     measure: compute.Measure | nil
     owner: boolean
     ahead: Ahead | nil
+    miss: MissWindow | nil
+    -- the mapping's own view of the handle, which the misses computed on the
+    -- CPU read rather than the card's copy, and the arena their graphs build in
+    host: Mapped | nil
+    cpupool: Pool | nil
+  end
+
+  -- one model's miss policy and what the pass being calibrated has measured
+  record MissWindow
+    policy: compute.MissPolicy
+    missed: boolean
   end
 
   record LinearShape
@@ -336,6 +354,7 @@ local record Types
     placement: compute.Placement
     copy: Copy | nil
     ahead: Ahead
+    miss: MissWindow
   end
 
   record SequenceState
@@ -364,6 +383,7 @@ local record Types
     placement: compute.Placement
     copy: Copy | nil
     ahead: Ahead
+    miss: MissWindow
   end
 
   record BlockTensors

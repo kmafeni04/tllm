@@ -10,6 +10,7 @@ local engine = require("tllm.compute.engine")
 local mathx = require("tllm.compute.maths")
 local oncard = require("tllm.compute.placement")
 local defs = require("tllm.compute.types")
+local missx = require("tllm.miss")
 local reads = require("tllm.reads")
 local weights = require("tllm.weights")
 
@@ -19,11 +20,13 @@ local type AheadExpert = defs.AheadExpert
 local type AheadPending = defs.AheadPending
 local type Box = defs.Box
 local type Build = defs.Build
+local type Computed = defs.Computed
 local type Copy = defs.Copy
 local type FeedForwardState = defs.FeedForwardState
 local type Graph = defs.Graph
 local type Mapped = defs.Mapped
 local type ExpertCache = defs.ExpertCache
+local type MissWindow = defs.MissWindow
 local type Output = defs.Output
 local type Pool = defs.Pool
 local type Ahead = defs.Ahead
@@ -33,6 +36,7 @@ local graph_closed = engine.graph_closed
 local graph_numbers = engine.graph_numbers
 local graph_planes = engine.graph_planes
 local graph_run = engine.graph_run
+local graph_wait = engine.graph_wait
 local node = engine.node
 local pool_free = engine.pool_free
 local sized_pool = engine.sized_pool
@@ -227,11 +231,14 @@ local function chosen_experts(
 end
 -- the norm and the router of one row, whose softmax the host chooses from
 local function feed_forward_votes(
-  state: FeedForwardState, graph: Graph, entry: compute.Row, prefix: string
+  state: FeedForwardState,
+  graph: Graph,
+  mapped: Mapped,
+  entry: compute.Row,
+  prefix: string
 ): ffi.CData
   local lib = graph.lib
   local ctx = graph.ctx
-  local mapped = state.mapped
   local normalised = node(
     graph,
     lib.ggml_mul(
@@ -255,21 +262,17 @@ local function feed_forward_votes(
   )
   return node(graph, lib.ggml_soft_max(ctx, votes))
 end
--- the numbers a block's feed forward leaves one row holding: the chosen
--- experts weighted by their router numbers, the shared expert gated by its own
--- router, and both residual adds, all in one graph
-local function feed_forward_choice(
+-- the row a block's expert matrices read: its post-attention norm applied
+local function choice_input(
   state: FeedForwardState,
   graph: Graph,
+  mapped: Mapped,
   entry: compute.Row,
-  prefix: string,
-  probabilities: {number},
-  total: number
+  prefix: string
 ): ffi.CData
   local lib = graph.lib
   local ctx = graph.ctx
-  local mapped = state.mapped
-  local normalised = node(
+  return node(
     graph,
     lib.ggml_mul(
       ctx,
@@ -282,50 +285,75 @@ local function feed_forward_choice(
       tier.weight_of(graph, mapped, prefix .. "post_attention_norm.weight")
     )
   )
-
+end
+-- the chosen experts weighted by their router numbers, summed into one row,
+-- and nil when `selected` leaves none of them chosen
+local function choice_experts(
+  state: FeedForwardState,
+  graph: Graph,
+  mapped: Mapped,
+  normalised: ffi.CData,
+  prefix: string,
+  probabilities: {number},
+  total: number,
+  selected?: {integer: boolean}
+): ffi.CData | nil
+  local lib = graph.lib
+  local ctx = graph.ctx
   local experts: ffi.CData | nil = nil
   for _, expert in ipairs(
     chosen_experts(probabilities, state.geometry.experts_used)
   ) do
-    local up = node(
-      graph,
-      lib.ggml_mul_mat(
-        ctx,
-        tier.weight_of(graph, mapped, prefix .. "ffn_up_exps.weight", expert),
-        normalised
+    if selected is nil or selected[expert] then
+      local up = node(
+        graph,
+        lib.ggml_mul_mat(
+          ctx,
+          tier.weight_of(
+            graph, mapped, prefix .. "ffn_up_exps.weight", expert
+          ),
+          normalised
+        )
       )
-    )
-    local gate = node(
-      graph,
-      lib.ggml_mul_mat(
-        ctx,
-        tier.weight_of(
-          graph, mapped, prefix .. "ffn_gate_exps.weight", expert
-        ),
-        normalised
+      local gate = node(
+        graph,
+        lib.ggml_mul_mat(
+          ctx,
+          tier.weight_of(
+            graph, mapped, prefix .. "ffn_gate_exps.weight", expert
+          ),
+          normalised
+        )
       )
-    )
-    local mixed = node(graph, lib.ggml_swiglu_split(ctx, gate, up))
-    local down = node(
-      graph,
-      lib.ggml_mul_mat(
-        ctx,
-        tier.weight_of(
-          graph, mapped, prefix .. "ffn_down_exps.weight", expert
-        ),
-        mixed
+      local mixed = node(graph, lib.ggml_swiglu_split(ctx, gate, up))
+      local down = node(
+        graph,
+        lib.ggml_mul_mat(
+          ctx,
+          tier.weight_of(
+            graph, mapped, prefix .. "ffn_down_exps.weight", expert
+          ),
+          mixed
+        )
       )
-    )
-    local weighted = node(
-      graph, lib.ggml_scale(ctx, down, probabilities[expert + 1] / total)
-    )
-    if experts is nil then
-      experts = weighted
-    else
-      experts = node(graph, lib.ggml_add(ctx, experts, weighted))
+      local weighted = node(
+        graph, lib.ggml_scale(ctx, down, probabilities[expert + 1] / total)
+      )
+      if experts is nil then
+        experts = weighted
+      else
+        experts = node(graph, lib.ggml_add(ctx, experts, weighted))
+      end
     end
   end
-
+  return experts
+end
+-- the shared expert gated by its own router
+local function choice_shared(
+  graph: Graph, mapped: Mapped, normalised: ffi.CData, prefix: string
+): ffi.CData
+  local lib = graph.lib
+  local ctx = graph.ctx
   local shared_up = node(
     graph,
     lib.ggml_mul_mat(
@@ -367,12 +395,34 @@ local function feed_forward_choice(
       ctx, node(graph, lib.ggml_sigmoid(ctx, router)), vector_of(graph, {1})
     )
   )
-  local shared = node(graph, lib.ggml_mul(ctx, shared_down, gated))
-  local mixed_hidden = node(
-    graph,
-    lib.ggml_add(ctx, vector_of(graph, entry.hidden), experts as ffi.CData)
+  return node(graph, lib.ggml_mul(ctx, shared_down, gated))
+end
+-- the numbers a block's feed forward leaves one row holding: the chosen
+-- experts weighted by their router numbers, the shared expert, and both
+-- residual adds, all in one graph
+local function choice_row(
+  state: FeedForwardState,
+  graph: Graph,
+  mapped: Mapped,
+  entry: compute.Row,
+  prefix: string,
+  probabilities: {number},
+  total: number
+): ffi.CData
+  local lib = graph.lib
+  local ctx = graph.ctx
+  local normalised = choice_input(state, graph, mapped, entry, prefix)
+  local experts = choice_experts(
+    state, graph, mapped, normalised, prefix, probabilities, total
   )
-  return node(graph, lib.ggml_add(ctx, mixed_hidden, shared))
+  local mixed = vector_of(graph, entry.hidden)
+  if not (experts is nil) then
+    mixed = node(graph, lib.ggml_add(ctx, mixed, experts))
+  end
+  return node(
+    graph,
+    lib.ggml_add(ctx, mixed, choice_shared(graph, mapped, normalised, prefix))
+  )
 end
 -- how many rows the following block's router holds, when the row this block
 -- leaves can be scored with it, and nil when the following block names none
@@ -403,7 +453,11 @@ end
 -- the following block's router scored on the row this block leaves, so the
 -- experts it is likely to route are named one block early
 local function feed_forward_prediction(
-  state: FeedForwardState, graph: Graph, hidden: ffi.CData, following: string
+  state: FeedForwardState,
+  graph: Graph,
+  mapped: Mapped,
+  hidden: ffi.CData,
+  following: string
 ): ffi.CData
   local lib = graph.lib
   local ctx = graph.ctx
@@ -412,9 +466,7 @@ local function feed_forward_prediction(
     lib.ggml_mul(
       ctx,
       node(graph, lib.ggml_rms_norm(ctx, hidden, state.geometry.eps)),
-      tier.weight_of(
-        graph, state.mapped, following .. "post_attention_norm.weight"
-      )
+      tier.weight_of(graph, mapped, following .. "post_attention_norm.weight")
     )
   )
   return node(
@@ -425,9 +477,7 @@ local function feed_forward_prediction(
         graph,
         lib.ggml_mul_mat(
           ctx,
-          tier.weight_of(
-            graph, state.mapped, following .. "ffn_gate_inp.weight"
-          ),
+          tier.weight_of(graph, mapped, following .. "ffn_gate_inp.weight"),
           normalised
         )
       )
@@ -465,13 +515,18 @@ local function feed_forward_block_builds(
   prefix: string,
   width: integer,
   rows: integer,
-  following?: string
+  following?: string,
+  given?: Mapped
 ): {Build}
-  local mapped = state.mapped
-  if not holds(mapped, prefixed(prefix, BLOCK_NAMES)) then
+  local mapped = given
+  if mapped is nil then
+    mapped = state.mapped
+  end
+  local view = mapped as Mapped
+  if not holds(view, prefixed(prefix, BLOCK_NAMES)) then
     return {}
   end
-  local router = mapped.tensors[prefix .. "ffn_gate_inp.weight"] as Tensor
+  local router = view.tensors[prefix .. "ffn_gate_inp.weight"] as Tensor
   local experts = router.dims[2] as integer
   if state.geometry.experts_used > experts then
     return {}
@@ -486,7 +541,9 @@ local function feed_forward_block_builds(
         local outputs: {Output} = {}
         for index, entry in ipairs(entries) do
           outputs[index] = {
-            tensor = feed_forward_votes(state, graph, entry, prefix),
+            tensor = feed_forward_votes(
+              state, graph, state.mapped, entry, prefix
+            ),
             count = experts,
           }
         end
@@ -498,8 +555,8 @@ local function feed_forward_block_builds(
       build = function(graph: Graph): {Output}
         local left: {ffi.CData} = {}
         for index, entry in ipairs(entries) do
-          left[index] = feed_forward_choice(
-            state, graph, entry, prefix, probabilities, total
+          left[index] = choice_row(
+            state, graph, view, entry, prefix, probabilities, total
           )
         end
         local outputs: {Output} = {}
@@ -510,7 +567,7 @@ local function feed_forward_block_builds(
           for index = 1, #entries do
             outputs[#outputs + 1] = {
               tensor = feed_forward_prediction(
-                state, graph, left[index], following
+                state, graph, view, left[index], following
               ),
               count = predicted as integer,
             }
@@ -895,6 +952,394 @@ local function feed_forward_arena(
     end
   )
 end
+-- the distinct experts this block's pass chooses that no slot holds, ascending
+local function missed_of(
+  mapped: Mapped, prefix: string, chosen: {integer: boolean}, experts: integer
+): {integer}
+  local copy = mapped.device
+  local held = mapped.cache
+  if not (copy is Copy) or not (held is ExpertCache) then
+    return {}
+  end
+  local block = cachex.block_of(prefix)
+  local missed: {integer} = {}
+  for expert = 0, experts - 1 do
+    local slot = cachex.slot_of(held, block, expert)
+    if chosen[expert] and slot is nil then
+      missed[#missed + 1] = expert
+    end
+  end
+  return missed
+end
+-- the misses the CPU computes, nil when it computes none, and how many the
+-- link carries, which is what its copies are timed against: every miss on the
+-- CPU for the first probe, every miss by DMA for the second, and the share's
+-- lowest ids after that
+local function split_misses(
+  state: FeedForwardState,
+  prefix: string,
+  chosen: {integer: boolean},
+  experts: integer
+): {integer: boolean} | nil, integer
+  local work = state.miss
+  if not (work is MissWindow) then
+    return nil, 0
+  end
+  local policy = work.policy
+  local missed = missed_of(state.mapped, prefix, chosen, experts)
+  if #missed == 0 then
+    return nil, 0
+  end
+  local taken: {integer} = {}
+  if policy.windows == 1 then
+    taken = missed
+  elseif policy.windows > 1 then
+    taken = missx.take(missed, policy.share)
+  end
+  local by_link: {integer: boolean} = {}
+  for _, expert in ipairs(taken) do
+    by_link[expert] = true
+  end
+  local by_cpu: {integer: boolean} = {}
+  for _, expert in ipairs(missed) do
+    if not by_link[expert] then
+      by_cpu[expert] = true
+    end
+    if policy.windows < 16 then
+      local bytes = expert_bytes(state.mapped, prefix, {expert})
+      if by_link[expert] then
+        policy.dma_bytes = policy.dma_bytes + bytes
+      else
+        policy.cpu_bytes = policy.cpu_bytes + bytes
+      end
+    end
+  end
+  policy.dma = policy.dma + #taken
+  policy.cpu = policy.cpu + (#missed - #taken)
+  work.missed = true
+  if next(by_cpu) == nil then
+    return nil, #taken
+  end
+  return by_cpu, #taken
+end
+-- the arena the misses computed on the CPU build their graphs in, sized from
+-- the block's choice graph at the rows this pass holds
+local function cpu_arena(
+  state: FeedForwardState,
+  prefix: string,
+  width: integer,
+  rows: integer,
+  following: string | nil
+): Pool | nil
+  local host = state.host
+  if not (host is Mapped) then
+    return nil
+  end
+  local held = state.cpupool
+  if held is Pool and held.rows >= rows then
+    return held
+  end
+  local made = sized_pool(
+    state.mapped.lib,
+    nil,
+    feed_forward_block_builds(state, prefix, width, rows, following, host),
+    rows,
+    nil,
+    nil
+  )
+  if made is nil then
+    return nil
+  end
+  if held is Pool then
+    pool_free(held)
+  end
+  state.cpupool = made
+  return made
+end
+-- the seconds a CPU subset spent on its arithmetic, charged to the window
+local function timed(state: FeedForwardState, seconds: number)
+  local work = state.miss
+  if work is MissWindow and work.policy.windows < 16 then
+    work.policy.cpu_seconds = work.policy.cpu_seconds + seconds
+  end
+end
+-- the seconds a device subset spent copying its misses over, the same way
+local function timed_link(state: FeedForwardState, copied: number)
+  local work = state.miss
+  if work is MissWindow and work.policy.windows < 16 then
+    work.policy.dma_seconds = work.policy.dma_seconds + copied
+  end
+end
+local function plus(left: {number}, right: {number}): {number}
+  local sum: {number} = {}
+  for index, value in ipairs(left) do
+    sum[index] = value + (right[index] or 0)
+  end
+  return sum
+end
+-- one block's whole choice graph: every row's chosen experts, the shared
+-- expert and both residual adds, and the following block's vote on each row
+local function choice_graph(
+  state: FeedForwardState,
+  pool: Pool,
+  mapped: Mapped,
+  prefix: string,
+  rows: {compute.Row},
+  votes: {{number}},
+  totals: {number},
+  predicted: integer | nil,
+  following: string | nil
+): Computed | nil, string | nil
+  return graph_run(
+    pool,
+    prefix,
+    "choice",
+    "block",
+    state.measure,
+    function(graph: Graph): {Output}
+      local left: {ffi.CData} = {}
+      for index, entry in ipairs(rows) do
+        left[index] = choice_row(
+          state, graph, mapped, entry, prefix, votes[index], totals[index]
+        )
+      end
+      local outputs: {Output} = {}
+      for index, entry in ipairs(rows) do
+        outputs[index] = {tensor = left[index], count = #entry.hidden}
+      end
+      if following is string and not (predicted is nil) then
+        for index = 1, #rows do
+          outputs[#outputs + 1] = {
+            tensor = feed_forward_prediction(
+              state, graph, mapped, left[index], following
+            ),
+            count = predicted as integer,
+          }
+        end
+      end
+      return outputs
+    end
+  )
+end
+-- the rows a choice graph answered with, and the experts the following block's
+-- votes it also answered with name
+local function read_choice(
+  state: FeedForwardState,
+  made: Computed,
+  rows: {compute.Row},
+  predicted: integer | nil
+): {{number}}, {integer: boolean} | nil
+  local planes: {{number}} = {}
+  for index = 1, #rows do
+    planes[index] = graph_numbers(made, (made.outputs)[index])
+  end
+  if predicted is nil then
+    return planes, nil
+  end
+  local named: {integer: boolean} = {}
+  for index = 1, #rows do
+    local probabilities = graph_numbers(made, (made.outputs)[#rows + index])
+    for _, expert in ipairs(
+      chosen_experts(probabilities, state.geometry.experts_used)
+    ) do
+      named[expert] = true
+    end
+  end
+  return planes, named
+end
+-- the following block's vote on rows the block has already put together
+local function predict_graph(
+  state: FeedForwardState,
+  pool: Pool,
+  mapped: Mapped,
+  prefix: string,
+  planes: {{number}},
+  following: string,
+  predicted: integer
+): Computed | nil, string | nil
+  return graph_run(
+    pool,
+    prefix,
+    "choice",
+    "block",
+    state.measure,
+    function(graph: Graph): {Output}
+      local outputs: {Output} = {}
+      for index, row in ipairs(planes) do
+        outputs[index] = {
+          tensor = feed_forward_prediction(
+            state, graph, mapped, vector_of(graph, row), following
+          ),
+          count = predicted,
+        }
+      end
+      return outputs
+    end
+  )
+end
+-- a row of zeroes, for a subset that carries none of a row's experts
+local function zeros(count: integer): {number}
+  local none: {number} = {}
+  for index = 1, count do
+    none[index] = 0
+  end
+  return none
+end
+-- one block's choice, split between the CPU and the link where the policy says
+-- so: the device's half is issued first and the CPU's runs while it works, and
+-- the block's row is put together only once both have answered
+local function choose(
+  state: FeedForwardState,
+  prefix: string,
+  pool: Pool,
+  chosen: {integer: boolean},
+  rows: {compute.Row},
+  votes: {{number}},
+  totals: {number},
+  predicted: integer | nil,
+  following: string | nil,
+  by_cpu: {integer: boolean} | nil,
+  sent: integer
+): {{number}} | nil, {integer: boolean} | nil, string | nil
+  local mapped = state.mapped
+  local width = #((rows[1] as compute.Row).hidden)
+  if not (by_cpu is {integer: boolean}) then
+    -- no miss is the CPU's, so the card carries the whole choice graph
+    local made, failure = choice_graph(
+      state, pool, mapped, prefix, rows, votes, totals, predicted, following
+    )
+    if made is nil then
+      return nil, nil, failure
+    end
+    if sent > 0 then
+      timed_link(state, made.session.graph.copied or 0)
+    end
+    local planes, named = read_choice(state, made, rows, predicted)
+    graph_closed(made)
+    return planes, named, nil
+  end
+
+  local arena = cpu_arena(state, prefix, width, #rows, following)
+  if arena is nil then
+    return nil, nil, "block: no arena for the CPU subset"
+  end
+  local host = state.host as Mapped
+  local caught = by_cpu
+  local by_device: {integer: boolean} = {}
+  for expert in pairs(chosen) do
+    if not caught[expert] then
+      by_device[expert] = true
+    end
+  end
+  local device, device_failure = graph_run(
+    pool,
+    prefix,
+    "choice",
+    "block",
+    state.measure,
+    function(graph: Graph): {Output}
+      local outputs: {Output} = {}
+      for index, entry in ipairs(rows) do
+        local normalised = choice_input(state, graph, mapped, entry, prefix)
+        local experts = choice_experts(
+          state,
+          graph,
+          mapped,
+          normalised,
+          prefix,
+          votes[index],
+          totals[index],
+          by_device
+        )
+        local shared = choice_shared(graph, mapped, normalised, prefix)
+        local half = shared
+        if not (experts is nil) then
+          half = node(graph, graph.lib.ggml_add(graph.ctx, experts, shared))
+        end
+        outputs[index] = {tensor = half, count = width}
+      end
+      return outputs
+    end,
+    true
+  )
+  if device is nil then
+    return nil, nil, device_failure
+  end
+  local copied = device.session.graph.copied or 0
+
+  local started = clock.now()
+  local cpu, cpu_failure = graph_run(
+    arena,
+    prefix,
+    "choice",
+    "block",
+    state.measure,
+    function(graph: Graph): {Output}
+      local outputs: {Output} = {}
+      for index, entry in ipairs(rows) do
+        local experts = choice_experts(
+          state,
+          graph,
+          host,
+          choice_input(state, graph, host, entry, prefix),
+          prefix,
+          votes[index],
+          totals[index],
+          caught
+        )
+        if experts is nil then
+          outputs[index] = {
+            tensor = vector_of(graph, zeros(width)),
+            count = width,
+          }
+        else
+          outputs[index] = {tensor = experts, count = width}
+        end
+      end
+      return outputs
+    end
+  )
+  local arithmetic = clock.now() - started
+  graph_wait(device)
+  local halves = graph_planes(device)
+  graph_closed(device)
+  if cpu is nil then
+    return nil, nil, cpu_failure
+  end
+  local kept = graph_planes(cpu)
+  graph_closed(cpu)
+
+  timed(state, arithmetic)
+  if sent > 0 then
+    timed_link(state, copied)
+  end
+
+  local planes: {{number}} = {}
+  for index, entry in ipairs(rows) do
+    planes[index] = plus(plus(entry.hidden, kept[index]), halves[index])
+  end
+
+  local named: {integer: boolean} | nil = nil
+  if following is string and not (predicted is nil) then
+    local ahead, ahead_failure = predict_graph(
+      state, arena, host, prefix, planes, following, predicted as integer
+    )
+    if ahead is nil then
+      return nil, nil, ahead_failure
+    end
+    named = {}
+    for index = 1, #rows do
+      local probabilities = graph_numbers(ahead, (ahead.outputs)[index])
+      for _, expert in ipairs(
+        chosen_experts(probabilities, state.geometry.experts_used)
+      ) do
+        named[expert] = true
+      end
+    end
+    graph_closed(ahead)
+  end
+  return planes, named, nil
+end
 local function feed_forward_block(
   state: FeedForwardState,
   rows: {compute.Row},
@@ -941,7 +1386,7 @@ local function feed_forward_block(
       local outputs: {Output} = {}
       for index, entry in ipairs(rows) do
         outputs[index] = {
-          tensor = feed_forward_votes(state, graph, entry, prefix),
+          tensor = feed_forward_votes(state, graph, mapped, entry, prefix),
           count = experts,
         }
       end
@@ -985,61 +1430,25 @@ local function feed_forward_block(
   end
 
   local predicted = predicted_experts(state, following, width)
-  local second, second_failure = graph_run(
-    pool,
+  local by_cpu, sent = split_misses(state, prefix, chosen, experts)
+  local planes, named, line = choose(
+    state,
     prefix,
-    "choice",
-    "block",
-    state.measure,
-    function(graph: Graph): {Output}
-      local left: {ffi.CData} = {}
-      for index, entry in ipairs(rows) do
-        left[index] = feed_forward_choice(
-          state, graph, entry, prefix, votes[index], totals[index]
-        )
-      end
-      local outputs: {Output} = {}
-      for index, entry in ipairs(rows) do
-        outputs[index] = {tensor = left[index], count = #entry.hidden}
-      end
-      if following is string and not (predicted is nil) then
-        for index = 1, #rows do
-          outputs[#outputs + 1] = {
-            tensor = feed_forward_prediction(
-              state, graph, left[index], following
-            ),
-            count = predicted as integer,
-          }
-        end
-      end
-      return outputs
-    end
+    pool,
+    chosen,
+    rows,
+    votes,
+    totals,
+    predicted,
+    following,
+    by_cpu,
+    sent
   )
-  if second is nil then
-    return nil, second_failure
+  if planes is nil then
+    return nil, line
   end
-  local planes: {{number}} = {}
-  for index = 1, #rows do
-    planes[index] = graph_numbers(second, (second.outputs)[index])
-  end
-  local next_prefix = following
-  local named: {integer: boolean} | nil = nil
-  if next_prefix is string and not (predicted is nil) then
-    named = {}
-    for index = 1, #rows do
-      local probabilities = graph_numbers(
-        second, (second.outputs)[#rows + index]
-      )
-      for _, expert in ipairs(
-        chosen_experts(probabilities, geometry.experts_used)
-      ) do
-        named[expert] = true
-      end
-    end
-  end
-  graph_closed(second)
-  if next_prefix is string and named is {integer: boolean} then
-    hand_over(state, next_prefix, named)
+  if following is string and named is {integer: boolean} then
+    hand_over(state, following, named)
   end
   return planes, nil
 end
@@ -1119,6 +1528,36 @@ local function feed_forward_scores(
   graph_closed(made)
   return planes, nil
 end
+-- the mapping's own view of a handle whose copy the card holds: every tensor
+-- the graphs over it read comes from the mapping, so a miss computed on the CPU
+-- reads no number off the card
+local function host_view(mapped: Mapped): Mapped | nil
+  local copy = mapped.device
+  if not (copy is Copy) then
+    return nil
+  end
+  local bare: compute.Placement = {
+    budget = 0,
+    reserve = 0,
+    resident = {},
+    resident_bytes = 0,
+    slots = {},
+    slot_bytes = 0,
+    unplaced_bytes = 0,
+  }
+  return {
+    lib = mapped.lib,
+    tensors = mapped.tensors,
+    descriptors = mapped.descriptors,
+    handle = mapped.handle,
+    device = nil,
+    resident = bare.resident,
+    cache = nil,
+    plan = bare,
+    hold = function() end,
+    close = function() end,
+  }
+end
 -- the feed forward handle over a mapped handle, sharing a model's arena when
 -- one is given and holding one of its own otherwise
 local function feed_forward_of(
@@ -1128,7 +1567,8 @@ local function feed_forward_of(
   pool: Box,
   measure?: compute.Measure,
   given?: Mapped,
-  ahead?: Ahead
+  ahead?: Ahead,
+  miss?: MissWindow
 ): compute.FeedForward | nil, string | nil
   local loaded = LOADED[backend]
   if loaded is nil then
@@ -1161,6 +1601,8 @@ local function feed_forward_of(
     measure = measure,
     owner = pool.owned,
     ahead = ahead,
+    miss = miss,
+    host = host_view(attachment),
   }
   local finished = false
   local feed_forward = {} as compute.FeedForward
@@ -1190,6 +1632,11 @@ local function feed_forward_of(
     end
     finished = true
     state.mapped.close()
+    local cpupool = state.cpupool
+    if cpupool is Pool then
+      state.cpupool = nil
+      pool_free(cpupool)
+    end
     if state.owner then
       local held = state.pool.pool
       if held is Pool then

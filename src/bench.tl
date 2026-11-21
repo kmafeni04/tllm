@@ -61,6 +61,7 @@ local record Report
   named: integer
   landed: integer
   open: boolean
+  miss: compute.MissPolicy
   frames: {Frame}
 end
 
@@ -116,7 +117,8 @@ local function driven(
   stream_fn: tltp.StreamFn,
   measure: compute.Measure,
   started: number,
-  ahead: compute.ReadAhead
+  ahead: compute.ReadAhead,
+  miss: compute.MissPolicy
 ): Report | nil, string | nil
   local frames: {Frame} = {}
   local function emit(payload: string): string | nil, string | nil
@@ -173,6 +175,7 @@ local function driven(
     named = measure.prefetch_named,
     landed = measure.prefetch_landed,
     open = ahead.open,
+    miss = miss,
     frames = frames,
   }
 end
@@ -258,10 +261,12 @@ local function reported(
   if report.open then
     state = "open"
   end
+  local policy = report.miss
   write_out(
     string.format(
       "experts %d: %d routed, %.1f MB; per turn %d reads, %.1f MB read, "
-        .. "%.3f ms; %.1f%% hit; %d ahead, %.1f%% landed; read ahead %s\n",
+        .. "%.3f ms; %.1f%% hit; %d ahead, %.1f%% landed; read ahead %s; "
+        .. "%.1f%% over PCIe, pool %.1f GB/s, link %.1f GB/s\n",
       length,
       routed,
       megabytes,
@@ -271,7 +276,10 @@ local function reported(
       hits,
       report.ahead,
       landed,
-      state
+      state,
+      policy.share * 100,
+      policy.pool,
+      policy.link
     )
   )
 end
@@ -367,7 +375,12 @@ function bench.run(
         end
 
         local report, report_line = driven(
-          server, stream_fn, measure, started, generation.read_ahead
+          server,
+          stream_fn,
+          measure,
+          started,
+          generation.read_ahead,
+          generation.miss
         )
         generation.routing_sink = nil
         if lines is {string} then
