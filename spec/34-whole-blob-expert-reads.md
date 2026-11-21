@@ -96,7 +96,10 @@ for.
   again, whether the next row asking for it is another row of the same pass or a pass that comes
   later.
 - FR-003 (US-001) WHEN a matrix is read, THE SYSTEM SHALL add one to `measure.blob_reads`, that
-  matrix's bytes to `measure.blob_bytes` and the read's seconds to `measure.blob_seconds`.
+  matrix's bytes to `measure.blob_bytes` and the read's seconds to `measure.blob_seconds`; a read
+  handed over to the platform's submission interface as `38/FR-003` hands one over SHALL add one to
+  `measure.prefetch_reads` and nothing to `blob_reads`, `blob_bytes` or `blob_seconds`, which count
+  only the reads a pass waits on.
 - FR-004 (US-001) IF a read returns fewer bytes than the matrix holds, or fails, or the handle it is
   asked of has been released, THEN THE SYSTEM SHALL answer nil and one line naming the tensor.
 - FR-005 (US-001) WHEN a model handle is released, THE SYSTEM SHALL close the descriptor its reads

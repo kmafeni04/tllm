@@ -1,6 +1,6 @@
 # 38: Read ahead, not behind
 
-**Status**: pending   **Depends on**: 04, 15, 21, 29, 32, 33, 34, 35, 36, 37
+**Status**: done   **Depends on**: 04, 15, 21, 29, 32, 33, 34, 35, 36, 37
 
 ## Problem & context
 
@@ -119,8 +119,9 @@ are the queue the model took, so a case reads the size it was given without reac
 - FR-001 (US-001) WHEN a pass runs a block that a following block of the run comes after, THE SYSTEM
   SHALL name, for each row that block carried, the `experts_used` experts the following block's
   `post_attention_norm.weight` and `ffn_gate_inp.weight` choose for the row the block leaves, scored
-  as `13/FR-003` and chosen by `13/FR-004`'s rule, a tie going to the lower expert, and SHALL name no
-  expert when it runs the pass's first or last block.
+  as `13/FR-003` and chosen by `13/FR-004`'s rule, a tie going to the lower expert, and SHALL name
+  no expert for the pass's first block, and SHALL name no expert when it runs the pass's last
+  block.
 - FR-002 (US-002) WHEN a pass of N blocks runs, THE SYSTEM SHALL build `3 * N + 2` graphs, FR-001's
   naming being nodes of the third graph each block already builds, so a pass costs no graph for the
   prediction.
@@ -195,8 +196,9 @@ are the queue the model took, so a case reads the size it was given without reac
 
 ## Non-goals
 
-- No prediction made by a pass's first or last block, no lookahead of two blocks, and no prediction
-  of a shared expert or of anything the router's choice does not already name.
+- No prediction of a pass's first block's experts and none made while its last block runs, no
+  lookahead of two blocks, and no prediction of a shared expert or of anything the router's choice
+  does not already name.
 - No change to the read a pass waits on, to the shape of `34`'s record of what a handle has read,
   which FR-004 marks into, to the slots `35` and `36` place, or to the card copy.
 - No second knob: the queue's depth and buffer size, the window's length, the two room ratios and
@@ -270,8 +272,9 @@ interface`, as `37`'s cases do. A case that does not ask for a card builds its m
   model built with `prefetch` true has `read_ahead.open` true and one built with false has it false
   and a `read_ahead` whose depth and bytes are 0, and that a pass over the false model counts no
   ahead read; that a config file naming `prefetch` true reaches the start function with true, and
-  that `bench m --config F` on a config naming the two-block bench fixture and `prefetch` true
-  writes its `experts 8:` line ending `read ahead open`, so the bench `Settings` carries it; that
+  that `bench m --config F --prefill-tokens 8 --decode-tokens 8` on a config naming the two-block
+  bench fixture and `prefetch` true writes its `experts 8:` line ending `read ahead open`, so the
+  bench `Settings` carries it; that
   `cli.run` with the settings `{"serve", "m", "--config", F}` on a file whose `prefetch` is true
   calls `start` with an endpoint whose `prefetch` is true and with nil when the file sets none; that
   a file whose `prefetch` is `"true"` and one whose `prefetch` is 1 each return 1 with one stderr
@@ -293,8 +296,8 @@ interface`, as `37`'s cases do. A case that does not ask for a card builds its m
   fixture, with the handle's largest expert matrix `m` bytes and `reads.offered` true, that a model
   built with `prefetch.memory` answering 1000000 has a `read_ahead` whose depth is at least 4 and
   whose bytes are at least `m`, and that its `close` together with the handle's `release` leaves the
-  descriptors and the mapped regions the process held before the build, a second `close` changing
-  neither; that a four-expert copy of the routing fixture, both blocks' `ffn_gate_inp.weight` holding
+  descriptors and the mapped regions the process held before the handle was loaded, a second
+  `close` changing neither; that a four-expert copy of the routing fixture, both blocks' `ffn_gate_inp.weight` holding
   the four rows `{1, 0}`, `{0, 1}`, `{0, 0}` and `{0, 0}`, its `expert_used_count` 3 and its three
   expert tensors holding four experts, has a `read_ahead` whose depth is at least 9; that a model of
   the routing fixture with its six expert tensors removed, built with `prefetch` true, reports
@@ -314,16 +317,4 @@ interface`, as `37`'s cases do. A case that does not ask for a card builds its m
 
 ## Amendments
 
-- `04/FR-006`: `prefetch` joins the top-level keys a config file may hold.
-- `04/FR-007`: a file whose `prefetch` is set and is not a boolean is refused, checked after
-  `profile`.
-- `04/FR-011`: the file's `prefetch` is passed to `start`, nil when the file sets none.
-- `29/FR-005`: the `experts` line ends with `; A ahead, P% landed; read ahead S` as `38/FR-011`
-  prints it, and `29/T-001`'s pattern for that line grows with it.
-- `29/FR-011`: the endpoint `bench` builds carries the config's `prefetch`, nil when it names none.
-- `32/FR-003`: a block's third graph also reads the following block's `post_attention_norm.weight`
-  and `ffn_gate_inp.weight`, which `38/FR-001` scores that block's rows with.
-- `34/FR-003`: an ahead read counts one in `measure.prefetch_reads` and nothing in `blob_reads`,
-  `blob_bytes` or `blob_seconds`, which count only the reads a pass waits on.
-- `36/FR-010`: the line's hit text is followed by the ahead text `38/FR-011` appends, so the three
-  `experts` endings `36/T-003` expects grow with it.
+- None.

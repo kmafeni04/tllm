@@ -92,6 +92,15 @@ local record compute
     blob_bytes: integer
     blob_seconds: number
     graphs: integer
+    prefetch_reads: integer
+    prefetch_named: integer
+    prefetch_landed: integer
+  end
+
+  record ReadAhead
+    open: boolean
+    depth: integer
+    bytes: integer
   end
 
   record Routing
@@ -109,7 +118,7 @@ local record compute
 
   record FeedForward
     block: function(
-      FeedForward, {Row}, string, watch?: {Watch}
+      FeedForward, {Row}, string, watch?: {Watch}, following?: string
     ): {{number}} | nil, string | nil
     scores: function(FeedForward, {{number}}): {{number}} | nil, string | nil
     close: function(FeedForward)
@@ -147,6 +156,7 @@ local record compute
     ubatch: integer
     measure: Measure
     placement: Placement
+    read_ahead: ReadAhead
     routing_sink: (function(Routing) | nil)
     forward: function(Model, integer, integer): {number} | nil, string | nil
     reserve: function(Model, string, integer): string | nil
@@ -180,7 +190,8 @@ local record compute
     sequences?: integer,
     ubatch?: integer,
     vram?: integer,
-    profile?: string
+    profile?: string,
+    prefetch?: boolean
   ): Model | nil, string | nil
 end
 

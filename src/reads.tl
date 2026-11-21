@@ -7,7 +7,6 @@ local weights = require("tllm.weights")
 ffi.cdef(
   [[
 long syscall(long number, ...);
-void *malloc(size_t size);
 int fcntl(int fd, int cmd, ...);
 
 struct tllm_sqe {
@@ -54,6 +53,7 @@ local record reads
     entries: integer
     entries_bytes: integer
     buffers: integer
+    buffers_bytes: integer
     -- ring positions, read and written in the mapped memory
     sq_tail: integer
     sq_array: integer
@@ -93,14 +93,12 @@ local record LibC
   syscall: function(
     ffi.CType, ffi.CType, ffi.CType | nil, ...: ffi.CType
   ): ffi.CData
-  malloc: function(integer): ffi.CData
   fcntl: function(integer, integer): integer
   mmap: function(
     ffi.CData | nil, integer, integer, integer, integer, integer
   ): ffi.CData
   munmap: function(ffi.CData, integer): integer
   close: function(integer)
-  free: function(ffi.CData)
 end
 
 local record Entry
@@ -127,6 +125,9 @@ local EINTR = 4
 local EBADF = 9
 local PROT = 3
 local SHARED_POPULATED = 0x8001
+-- the buffers the kernel writes into are a mapping of their own, so a read
+-- that lands after the queue gave them back cannot touch the heap
+local MAP_PRIVATE_ANONYMOUS = 0x22
 local SQ_RING = 0
 local CQ_RING = 0x8000000
 local SQES = 0x10000000
@@ -191,6 +192,14 @@ end
 local function map(descriptor: integer, size: integer, offset: integer): integer
   return ffi.cast(
     "intptr_t", C.mmap(nil, size, PROT, SHARED_POPULATED, descriptor, offset)
+  ) as integer
+end
+
+-- the one block of buffers a queue's reads land in, or -1 when the kernel
+-- refused the space
+local function map_buffers(size: integer): integer
+  return ffi.cast(
+    "intptr_t", C.mmap(nil, size, PROT, MAP_PRIVATE_ANONYMOUS, -1, 0)
   ) as integer
 end
 
@@ -394,8 +403,9 @@ function reads.open(depth: integer, bytes: integer): Queue | nil, string | nil
     return nil, SETUP_FAILED
   end
 
-  local buffers = C.malloc(entry_count * bytes)
-  if buffers is nil then
+  local buffer_bytes = entry_count * bytes
+  local buffers = map_buffers(buffer_bytes)
+  if buffers == RELEASED then
     unmap(submission, submission_bytes)
     unmap(completion, completion_bytes)
     unmap(entries, entries_bytes)
@@ -416,7 +426,8 @@ function reads.open(depth: integer, bytes: integer): Queue | nil, string | nil
     completion_bytes = completion_bytes,
     entries = entries,
     entries_bytes = entries_bytes,
-    buffers = ffi.cast("intptr_t", buffers) as integer,
+    buffers = buffers,
+    buffers_bytes = buffer_bytes,
     sq_tail = submission + u32_at(params_at + 44),
     sq_array = submission + array_at,
     sq_mask = u32_at(submission + u32_at(params_at + 48)),
@@ -540,7 +551,7 @@ function reads.close(queue: Queue)
     queue.descriptor = RELEASED
   end
   if queue.buffers ~= RELEASED then
-    C.free(ffi.cast("void *", queue.buffers) as ffi.CData)
+    unmap(queue.buffers, queue.buffers_bytes)
     queue.buffers = RELEASED
   end
 end

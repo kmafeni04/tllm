@@ -35,6 +35,7 @@ local record serve
     ubatch: integer | nil
     vram: integer | nil
     profile: string | nil
+    prefetch: boolean | nil
   end
 
   record Worker
@@ -199,6 +200,7 @@ local record EndpointFields
   ubatch: integer | nil
   vram: integer | nil
   profile: string | nil
+  prefetch: boolean | nil
 end
 
 local DEFAULT_BUDGET: integer = 256
@@ -1915,6 +1917,7 @@ local function endpoint_json(endpoint: serve.Endpoint): string
     ubatch = endpoint.ubatch,
     vram = endpoint.vram,
     profile = endpoint.profile,
+    prefetch = endpoint.prefetch,
   }
   return tltp.json_encode(fields) as string
 end
@@ -2146,7 +2149,8 @@ function serve.build(
     endpoint.sessions,
     endpoint.ubatch,
     endpoint.vram,
-    endpoint.profile
+    endpoint.profile,
+    endpoint.prefetch
   )
   if generation is nil then
     return nil, generation_failure

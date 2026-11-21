@@ -19,6 +19,7 @@ local record EndpointJson
   ubatch: integer | nil
   vram: integer | nil
   profile: string | nil
+  prefetch: boolean | nil
 end
 
 local function write_frame(path: string, text: string)
@@ -48,6 +49,7 @@ local function endpoint_of(text: string): serve.Endpoint | nil
     ubatch = decoded.ubatch,
     vram = decoded.vram,
     profile = decoded.profile,
+    prefetch = decoded.prefetch,
   }
 end
 

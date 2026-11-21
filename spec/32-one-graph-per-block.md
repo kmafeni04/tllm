@@ -110,7 +110,9 @@ record `29` declares, and `29/FR-009` is amended to say so.
   each row's sequence cache up to that row's position with that position's key and value rows
   appended for an attention block, and each row's sequence history and state as that row's position
   leaves them for a linear block, so that no cache row, history or state number is read or written
-  through a Lua list.
+  through a Lua list, and SHALL have the third graph that block builds also read the following
+  block's `post_attention_norm.weight` and `ffn_gate_inp.weight`, which `38/FR-001` scores that
+  block's rows with.
   Not testable: what a graph reads and writes is memory, and the numbers a later position returns
   from what the graph wrote are the numbers `12`, `14` and `15` already pin; a reader confirms the
   cache and state tensors the block's graph is built with.

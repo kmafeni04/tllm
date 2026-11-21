@@ -151,7 +151,8 @@ refusal lines through the second, and hands back the exit code. The `generation`
   multiplied by 1000 and printed in milliseconds to three decimal places, K and R as whole numbers
   and X and Y to one decimal place, and the line SHALL end with `; H% hit`, H being the
   turn's `measure.expert_hits` over its `measure.routed` times 100 to one decimal, printed
-  `0.0` when `routed` is 0; and those three times it prints SHALL sum to within 20% of T,
+  `0.0` when `routed` is 0, followed by the ahead text `38/FR-011` appends; and those three
+  times it prints SHALL sum to within 20% of T,
   the two compared as printed.
 - FR-006 (US-001) IF a length's body is refused with status `BadRequest`, THEN THE SYSTEM SHALL
   write the line `skipped L: M` where L is the length and M is what the refusal body holds, and
@@ -198,7 +199,8 @@ refusal lines through the second, and hands back the exit code. The `generation`
   `sessions` is 1, whose `workers` is 1, whose `context_path` and `context_bytes` are nil, whose
   `host` is `127.0.0.1`, whose `port` is 8080, whose `ubatch` is the config file's `ubatch` or
   512 when it names none, and whose `vram` is the config file's `vram`, nil when it names none, and whose `profile` is
-  the config file's `profile`, nil when it names none, so
+  the config file's `profile`, nil when it names none, and whose `prefetch` is the config file's
+  `prefetch`, nil when it names none, so
   a bench run measures the tier a server would have, binds no socket, starts no worker process and
   creates no context directory.
   Not testable: `sessions`, `workers`, `context_path`, `context_bytes`, `host` and `port` exist
@@ -233,7 +235,7 @@ fixture with `context_length` 260, T-002 and T-004 also with 4096.
   `^decode 8: 7 tokens at (%d+%.%d) tok/s$`,
   `^token 8: (%d+%.%d%d%d) ms, compute (%d+%.%d%d%d) ms, sampling (%d+%.%d%d%d) ms, ipc (%d+%.%d%d%d) ms$`
   and
-  `^experts 8: (%d+) routed, (%d+%.%d) MB; per turn (%d+) reads, (%d+%.%d) MB read, (%d+%.%d%d%d) ms$`,
+  `^experts 8: (%d+) routed, (%d+%.%d) MB; per turn (%d+) reads, (%d+%.%d) MB read, (%d+%.%d%d%d) ms; (%d+%.%d)%% hit; (%d+) ahead, (%d+%.%d)%% landed; read ahead (%a+)$`,
   with the prompt count at least 8, the routed count 1 and compute above `0.000`, that the printed
   compute, sampling and ipc sum to within 20% of the printed total, that a second identical run
   returns 0 with the same prompt count and the same experts line apart from its milliseconds, and

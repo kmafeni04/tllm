@@ -235,7 +235,8 @@ local TOKEN_8 = "^token 8: (%d+%.%d%d%d) ms, compute (%d+%.%d%d%d) ms, "
   .. "sampling (%d+%.%d%d%d) ms, ipc (%d+%.%d%d%d) ms$"
 
 local EXPERTS_8 = "^experts 8: (%d+) routed, (%d+%.%d) MB; per turn (%d+) "
-  .. "reads, (%d+%.%d) MB read, (%d+%.%d%d%d) ms; (%d+%.%d)%% hit$"
+  .. "reads, (%d+%.%d) MB read, (%d+%.%d%d%d) ms; (%d+%.%d)%% hit; "
+  .. "(%d+) ahead, (%d+%.%d)%% landed; read ahead (%a+)$"
 
 test.it(
   "a rung reports and adds up",
@@ -671,10 +672,6 @@ local function experts_at(out: {string}, length: integer): string | nil
   return nil
 end
 
-local function ends(line: string, suffix: string): boolean
-  return #line >= #suffix and line:sub(-#suffix) == suffix
-end
-
 -- the vram that holds every fixed tensor, the reservation and half of the
 -- fixture's two expert slots
 local function half_slot_vram(file_path: string): integer
@@ -732,7 +729,10 @@ test.it(
     test.equal(got.code, 0, table.concat(got.err, "\n"))
     local line = experts_at(got.out, 4) as string
     test.truthy(line, table.concat(got.out, "\n"))
-    test.truthy(ends(line, "0.0% hit"), line)
+    test.truthy(
+      line:match("; 0%.0%% hit; 0 ahead, 0%.0%% landed; read ahead (%a+)$"),
+      line
+    )
 
     local plain = path_for("c") .. ".json"
     fs.write(
@@ -754,7 +754,10 @@ test.it(
     test.equal(default.code, 0, table.concat(default.err, "\n"))
     line = experts_at(default.out, 4) as string
     test.truthy(line, table.concat(default.out, "\n"))
-    test.truthy(ends(line, "100.0% hit"), line)
+    test.truthy(
+      line:match("; 100%.0%% hit; 0 ahead, 0%.0%% landed; read ahead (%a+)$"),
+      line
+    )
 
     local long_path = meta_file(meta(4096, nil, true), entries())
     local long_vram = half_slot_vram(long_path)
@@ -771,6 +774,9 @@ test.it(
     test.equal(ladder.code, 0, table.concat(ladder.err, "\n"))
     line = experts_at(ladder.out, 2048) as string
     test.truthy(line, table.concat(ladder.out, "\n"))
-    test.truthy(ends(line, "100.0% hit"), line)
+    test.truthy(
+      line:match("; 100%.0%% hit; 0 ahead, 0%.0%% landed; read ahead (%a+)$"),
+      line
+    )
   end
 )

@@ -25,6 +25,7 @@ local record Config
   ubatch: integer | nil
   vram: integer | nil
   profile: string | nil
+  prefetch: boolean | nil
 end
 
 local DEFAULT_CONTEXT_BYTES: integer = 1073741824
@@ -96,6 +97,7 @@ local function unknown_key(fields: Fields): string | nil
     ubatch = true,
     vram = true,
     profile = true,
+    prefetch = true,
   }
   local keys: {string} = {}
   for key in pairs(fields) do
@@ -331,6 +333,13 @@ local function parse(
     settings.profile = profile
   elseif not (profile is nil) then
     return fault("config " .. file_path .. ": profile must be a string")
+  end
+
+  local prefetch = fields.prefetch
+  if prefetch is boolean then
+    settings.prefetch = prefetch
+  elseif not (prefetch is nil) then
+    return fault("config " .. file_path .. ": prefetch must be a boolean")
   end
 
   local names: {string} = {}

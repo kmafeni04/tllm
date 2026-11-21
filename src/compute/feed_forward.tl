@@ -10,10 +10,13 @@ local engine = require("tllm.compute.engine")
 local mathx = require("tllm.compute.maths")
 local oncard = require("tllm.compute.placement")
 local defs = require("tllm.compute.types")
+local reads = require("tllm.reads")
 local weights = require("tllm.weights")
 
 local type Tensor = weights.Tensor
 
+local type AheadExpert = defs.AheadExpert
+local type AheadPending = defs.AheadPending
 local type Box = defs.Box
 local type Build = defs.Build
 local type Copy = defs.Copy
@@ -23,9 +26,11 @@ local type Mapped = defs.Mapped
 local type ExpertCache = defs.ExpertCache
 local type Output = defs.Output
 local type Pool = defs.Pool
+local type Ahead = defs.Ahead
 
 local LOADED = engine.LOADED
 local graph_closed = engine.graph_closed
+local graph_numbers = engine.graph_numbers
 local graph_planes = engine.graph_planes
 local graph_run = engine.graph_run
 local node = engine.node
@@ -369,6 +374,66 @@ local function feed_forward_choice(
   )
   return node(graph, lib.ggml_add(ctx, mixed_hidden, shared))
 end
+-- how many rows the following block's router holds, when the row this block
+-- leaves can be scored with it, and nil when the following block names none
+local function predicted_experts(
+  state: FeedForwardState, following: string | nil, width: integer
+): integer | nil
+  if following is nil then
+    return nil
+  end
+  local tensors = state.mapped.tensors
+  local norm = tensors[following .. "post_attention_norm.weight"]
+  local router = tensors[following .. "ffn_gate_inp.weight"]
+  if not (norm is Tensor) or not (router is Tensor) then
+    return nil
+  end
+  if #norm.dims ~= 1 or #router.dims ~= 2 then
+    return nil
+  end
+  if (norm.dims[1] or 0) ~= width or (router.dims[1] or 0) ~= width then
+    return nil
+  end
+  local rows = router.dims[2] as integer
+  if rows < 1 or state.geometry.experts_used > rows then
+    return nil
+  end
+  return rows
+end
+-- the following block's router scored on the row this block leaves, so the
+-- experts it is likely to route are named one block early
+local function feed_forward_prediction(
+  state: FeedForwardState, graph: Graph, hidden: ffi.CData, following: string
+): ffi.CData
+  local lib = graph.lib
+  local ctx = graph.ctx
+  local normalised = node(
+    graph,
+    lib.ggml_mul(
+      ctx,
+      node(graph, lib.ggml_rms_norm(ctx, hidden, state.geometry.eps)),
+      tier.weight_of(
+        graph, state.mapped, following .. "post_attention_norm.weight"
+      )
+    )
+  )
+  return node(
+    graph,
+    lib.ggml_soft_max(
+      ctx,
+      node(
+        graph,
+        lib.ggml_mul_mat(
+          ctx,
+          tier.weight_of(
+            graph, state.mapped, following .. "ffn_gate_inp.weight"
+          ),
+          normalised
+        )
+      )
+    )
+  )
+end
 -- one row's vocabulary scores: its norm and the output projection
 local function feed_forward_row_scores(
   state: FeedForwardState, graph: Graph, hidden: {number}
@@ -396,7 +461,11 @@ end
 -- the graphs a feed forward handle builds for a block, over the rows a pass
 -- holds, and none of them when the block's tensors are not all there
 local function feed_forward_block_builds(
-  state: FeedForwardState, prefix: string, width: integer, rows: integer
+  state: FeedForwardState,
+  prefix: string,
+  width: integer,
+  rows: integer,
+  following?: string
 ): {Build}
   local mapped = state.mapped
   if not holds(mapped, prefixed(prefix, BLOCK_NAMES)) then
@@ -409,6 +478,7 @@ local function feed_forward_block_builds(
   end
   local entries = blank_rows(width, rows)
   local probabilities, total = even_votes(state.geometry.experts_used)
+  local predicted = predicted_experts(state, following, width)
   return {
     {
       kind = "votes",
@@ -426,14 +496,25 @@ local function feed_forward_block_builds(
     {
       kind = "choice",
       build = function(graph: Graph): {Output}
+        local left: {ffi.CData} = {}
+        for index, entry in ipairs(entries) do
+          left[index] = feed_forward_choice(
+            state, graph, entry, prefix, probabilities, total
+          )
+        end
         local outputs: {Output} = {}
         for index, entry in ipairs(entries) do
-          outputs[index] = {
-            tensor = feed_forward_choice(
-              state, graph, entry, prefix, probabilities, total
-            ),
-            count = #entry.hidden,
-          }
+          outputs[index] = {tensor = left[index], count = #entry.hidden}
+        end
+        if following is string and not (predicted is nil) then
+          for index = 1, #entries do
+            outputs[#outputs + 1] = {
+              tensor = feed_forward_prediction(
+                state, graph, left[index], following
+              ),
+              count = predicted as integer,
+            }
+          end
         end
         return outputs
       end,
@@ -471,9 +552,15 @@ local function feed_forward_score_builds(
   }
 end
 local function feed_forward_builds(
-  state: FeedForwardState, prefix: string, width: integer, rows: integer
+  state: FeedForwardState,
+  prefix: string,
+  width: integer,
+  rows: integer,
+  following?: string
 ): {Build}
-  local builds = feed_forward_block_builds(state, prefix, width, rows)
+  local builds = feed_forward_block_builds(
+    state, prefix, width, rows, following
+  )
   for _, entry in ipairs(feed_forward_score_builds(state, width, rows)) do
     builds[#builds + 1] = entry
   end
@@ -551,7 +638,7 @@ local function read_experts(
   local held = mapped.cache
   local block = cachex.block_of(prefix)
   local started = clock.now()
-  local reads = 0
+  local count = 0
   local bytes = 0
   for _, name in ipairs(tier.experts) do
     local tensor = mapped.tensors[prefix .. name]
@@ -568,19 +655,215 @@ local function read_experts(
             return line as string
           end
           if moved == true then
-            reads = reads + 1
+            count = count + 1
             bytes = bytes + each
           end
         end
       end
     end
   end
-  if reads > 0 and measure is compute.Measure then
-    measure.blob_reads = measure.blob_reads + reads
+  if count > 0 and measure is compute.Measure then
+    measure.blob_reads = measure.blob_reads + count
     measure.blob_bytes = measure.blob_bytes + bytes
     measure.blob_seconds = measure.blob_seconds + (clock.now() - started)
   end
   return nil
+end
+-- whether this handle has read this matrix whole already
+local function already_read(
+  mapped: Mapped, name: string, expert: integer
+): boolean
+  local held = mapped.handle.read_matrices[name]
+  if not (held is {integer: boolean}) then
+    return false
+  end
+  return held[expert] == true
+end
+-- a matrix an ahead read landed whole is one no later read makes again
+local function marked_read(mapped: Mapped, name: string, expert: integer)
+  local records = mapped.handle.read_matrices
+  local held = records[name]
+  if held is {integer: boolean} then
+    held[expert] = true
+    return
+  end
+  local fresh: {integer: boolean} = {[expert] = true}
+  records[name] = fresh
+end
+-- hands one matrix of one expert over, and answers false when the platform
+-- refused the submit, nothing to hand over counting as handed over
+local function hand_over_one(
+  state: FeedForwardState,
+  ahead: Ahead,
+  queue: reads.Queue,
+  following: string,
+  expert: integer,
+  name: string
+): boolean
+  local mapped = state.mapped
+  local tensor = mapped.tensors[following .. name]
+  if not (tensor is Tensor) then
+    return true
+  end
+  if #tensor.dims < 3 or expert >= (tensor.dims[3] as integer) then
+    return true
+  end
+  if already_read(mapped, tensor.name, expert) then
+    return true
+  end
+  local pending = tensor.name .. "#" .. tostring(expert)
+  if ahead.pending[pending] ~= nil then
+    return true
+  end
+
+  local submitted = reads.submit(queue, mapped.handle, tensor, expert)
+  if submitted ~= true then
+    ahead.published.open = false
+    return false
+  end
+  local each = math.floor(tensor.bytes / (tensor.dims[3] as integer))
+  ahead.pending[pending] = {
+    prefix = following,
+    expert = expert,
+    wanted = each,
+  } as AheadPending
+
+  local measure = state.measure
+  local key = following .. "#" .. tostring(expert)
+  local named = ahead.experts[key]
+  if named == nil then
+    local fresh: AheadExpert = {wanted = 0, landed = 0, counted = false}
+    ahead.experts[key] = fresh
+    named = fresh
+    ahead.named = ahead.named + 1
+    if measure is compute.Measure then
+      measure.prefetch_named = measure.prefetch_named + 1
+    end
+  end
+  local named_expert = named as AheadExpert
+  named_expert.wanted = named_expert.wanted + 1
+  if measure is compute.Measure then
+    measure.prefetch_reads = measure.prefetch_reads + 1
+  end
+  return true
+end
+-- hands over every matrix one expert holds, and answers false when the
+-- platform refused one of them
+local function hand_over_matrix(
+  state: FeedForwardState,
+  ahead: Ahead,
+  queue: reads.Queue,
+  following: string,
+  expert: integer
+): boolean
+  for _, name in ipairs(tier.experts) do
+    if not hand_over_one(state, ahead, queue, following, expert, name) then
+      return false
+    end
+  end
+  return true
+end
+-- hands the following block's matrices over for the experts it is likely to
+-- route, one read for each matrix this handle has not read whole and no slot
+-- of that block holds, whatever rows named the expert
+local function hand_over(
+  state: FeedForwardState, following: string, predicted: {integer: boolean}
+)
+  local ahead = state.ahead
+  if ahead is nil then
+    return
+  end
+  if not ahead.published.open then
+    return
+  end
+  local queue = ahead.queue
+  if not (queue is reads.Queue) then
+    return
+  end
+  local mapped = state.mapped
+  local plan = mapped.plan
+  local copy = mapped.device
+  if plan is nil and copy is Copy then
+    return
+  end
+  local held = mapped.cache
+  local block = cachex.block_of(following)
+  local experts: {integer} = {}
+  for expert in pairs(predicted) do
+    experts[#experts + 1] = expert
+  end
+  table.sort(experts)
+  for _, expert in ipairs(experts) do
+    local in_slot = false
+    if held is ExpertCache then
+      in_slot = cachex.slot_of(held, block, expert) ~= nil
+    end
+    if
+      not in_slot
+      and not hand_over_matrix(state, ahead, queue, following, expert)
+    then
+      return
+    end
+  end
+end
+-- one row a wait answered: every matrix that landed whole is one the handle
+-- has read, and a row that did not land closes read-ahead so the demand read
+-- answers instead
+local function wait_ahead_row(
+  state: FeedForwardState, ahead: Ahead, row: reads.Landed
+)
+  local key = row.tensor .. "#" .. tostring(row.index)
+  local pending = ahead.pending[key]
+  if not (pending is AheadPending) then
+    return
+  end
+  ahead.pending[key] = nil
+  local named = ahead.experts[pending.prefix .. "#" .. tostring(pending.expert)]
+  if row.fault == nil and row.bytes >= pending.wanted then
+    marked_read(state.mapped, row.tensor, row.index)
+    if named is AheadExpert then
+      named.landed = named.landed + 1
+    end
+    return
+  end
+  ahead.published.open = false
+end
+-- reaps what was handed over: every matrix that landed whole is one the
+-- handle has read, and a read that did not land closes read-ahead so the
+-- demand read answers instead
+local function wait_ahead(state: FeedForwardState)
+  local ahead = state.ahead
+  if not (ahead is Ahead) then
+    return
+  end
+  local queue = ahead.queue
+  if not (queue is reads.Queue) then
+    return
+  end
+  if next(ahead.pending) == nil then
+    return
+  end
+  local rows = reads.wait(queue)
+  if rows is nil then
+    ahead.published.open = false
+    ahead.pending = {}
+    return
+  end
+  for _, row in ipairs(rows) do
+    wait_ahead_row(state, ahead, row)
+  end
+  for _, named in pairs(ahead.experts) do
+    if
+      not named.counted and named.wanted > 0 and named.landed == named.wanted
+    then
+      named.counted = true
+      ahead.landed = ahead.landed + 1
+      local measure = state.measure
+      if measure is compute.Measure then
+        measure.prefetch_landed = measure.prefetch_landed + 1
+      end
+    end
+  end
 end
 local function recorded(
   watch: compute.Watch, mapped: Mapped, prefix: string, selected: {integer}
@@ -616,7 +899,8 @@ local function feed_forward_block(
   state: FeedForwardState,
   rows: {compute.Row},
   prefix: string,
-  watchs: {compute.Watch} | nil
+  watchs: {compute.Watch} | nil,
+  following?: string
 ): {{number}} | nil, string | nil
   local mapped = state.mapped
   local geometry = state.geometry
@@ -694,11 +978,13 @@ local function feed_forward_block(
     end
   end
 
+  wait_ahead(state)
   local read_line = read_experts(mapped, prefix, chosen, experts, state.measure)
   if read_line is string then
     return nil, read_line
   end
 
+  local predicted = predicted_experts(state, following, width)
   local second, second_failure = graph_run(
     pool,
     prefix,
@@ -706,14 +992,25 @@ local function feed_forward_block(
     "block",
     state.measure,
     function(graph: Graph): {Output}
+      local left: {ffi.CData} = {}
+      for index, entry in ipairs(rows) do
+        left[index] = feed_forward_choice(
+          state, graph, entry, prefix, votes[index], totals[index]
+        )
+      end
       local outputs: {Output} = {}
       for index, entry in ipairs(rows) do
-        outputs[index] = {
-          tensor = feed_forward_choice(
-            state, graph, entry, prefix, votes[index], totals[index]
-          ),
-          count = #entry.hidden,
-        }
+        outputs[index] = {tensor = left[index], count = #entry.hidden}
+      end
+      if following is string and not (predicted is nil) then
+        for index = 1, #rows do
+          outputs[#outputs + 1] = {
+            tensor = feed_forward_prediction(
+              state, graph, left[index], following
+            ),
+            count = predicted as integer,
+          }
+        end
       end
       return outputs
     end
@@ -721,8 +1018,29 @@ local function feed_forward_block(
   if second is nil then
     return nil, second_failure
   end
-  local planes = graph_planes(second)
+  local planes: {{number}} = {}
+  for index = 1, #rows do
+    planes[index] = graph_numbers(second, (second.outputs)[index])
+  end
+  local next_prefix = following
+  local named: {integer: boolean} | nil = nil
+  if next_prefix is string and not (predicted is nil) then
+    named = {}
+    for index = 1, #rows do
+      local probabilities = graph_numbers(
+        second, (second.outputs)[#rows + index]
+      )
+      for _, expert in ipairs(
+        chosen_experts(probabilities, geometry.experts_used)
+      ) do
+        named[expert] = true
+      end
+    end
+  end
   graph_closed(second)
+  if next_prefix is string and named is {integer: boolean} then
+    hand_over(state, next_prefix, named)
+  end
   return planes, nil
 end
 local function feed_forward_scores(
@@ -809,7 +1127,8 @@ local function feed_forward_of(
   geometry: compute.Geometry,
   pool: Box,
   measure?: compute.Measure,
-  given?: Mapped
+  given?: Mapped,
+  ahead?: Ahead
 ): compute.FeedForward | nil, string | nil
   local loaded = LOADED[backend]
   if loaded is nil then
@@ -841,6 +1160,7 @@ local function feed_forward_of(
     pool = pool,
     measure = measure,
     owner = pool.owned,
+    ahead = ahead,
   }
   local finished = false
   local feed_forward = {} as compute.FeedForward
@@ -848,12 +1168,13 @@ local function feed_forward_of(
     _: compute.FeedForward,
     rows: {compute.Row},
     prefix: string,
-    watch?: {compute.Watch}
+    watch?: {compute.Watch},
+    following?: string
   ): {{number}} | nil, string | nil
     if finished then
       return nil, "block: the feed forward is closed"
     end
-    return feed_forward_block(state, rows, prefix, watch)
+    return feed_forward_block(state, rows, prefix, watch, following)
   end
   feed_forward.scores = function(
     _: compute.FeedForward, hidden: {{number}}

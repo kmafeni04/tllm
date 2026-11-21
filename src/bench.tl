@@ -16,6 +16,7 @@ local record bench
     ubatch: integer | nil
     vram: integer | nil
     profile: string | nil
+    prefetch: boolean | nil
   end
 
   run: function(Settings, function(string), function(string)): integer
@@ -56,6 +57,10 @@ local record Report
   read_seconds: number
   routes: integer
   hits: integer
+  ahead: integer
+  named: integer
+  landed: integer
+  open: boolean
   frames: {Frame}
 end
 
@@ -101,13 +106,17 @@ local function zeroed(measure: compute.Measure)
   measure.blob_reads = 0
   measure.blob_bytes = 0
   measure.blob_seconds = 0
+  measure.prefetch_reads = 0
+  measure.prefetch_named = 0
+  measure.prefetch_landed = 0
 end
 
 local function driven(
   server: tltp.Server,
   stream_fn: tltp.StreamFn,
   measure: compute.Measure,
-  started: number
+  started: number,
+  ahead: compute.ReadAhead
 ): Report | nil, string | nil
   local frames: {Frame} = {}
   local function emit(payload: string): string | nil, string | nil
@@ -160,6 +169,10 @@ local function driven(
     read_seconds = measure.blob_seconds,
     routes = measure.routed,
     hits = measure.expert_hits,
+    ahead = measure.prefetch_reads,
+    named = measure.prefetch_named,
+    landed = measure.prefetch_landed,
+    open = ahead.open,
     frames = frames,
   }
 end
@@ -237,17 +250,28 @@ local function reported(
   if report.routes > 0 then
     hits = report.hits / report.routes * 100
   end
+  local landed = 0.0
+  if report.named > 0 then
+    landed = report.landed / report.named * 100
+  end
+  local state = "closed"
+  if report.open then
+    state = "open"
+  end
   write_out(
     string.format(
       "experts %d: %d routed, %.1f MB; per turn %d reads, %.1f MB read, "
-        .. "%.3f ms; %.1f%% hit\n",
+        .. "%.3f ms; %.1f%% hit; %d ahead, %.1f%% landed; read ahead %s\n",
       length,
       routed,
       megabytes,
       report.reads,
       report.read_bytes / 1000000,
       report.read_seconds * 1000,
-      hits
+      hits,
+      report.ahead,
+      landed,
+      state
     )
   )
 end
@@ -271,6 +295,7 @@ function bench.run(
       ubatch = settings.ubatch,
       vram = settings.vram,
       profile = settings.profile,
+      prefetch = settings.prefetch,
     }
   )
   if server is nil then
@@ -342,7 +367,7 @@ function bench.run(
         end
 
         local report, report_line = driven(
-          server, stream_fn as tltp.StreamFn, measure, started
+          server, stream_fn, measure, started, generation.read_ahead
         )
         generation.routing_sink = nil
         if lines is {string} then

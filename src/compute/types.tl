@@ -1,5 +1,6 @@
 local ffi = require("ffi")
 local compute = require("tllm.compute.api")
+local reads = require("tllm.reads")
 local weights = require("tllm.weights")
 
 -- what the compute modules pass each other: a graph and the arena it is built
@@ -220,6 +221,36 @@ local record Types
     round: integer
   end
 
+  -- the experts a window named and how many of their matrices landed whole,
+  -- one record per expert, and the reads handed over and not yet reaped
+  record AheadExpert
+    wanted: integer
+    landed: integer
+    counted: boolean
+  end
+
+  record AheadPending
+    prefix: string
+    expert: integer
+    wanted: integer
+  end
+
+  -- the queue a model took for read-ahead, the state it publishes, and the
+  -- window it decides by: what was handed over since the build or the last
+  -- decision
+  record Ahead
+    published: compute.ReadAhead
+    queue: reads.Queue | nil
+    -- the value a person forced, nil when the gate decides
+    forced: boolean | nil
+    expert_bytes: integer
+    passes: integer
+    named: integer
+    landed: integer
+    experts: {string: AheadExpert}
+    pending: {string: AheadPending}
+  end
+
   record Mapped
     lib: Library
     tensors: {string: Tensor}
@@ -262,6 +293,7 @@ local record Types
     pool: Box
     measure: compute.Measure | nil
     owner: boolean
+    ahead: Ahead | nil
   end
 
   record LinearShape
@@ -303,6 +335,7 @@ local record Types
     feed_forward: compute.FeedForward
     placement: compute.Placement
     copy: Copy | nil
+    ahead: Ahead
   end
 
   record SequenceState
@@ -330,6 +363,7 @@ local record Types
     measure: compute.Measure
     placement: compute.Placement
     copy: Copy | nil
+    ahead: Ahead
   end
 
   record BlockTensors

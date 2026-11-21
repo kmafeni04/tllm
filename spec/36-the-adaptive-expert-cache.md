@@ -118,8 +118,8 @@ path to a file `29/FR-008` writes: one JSON object per line, holding `layer`, `t
   `endpoint_of` table.
 - FR-010 (US-004) WHEN `bench` writes a length's `experts` line, THE SYSTEM SHALL end it with
   `; H% hit`, H being the turn's `measure.expert_hits` over its `measure.routed` times 100 to one
-  decimal, printed `0.0` when `routed` is 0, and SHALL zero `measure.expert_hits` beside the other
-  `measure` fields before a turn.
+  decimal, printed `0.0` when `routed` is 0, followed by the ahead text `38/FR-011` appends, and
+  SHALL zero `measure.expert_hits` beside the other `measure` fields before a turn.
 - FR-011 (US-003) THE SYSTEM SHALL keep a slot out of every graph that a pass builds before the
   pass that follows its copy, so no graph reads bytes still moving.
   Not testable: a copy in flight cannot be produced on demand, because a case would have to hold the
@@ -179,11 +179,14 @@ cap.
   `resident_bytes` plus its `reserve` plus half its `slot_bytes`, that fixture holding two experts,
   that `bench m --config F --prefill-tokens 4 --decode-tokens 4` with a config naming the fixture,
   that `vram` and a `profile` whose lines route expert 1 returns 0 and writes an `experts 4:` line
-  ending `0.0% hit`, so the profile seeded the one slot and the routed expert 0 is not in it; that
+  ending `; 0.0% hit; 0 ahead, 0.0% landed; read ahead`, with `open` or `closed` after it, so the
+  profile seeded the one slot and the routed expert 0 is not in it; that
   the same run on a config naming the fixture and that `vram` but no `profile` writes an `experts
-  4:` line ending `100.0% hit`, so the default seed is expert 0; and that on a 4096-position copy of
+  4:` line ending `; 100.0% hit; 0 ahead, 0.0% landed; read ahead`, with `open` or `closed` after
+  it, so the default seed is expert 0; and that on a 4096-position copy of
   that fixture with a `vram` computed the same way for that copy and no `profile`, a run of the
-  default lengths writes an `experts 2048:` line ending `100.0% hit`, so the hit count is the second
+  default lengths writes an `experts 2048:` line ending `; 100.0% hit; 0 ahead, 0.0% landed; read
+  ahead`, with `open` or `closed` after it, so the hit count is the second
   turn's own.
 - T-004 (FR-003, FR-006): `a contested slot keeps what the rounds chose`, proves on the same machine
   and fixture, with the two-slot cap and a profile whose lines route expert 0 and expert 1 once each,

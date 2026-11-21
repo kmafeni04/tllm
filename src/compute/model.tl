@@ -15,6 +15,8 @@ local mathx = require("tllm.compute.maths")
 local oncard = require("tllm.compute.placement")
 local defs = require("tllm.compute.types")
 local gguf = require("tllm.gguf")
+local prefetch = require("tllm.prefetch")
+local reads = require("tllm.reads")
 local weights = require("tllm.weights")
 
 local type Tensor = weights.Tensor
@@ -34,6 +36,7 @@ local type ModelPlan = defs.ModelPlan
 local type ModelState = defs.ModelState
 local type Output = defs.Output
 local type Pool = defs.Pool
+local type Ahead = defs.Ahead
 local type SequenceState = defs.SequenceState
 
 local LOADED = engine.LOADED
@@ -194,9 +197,17 @@ local function model_builds(
   }
   local full_prefix = prefix_named(mapped, "post_attention_norm.weight")
   local hidden_count = hidden_width(mapped, "post_attention_norm.weight")
+  -- a second block exists when a block of the run can name a following one's
+  -- experts, and the prediction's nodes are the same shape whatever it is
+  local following: string | nil = nil
+  if count >= 2 then
+    following = "blk.1."
+  end
   if full_prefix is string and not (hidden_count is nil) then
     for _, entry in ipairs(
-      feed_forward_builds(feed_forward_state, full_prefix, hidden_count, rows)
+      feed_forward_builds(
+        feed_forward_state, full_prefix, hidden_count, rows, following
+      )
     ) do
       builds[#builds + 1] = entry
     end
@@ -239,6 +250,105 @@ local function model_builds(
   end
   return builds
 end
+-- the bytes every expert matrix of the handle holds, and the bytes of its
+-- largest one
+local function expert_bytes_of(handle: weights.Handle): integer, integer
+  local total = 0
+  local largest = 0
+  for name, tensor in pairs(handle.tensors) do
+    local expert = false
+    for _, suffix in ipairs(tier.experts) do
+      if #name > #suffix and name:sub(-#suffix) == suffix then
+        expert = true
+        break
+      end
+    end
+    if expert and #tensor.dims >= 3 and (tensor.dims[3] or 0) >= 1 then
+      local each = math.floor(tensor.bytes / (tensor.dims[3] as integer))
+      if each > largest then
+        largest = each
+      end
+      total = total + tensor.bytes
+    end
+  end
+  return total, largest
+end
+-- the queue a model takes for read-ahead and the state the gate opens it in:
+-- a model given `prefetch` false takes none, one whose handle holds no expert
+-- matrix takes none, and a platform without the interface takes none
+local function read_ahead_of(
+  handle: weights.Handle, experts_used: integer, forced: boolean | nil
+): Ahead
+  local total, largest = expert_bytes_of(handle)
+  local ahead: Ahead = {
+    published = {open = false, depth = 0, bytes = 0},
+    queue = nil,
+    forced = forced,
+    expert_bytes = total,
+    passes = 0,
+    named = 0,
+    landed = 0,
+    experts = {},
+    pending = {},
+  }
+  if total < 1 or largest < 1 or forced == false then
+    return ahead
+  end
+  if not reads.offered() then
+    return ahead
+  end
+  local depth = 3 * experts_used
+  if depth < 4 then
+    depth = 4
+  end
+  local queue = reads.open(depth, largest)
+  if queue is nil then
+    return ahead
+  end
+  ahead.queue = queue
+  ahead.published.depth = queue.depth
+  ahead.published.bytes = queue.bytes
+  if forced == true then
+    ahead.published.open = true
+    return ahead
+  end
+  local free = prefetch.memory()
+  local room: number | nil = nil
+  if free is integer then
+    room = free / total
+  end
+  ahead.published.open = prefetch.decide(room, 0, 0, false)
+  return ahead
+end
+local function give_back(ahead: Ahead)
+  local queue = ahead.queue
+  if queue is reads.Queue then
+    ahead.queue = nil
+    reads.close(queue)
+  end
+end
+-- the window a decision counts: what was named and landed since the build or
+-- the last decision
+local function decided(ahead: Ahead)
+  if not (ahead.forced == nil) then
+    return
+  end
+  local queue = ahead.queue
+  if not (queue is reads.Queue) then
+    return
+  end
+  local free = prefetch.memory()
+  local room: number | nil = nil
+  if free is integer and ahead.expert_bytes > 0 then
+    room = free / ahead.expert_bytes
+  end
+  ahead.published.open = prefetch.decide(
+    room, ahead.named, ahead.landed, ahead.published.open
+  )
+  ahead.named = 0
+  ahead.landed = 0
+  ahead.experts = {}
+end
 local function model_plan(
   backend: compute.Backend,
   handle: weights.Handle,
@@ -247,7 +357,8 @@ local function model_plan(
   sequences: integer,
   rows: integer,
   vram: integer | nil,
-  profile: string | nil
+  profile: string | nil,
+  forced: boolean | nil
 ): ModelPlan | nil, string | nil
   local loaded = LOADED[backend]
   if loaded is nil then
@@ -580,13 +691,21 @@ local function model_plan(
     widest = most_rows
   end
 
+  -- the queue read-ahead hands reads to, after every fault the model's own
+  -- keys and shapes name and before the profile is read
+  local ahead = read_ahead_of(handle, geometry.experts_used, forced)
+  local function give_up(line: string): nil, string
+    give_back(ahead)
+    return nil, line
+  end
+
   -- the profile is read whether or not a slot is placed, after every fault
   -- the model's own keys name and before anything is copied to the card
   local profile_counts: {integer: {integer: integer}} | nil = nil
   if profile is string then
     local counts, profile_line = cachex.read(profile)
     if counts is nil then
-      return nil, profile_line
+      return give_up(profile_line as string)
     end
     profile_counts = counts
   end
@@ -675,7 +794,7 @@ local function model_plan(
   if not use_device or budget < 1 then
     local line = on_the_cpu(0, 0)
     if line is string then
-      return nil, line
+      return give_up(line)
     end
   else
     -- a model whose tensors the tier would place must hold every fixed tensor
@@ -689,12 +808,12 @@ local function model_plan(
       end
       for _, name in ipairs(names) do
         if handle.tensors[prefix .. name] == nil then
-          return nil, "model: no tensor " .. prefix .. name
+          return give_up("model: no tensor " .. prefix .. name)
         end
       end
       for _, name in ipairs(BLOCK_NAMES) do
         if handle.tensors[prefix .. name] == nil then
-          return nil, "model: no tensor " .. prefix .. name
+          return give_up("model: no tensor " .. prefix .. name)
         end
       end
     end
@@ -730,7 +849,7 @@ local function model_plan(
       if copy is nil then
         local line = on_the_cpu(budget, planned.reserve)
         if line is string then
-          return nil, line
+          return give_up(line)
         end
         stable = true
         break
@@ -749,7 +868,7 @@ local function model_plan(
       if probe is nil then
         free_copy(copy)
         mapped.close()
-        return nil, "model: no arena for its graphs"
+        return give_up("model: no arena for its graphs")
       end
       local reserve = tier.reserve_of(probe, kinds, count)
       local following = tier.place(handle, budget, reserve)
@@ -778,7 +897,7 @@ local function model_plan(
         if arena is nil then
           free_copy(copy)
           mapped.close()
-          return nil, "model: no arena for its graphs"
+          return give_up("model: no arena for its graphs")
         end
         stable = true
         break
@@ -793,7 +912,7 @@ local function model_plan(
       -- a plan the card keeps changing is no plan; the CPU holds the model
       local line = on_the_cpu(budget, (placement as compute.Placement).reserve)
       if line is string then
-        return nil, line
+        return give_up(line)
       end
     end
   end
@@ -825,6 +944,9 @@ local function model_plan(
     blob_bytes = 0,
     blob_seconds = 0,
     graphs = 0,
+    prefetch_reads = 0,
+    prefetch_named = 0,
+    prefetch_landed = 0,
   }
   local sized = function(wanted: integer): {Build}
     return model_builds(
@@ -842,11 +964,12 @@ local function model_plan(
   end
 
   local feed_forward, feed_line = feed_forward_of(
-    backend, handle, geometry, box, measure, final_mapped
+    backend, handle, geometry, box, measure, final_mapped, ahead
   )
   if feed_forward is nil then
     pool_free(final_arena)
     abandon()
+    give_back(ahead)
     return nil, "model: " .. (feed_line as string)
   end
 
@@ -859,6 +982,7 @@ local function model_plan(
       feed_forward:close()
       pool_free(final_arena)
       abandon()
+      give_back(ahead)
       return nil, "model: " .. (line as string)
     end
     attention = made
@@ -877,6 +1001,7 @@ local function model_plan(
       end
       pool_free(final_arena)
       abandon()
+      give_back(ahead)
       return nil, "model: " .. (line as string)
     end
     linear = made
@@ -898,6 +1023,7 @@ local function model_plan(
     feed_forward = feed_forward as compute.FeedForward,
     placement = plan,
     copy = copy,
+    ahead = ahead,
   }
 end
 -- what the embedding row of this token refuses, before any graph is built
@@ -1107,6 +1233,14 @@ local function model_pass(
     return nil, no_room
   end
 
+  -- read-ahead decides once every sixteen completed passes, and a person who
+  -- forced it is asked nothing
+  local ahead = state.ahead
+  if ahead.passes >= 16 then
+    ahead.passes = 0
+    decided(ahead)
+  end
+
   local started = clock.now()
   local first = measure.tokens
 
@@ -1186,7 +1320,13 @@ local function model_pass(
         sink = sink,
       }
     end
-    local blocked, block_line = state.feed_forward:block(mixed, prefix, watchs)
+    local following: string | nil = nil
+    if index < state.count - 1 then
+      following = "blk." .. (index + 1) .. "."
+    end
+    local blocked, block_line = state.feed_forward:block(
+      mixed, prefix, watchs, following
+    )
     if blocked is nil then
       return nil, block_line
     end
@@ -1221,6 +1361,7 @@ local function model_pass(
     held.taken = held.taken + 1
   end
   measure.passes = measure.passes + 1
+  ahead.passes = ahead.passes + 1
   measure.tokens = first + #inputs
   measure.compute = measure.compute + (clock.now() - started)
   return scores, nil
@@ -1233,7 +1374,8 @@ local function build(
   sequences?: integer,
   ubatch?: integer,
   vram?: integer,
-  profile?: string
+  profile?: string,
+  prefetch_value?: boolean
 ): compute.Model | nil, string | nil
   local loaded = LOADED[backend]
   if loaded is nil then
@@ -1252,7 +1394,15 @@ local function build(
   end
   local cached: compute.CacheType = cache_type or "f16"
   local plan, plan_line = model_plan(
-    backend, handle, positions, cache_type, limit, rows, vram, profile
+    backend,
+    handle,
+    positions,
+    cache_type,
+    limit,
+    rows,
+    vram,
+    profile,
+    prefetch_value
   )
   if plan is nil then
     return nil, plan_line
@@ -1289,6 +1439,7 @@ local function build(
     measure = plan.measure,
     placement = plan.placement,
     copy = plan.copy,
+    ahead = plan.ahead,
   }
 
   local model = {} as compute.Model
@@ -1297,6 +1448,7 @@ local function build(
   model.ubatch = rows
   model.measure = plan.measure
   model.placement = plan.placement
+  model.read_ahead = plan.ahead.published
   local measure = model.measure
   model.routing_sink = nil
   local finished = false
@@ -1397,6 +1549,7 @@ local function build(
       pool_free(pool)
       state.pool.pool = nil
     end
+    give_back(state.ahead)
     state.mapped.close()
     local copy = state.copy
     if copy is Copy then

@@ -248,6 +248,7 @@ local function serve_code(
       ubatch = settings.ubatch or DEFAULT_UBATCH,
       vram = settings.vram,
       profile = settings.profile,
+      prefetch = settings.prefetch,
     },
     write_err
   )
@@ -344,6 +345,7 @@ local function bench_code(
       ubatch = settings.ubatch or DEFAULT_UBATCH,
       vram = settings.vram,
       profile = settings.profile,
+      prefetch = settings.prefetch,
     },
     write_out,
     write_err
