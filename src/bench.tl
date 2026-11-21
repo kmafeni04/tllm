@@ -15,6 +15,7 @@ local record bench
     routing_path: string | nil
     ubatch: integer | nil
     vram: integer | nil
+    profile: string | nil
   end
 
   run: function(Settings, function(string), function(string)): integer
@@ -53,6 +54,8 @@ local record Report
   reads: integer
   read_bytes: integer
   read_seconds: number
+  routes: integer
+  hits: integer
   frames: {Frame}
 end
 
@@ -94,6 +97,7 @@ local function zeroed(measure: compute.Measure)
   measure.ready = 0
   measure.routed = 0
   measure.routed_bytes = 0
+  measure.expert_hits = 0
   measure.blob_reads = 0
   measure.blob_bytes = 0
   measure.blob_seconds = 0
@@ -154,6 +158,8 @@ local function driven(
     reads = measure.blob_reads,
     read_bytes = measure.blob_bytes,
     read_seconds = measure.blob_seconds,
+    routes = measure.routed,
+    hits = measure.expert_hits,
     frames = frames,
   }
 end
@@ -227,16 +233,21 @@ local function reported(
   )
   local routed = math.floor((last.routed - first.routed) / decode_count)
   local megabytes = (last.bytes - first.bytes) / decode_count / 1000000
+  local hits = 0.0
+  if report.routes > 0 then
+    hits = report.hits / report.routes * 100
+  end
   write_out(
     string.format(
       "experts %d: %d routed, %.1f MB; per turn %d reads, %.1f MB read, "
-        .. "%.3f ms\n",
+        .. "%.3f ms; %.1f%% hit\n",
       length,
       routed,
       megabytes,
       report.reads,
       report.read_bytes / 1000000,
-      report.read_seconds * 1000
+      report.read_seconds * 1000,
+      hits
     )
   )
 end
@@ -259,6 +270,7 @@ function bench.run(
       workers = 1,
       ubatch = settings.ubatch,
       vram = settings.vram,
+      profile = settings.profile,
     }
   )
   if server is nil then

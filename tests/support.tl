@@ -47,6 +47,8 @@ local record support
   first: function({{number}} | nil, string | nil): {number} | nil, string | nil
   first_row: function({number}, integer): {compute.Row}
   refused: function({number} | nil, string | nil): string
+  found_device: function(): boolean
+  on_device: function(string, function())
 end
 
 function support.u16(value: integer): string
@@ -238,6 +240,22 @@ function support.refused(value: {number} | nil, line: string | nil): string
   local message = line as string
   test.equal(message:find("\n"), nil)
   return message
+end
+
+-- the gate every device case uses: a machine whose library found a device
+function support.found_device(): boolean
+  local backend = compute.load() as compute.Backend
+  local bytes, total = backend:memory()
+  compute.unload(backend)
+  return not (bytes is nil) and not (total is nil)
+end
+
+function support.on_device(name: string, body: function())
+  if support.found_device() then
+    test.it(name, body)
+  else
+    test.skip(name .. " (no CUDA device)", function() end)
+  end
 end
 
 support.FLOAT_BYTES = FLOAT_BYTES

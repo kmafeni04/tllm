@@ -24,6 +24,7 @@ local record Config
   workers: integer | nil
   ubatch: integer | nil
   vram: integer | nil
+  profile: string | nil
 end
 
 local DEFAULT_CONTEXT_BYTES: integer = 1073741824
@@ -94,6 +95,7 @@ local function unknown_key(fields: Fields): string | nil
     workers = true,
     ubatch = true,
     vram = true,
+    profile = true,
   }
   local keys: {string} = {}
   for key in pairs(fields) do
@@ -322,6 +324,13 @@ local function parse(
     return fault(
       "config " .. file_path .. ": vram must be an integer of one or more"
     )
+  end
+
+  local profile = fields.profile
+  if profile is string then
+    settings.profile = profile
+  elseif not (profile is nil) then
+    return fault("config " .. file_path .. ": profile must be a string")
   end
 
   local names: {string} = {}

@@ -5,6 +5,7 @@ local ffi = require("ffi")
 local clock = require("tllm.clock")
 local compute = require("tllm.compute.api")
 local scaffold = require("tllm.compute.blocks")
+local cachex = require("tllm.compute.cache")
 local engine = require("tllm.compute.engine")
 local mathx = require("tllm.compute.maths")
 local oncard = require("tllm.compute.placement")
@@ -19,6 +20,7 @@ local type Copy = defs.Copy
 local type FeedForwardState = defs.FeedForwardState
 local type Graph = defs.Graph
 local type Mapped = defs.Mapped
+local type ExpertCache = defs.ExpertCache
 local type Output = defs.Output
 local type Pool = defs.Pool
 
@@ -546,13 +548,8 @@ local function read_experts(
   if plan is nil and copy is Copy then
     return nil
   end
-  local slots = 0
-  if plan is compute.Placement then
-    local found = prefix:match("^blk%.(%d+)%.")
-    if found is string then
-      slots = plan.slots[(tonumber(found) as integer) + 1] or 0
-    end
-  end
+  local held = mapped.cache
+  local block = cachex.block_of(prefix)
   local started = clock.now()
   local reads = 0
   local bytes = 0
@@ -561,7 +558,11 @@ local function read_experts(
     if tensor is Tensor and #tensor.dims >= 3 then
       local each = math.floor(tensor.bytes / (tensor.dims[3] as integer))
       for expert = 0, experts - 1 do
-        if chosen[expert] and expert >= slots then
+        local in_slot = false
+        if held is ExpertCache then
+          in_slot = cachex.slot_of(held, block, expert) ~= nil
+        end
+        if chosen[expert] and not in_slot then
           local moved, line = weights.read(mapped.handle, tensor, expert)
           if moved is nil then
             return line as string
@@ -671,12 +672,21 @@ local function feed_forward_block(
 
   local totals: {number} = {}
   local chosen: {integer: boolean} = {}
+  local block_cache = mapped.cache
+  local block = cachex.block_of(prefix)
   for index, probabilities in ipairs(votes) do
     local routed = chosen_experts(probabilities, geometry.experts_used)
     local total: number = 0
     for _, expert in ipairs(routed) do
       total = total + probabilities[expert + 1]
       chosen[expert] = true
+      if block_cache is ExpertCache then
+        local was_held = cachex.record(block_cache, block, expert)
+        local measure = state.measure
+        if was_held and measure is compute.Measure then
+          measure.expert_hits = measure.expert_hits + 1
+        end
+      end
     end
     totals[index] = total
     if watchs is {compute.Watch} then

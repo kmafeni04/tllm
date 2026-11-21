@@ -247,6 +247,7 @@ local function serve_code(
       workers = settings.workers or 1,
       ubatch = settings.ubatch or DEFAULT_UBATCH,
       vram = settings.vram,
+      profile = settings.profile,
     },
     write_err
   )
@@ -342,6 +343,7 @@ local function bench_code(
       routing_path = routing_path,
       ubatch = settings.ubatch or DEFAULT_UBATCH,
       vram = settings.vram,
+      profile = settings.profile,
     },
     write_out,
     write_err

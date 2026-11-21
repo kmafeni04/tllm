@@ -2495,13 +2495,7 @@ test.it(
 local memory_backend = compute.load() as compute.Backend
 local device_free = memory_backend:memory()
 
-local function on_device(name: string, body: function())
-  if device_free is nil then
-    test.skip(name .. " (no CUDA device)", function() end)
-  else
-    test.it(name, body)
-  end
-end
+local on_device = support.on_device
 
 on_device(
   "a pool the card cannot hold is refused at start",

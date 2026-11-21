@@ -159,7 +159,10 @@ a pool, whose models are the workers' own, writes no line at all.
   those buffers, each sum rounded up to 16 rather than charged with the padded allocation each
   tensor lands in, SHALL copy the tensors its `place` marks and each resident
   expert's three matrices into device memory in one buffer of the model's own sized to
-  `resident_bytes` plus `slot_bytes`, and SHALL set the model's `placement` to that plan; WHEN the
+  `resident_bytes` plus `slot_bytes`, the experts it copies into a block's slots being those that
+  block's profile seeded, or the lowest-numbered ones when `compute.model` is given no profile,
+  while `place` reports the same `slots` counts and the same `slot_bytes` it reports today, and
+  SHALL set the model's `placement` to that plan; WHEN the
   library found no device, or the backend was asked to stay on the CPU, THE SYSTEM SHALL set a
   `placement` whose budget, `reserve`, `resident_bytes`, `slots` and `slot_bytes` are 0, whose
   `resident` is empty and whose `unplaced_bytes` is the handle's tensor bytes, and compute as

@@ -7,6 +7,7 @@ local clock = require("tllm.clock")
 local compute = require("tllm.compute.api")
 local attn = require("tllm.compute.attention")
 local scaffold = require("tllm.compute.blocks")
+local cachex = require("tllm.compute.cache")
 local engine = require("tllm.compute.engine")
 local ff = require("tllm.compute.feed_forward")
 local lin = require("tllm.compute.linear")
@@ -28,6 +29,7 @@ local type Graph = defs.Graph
 local type LinearShape = defs.LinearShape
 local type LinearState = defs.LinearState
 local type Mapped = defs.Mapped
+local type ExpertCache = defs.ExpertCache
 local type ModelPlan = defs.ModelPlan
 local type ModelState = defs.ModelState
 local type Output = defs.Output
@@ -244,7 +246,8 @@ local function model_plan(
   cache_type: compute.CacheType | nil,
   sequences: integer,
   rows: integer,
-  vram: integer | nil
+  vram: integer | nil,
+  profile: string | nil
 ): ModelPlan | nil, string | nil
   local loaded = LOADED[backend]
   if loaded is nil then
@@ -577,6 +580,31 @@ local function model_plan(
     widest = most_rows
   end
 
+  -- the profile is read whether or not a slot is placed, after every fault
+  -- the model's own keys name and before anything is copied to the card
+  local profile_counts: {integer: {integer: integer}} | nil = nil
+  if profile is string then
+    local counts, profile_line = cachex.read(profile)
+    if counts is nil then
+      return nil, profile_line
+    end
+    profile_counts = counts
+  end
+  local numbers = tier.block_numbers(handle)
+  local limits: {integer} = {}
+  local prefixes: {string} = {}
+  for index, block_number in ipairs(numbers) do
+    local prefix = "blk." .. block_number .. "."
+    prefixes[index] = prefix
+    limits[index] = tier.experts_held(handle.tensors, prefix)
+  end
+  local function slots_holding(planned: compute.Placement): {{integer}}
+    return cachex.seeds(profile_counts, limits, planned.slots)
+  end
+  local function cache_of(planned: compute.Placement): ExpertCache
+    return cachex.make(slots_holding(planned), prefixes)
+  end
+
   -- what the card may take, and the plan that says what sits there
   local found = loaded.device
   local use_device = loaded.offload and not (found is nil)
@@ -677,7 +705,8 @@ local function model_plan(
     local no_experts = false
     for _ = 1, 24 do
       local planned = placement as compute.Placement
-      copy = tier.placed_copy(loaded, handle, planned)
+      local seeds = slots_holding(planned)
+      copy = tier.placed_copy(loaded, handle, planned, seeds)
       if copy is nil and planned.slot_bytes > 0 then
         -- the card refused the expert slots: keep the tensors it already took
         local bare = {
@@ -692,7 +721,7 @@ local function model_plan(
         for index = 1, #planned.slots do
           bare.slots[index] = 0
         end
-        copy = tier.placed_copy(loaded, handle, bare)
+        copy = tier.placed_copy(loaded, handle, bare, slots_holding(bare))
         if copy is Copy then
           placement = bare
           no_experts = true
@@ -772,6 +801,7 @@ local function model_plan(
   local plan = placement as compute.Placement
   local final_mapped = mapped as Mapped
   local final_arena = arena as Pool
+  final_mapped.cache = cache_of(plan)
   if use_device and (plan.resident_bytes > 0 or plan.slot_bytes > 0) then
     backend.device = ffi.string(
       loaded.lib.ggml_backend_dev_name(loaded.device as ffi.CData)
@@ -790,6 +820,7 @@ local function model_plan(
     ready = 0,
     routed = 0,
     routed_bytes = 0,
+    expert_hits = 0,
     blob_reads = 0,
     blob_bytes = 0,
     blob_seconds = 0,
@@ -1118,6 +1149,11 @@ local function model_pass(
     }
   end
 
+  local cache = state.mapped.cache
+  if cache is ExpertCache then
+    cachex.begin(cache)
+  end
+
   for index = 0, state.count - 1 do
     local prefix = "blk." .. index .. "."
     local contributions: {{number}} | nil
@@ -1173,6 +1209,12 @@ local function model_pass(
   if scores is nil then
     return nil, score_line
   end
+  if cache is ExpertCache then
+    local copy_line = cachex.finish(cache, state.mapped)
+    if copy_line is string then
+      return nil, copy_line
+    end
+  end
 
   for _, input in ipairs(inputs) do
     local held = state.sequences[input.sequence] as SequenceState
@@ -1190,7 +1232,8 @@ local function build(
   cache_type: compute.CacheType | nil,
   sequences?: integer,
   ubatch?: integer,
-  vram?: integer
+  vram?: integer,
+  profile?: string
 ): compute.Model | nil, string | nil
   local loaded = LOADED[backend]
   if loaded is nil then
@@ -1209,7 +1252,7 @@ local function build(
   end
   local cached: compute.CacheType = cache_type or "f16"
   local plan, plan_line = model_plan(
-    backend, handle, positions, cache_type, limit, rows, vram
+    backend, handle, positions, cache_type, limit, rows, vram, profile
   )
   if plan is nil then
     return nil, plan_line

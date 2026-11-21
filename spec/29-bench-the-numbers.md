@@ -149,7 +149,9 @@ refusal lines through the second, and hands back the exit code. The `generation`
   1000000; R, Y and S are the turn's `34/FR-003` blob reads, blob bytes divided by 1000000 and blob
   seconds in milliseconds, all read from the `measure` at the turn's end; T, A, B, C and S are each
   multiplied by 1000 and printed in milliseconds to three decimal places, K and R as whole numbers
-  and X and Y to one decimal place; and those three times it prints SHALL sum to within 20% of T,
+  and X and Y to one decimal place, and the line SHALL end with `; H% hit`, H being the
+  turn's `measure.expert_hits` over its `measure.routed` times 100 to one decimal, printed
+  `0.0` when `routed` is 0; and those three times it prints SHALL sum to within 20% of T,
   the two compared as printed.
 - FR-006 (US-001) IF a length's body is refused with status `BadRequest`, THEN THE SYSTEM SHALL
   write the line `skipped L: M` where L is the length and M is what the refusal body holds, and
@@ -195,7 +197,8 @@ refusal lines through the second, and hands back the exit code. The `generation`
   `path` is the resolved model's path, whose `kv_cache` is the config file's value or `f16`, whose
   `sessions` is 1, whose `workers` is 1, whose `context_path` and `context_bytes` are nil, whose
   `host` is `127.0.0.1`, whose `port` is 8080, whose `ubatch` is the config file's `ubatch` or
-  512 when it names none, and whose `vram` is the config file's `vram`, nil when it names none, so
+  512 when it names none, and whose `vram` is the config file's `vram`, nil when it names none, and whose `profile` is
+  the config file's `profile`, nil when it names none, so
   a bench run measures the tier a server would have, binds no socket, starts no worker process and
   creates no context directory.
   Not testable: `sessions`, `workers`, `context_path`, `context_bytes`, `host` and `port` exist

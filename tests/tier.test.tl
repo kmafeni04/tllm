@@ -423,18 +423,8 @@ local function device_free(): integer
   return backend:memory() as integer
 end
 
-local function found_device(): boolean
-  local bytes, total = backend:memory()
-  return not (bytes is nil) and not (total is nil)
-end
-
-local function on_device(name: string, body: function())
-  if found_device() then
-    test.it(name, body)
-  else
-    test.skip(name .. " (no CUDA device)", function() end)
-  end
-end
+local found_device = support.found_device
+local on_device = support.on_device
 
 local function scores_of(
   model: compute.Model, token_id: integer, position: integer

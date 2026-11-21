@@ -4,6 +4,7 @@
 
 local ffi = require("ffi")
 local compute = require("tllm.compute.api")
+local cachex = require("tllm.compute.cache")
 local engine = require("tllm.compute.engine")
 local defs = require("tllm.compute.types")
 local weights = require("tllm.weights")
@@ -14,6 +15,7 @@ local type Copy = defs.Copy
 local type Graph = defs.Graph
 local type Loaded = defs.Loaded
 local type Mapped = defs.Mapped
+local type ExpertCache = defs.ExpertCache
 local type Pool = defs.Pool
 local type TensorView = defs.TensorView
 local type Tiers = defs.Tiers
@@ -301,7 +303,10 @@ local tier = (
     -- the device copy a model's placement names: the tensors it marks and every
     -- expert matrix it places, in one buffer of the model's own
     local function placed_copy(
-      loaded: Loaded, handle: weights.Handle, placement: compute.Placement
+      loaded: Loaded,
+      handle: weights.Handle,
+      placement: compute.Placement,
+      seeds: {{integer}}
     ): Copy | nil
       local lib = loaded.lib
       local tensors = handle.tensors
@@ -405,10 +410,14 @@ local tier = (
       for index, number in ipairs(numbers) do
         local prefix = "blk." .. number .. "."
         local slots = placement.slots[index]
-        for expert = 0, slots - 1 do
+        local chosen = seeds[index] or {}
+        for slot = 0, slots - 1 do
+          local expert = chosen[slot + 1]
           for _, name in ipairs(EXPERT_NAMES) do
             local tensor = tensors[prefix .. name]
-            if tensor is Tensor and #tensor.dims >= 3 then
+            if
+              tensor is Tensor and #tensor.dims >= 3 and not (expert is nil)
+            then
               local count = tensor.dims[3] as integer
               local each = math.floor(tensor.bytes / count)
               local from = ffi.cast("intptr_t", tensor.data) as integer
@@ -428,7 +437,7 @@ local tier = (
                 held = {}
                 experts[name] = held
               end
-              held[expert + 1] = descriptor
+              held[slot + 1] = descriptor
             end
           end
         end
@@ -459,7 +468,7 @@ local tier = (
         handle = handle,
         device = copy,
         resident = placement.resident,
-        experts = copy.experts,
+        cache = nil,
         plan = placement,
         hold = mark.hold,
         close = mark.close,
@@ -478,11 +487,39 @@ local tier = (
         arena = mapped.arena,
         ctx = mapped.ctx,
         resident = mapped.resident,
-        experts = mapped.experts,
+        cache = mapped.cache,
         plan = mapped.plan,
         hold = mark.hold,
         close = mark.close,
       }
+    end
+
+    -- the device descriptor of the slot holding this expert, or nil when no
+    -- slot does
+    local function slot_descriptor(
+      mapped: Mapped, name: string, expert: integer
+    ): ffi.CData | nil
+      local held = mapped.cache
+      if not (held is ExpertCache) then
+        return nil
+      end
+      local copy = mapped.device
+      if not (copy is Copy) then
+        return nil
+      end
+      local matrices = copy.experts
+      if matrices is nil then
+        return nil
+      end
+      local descriptors = matrices[name]
+      if descriptors is nil then
+        return nil
+      end
+      local slot = cachex.slot_of(held, cachex.block_of(name), expert)
+      if slot is nil then
+        return nil
+      end
+      return descriptors[slot]
     end
 
     -- the descriptor a graph multiplies by: the model's device copy when its plan
@@ -503,22 +540,9 @@ local tier = (
       end
 
       if plan is compute.Placement then
-        local found = name:match("^blk%.(%d+)%.")
-        local slots = 0
-        if found is string then
-          local at = (tonumber(found) as integer) + 1
-          slots = plan.slots[at] or 0
-        end
-        local chosen = index or 0
-        local matrices = mapped.experts
-        if not (matrices is nil) and chosen < slots then
-          local held = matrices[name]
-          if not (held is nil) then
-            local matrix = held[chosen + 1]
-            if not (matrix is nil) then
-              return matrix
-            end
-          end
+        local descriptor = slot_descriptor(mapped, name, index or 0)
+        if not (descriptor is nil) then
+          return descriptor
         end
       end
 

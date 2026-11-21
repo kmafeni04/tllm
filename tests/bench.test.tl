@@ -235,7 +235,7 @@ local TOKEN_8 = "^token 8: (%d+%.%d%d%d) ms, compute (%d+%.%d%d%d) ms, "
   .. "sampling (%d+%.%d%d%d) ms, ipc (%d+%.%d%d%d) ms$"
 
 local EXPERTS_8 = "^experts 8: (%d+) routed, (%d+%.%d) MB; per turn (%d+) "
-  .. "reads, (%d+%.%d) MB read, (%d+%.%d%d%d) ms$"
+  .. "reads, (%d+%.%d) MB read, (%d+%.%d%d%d) ms; (%d+%.%d)%% hit$"
 
 test.it(
   "a rung reports and adds up",
@@ -653,5 +653,124 @@ test.it(
 
     model:close()
     test.equal(handle.release(handle), nil)
+  end
+)
+
+local function profile_file(lines: string): string
+  local file_path = path_for("p") .. ".jsonl"
+  fs.write(file_path, lines)
+  return file_path
+end
+
+local function experts_at(out: {string}, length: integer): string | nil
+  for _, line in ipairs(out) do
+    if line:match("^experts " .. length .. ": ") then
+      return line
+    end
+  end
+  return nil
+end
+
+local function ends(line: string, suffix: string): boolean
+  return #line >= #suffix and line:sub(-#suffix) == suffix
+end
+
+-- the vram that holds every fixed tensor, the reservation and half of the
+-- fixture's two expert slots
+local function half_slot_vram(file_path: string): integer
+  local handle = weights.load(file_path) as weights.Handle
+  local backend = compute.load() as compute.Backend
+  local model = compute.model(backend, handle, nil, "f16", 1) as compute.Model
+  local placement = model.placement
+  local vram = placement.resident_bytes + placement.reserve + math.floor(
+    placement.slot_bytes / 2
+  )
+  model:close()
+  compute.unload(backend)
+  test.equal(handle.release(handle), nil)
+  return vram
+end
+
+test.it(
+  "bench reports the hit rate and the profile reaches the model",
+  function()
+    if not support.found_device() then
+      test.skip(
+        "bench reports the hit rate and the profile reaches the model"
+          .. " (no CUDA device)",
+        function() end
+      )
+      return
+    end
+
+    local file_path = meta_file(meta(260, nil, true), entries())
+    local vram = half_slot_vram(file_path)
+    local named = profile_file('{"layer":0,"token":0,"experts":[1]}\n')
+    local seeded = path_for("c") .. ".json"
+    fs.write(
+      seeded,
+      '{"models":{"m":{"path":"'
+        .. file_path
+        .. '"}},"vram":'
+        .. vram
+        .. ',"profile":"'
+        .. named
+        .. '"}'
+    )
+    local got = run(
+      {
+        "bench",
+        "m",
+        "--config",
+        seeded,
+        "--prefill-tokens",
+        "4",
+        "--decode-tokens",
+        "4",
+      }
+    )
+    test.equal(got.code, 0, table.concat(got.err, "\n"))
+    local line = experts_at(got.out, 4) as string
+    test.truthy(line, table.concat(got.out, "\n"))
+    test.truthy(ends(line, "0.0% hit"), line)
+
+    local plain = path_for("c") .. ".json"
+    fs.write(
+      plain,
+      '{"models":{"m":{"path":"' .. file_path .. '"}},"vram":' .. vram .. "}"
+    )
+    local default = run(
+      {
+        "bench",
+        "m",
+        "--config",
+        plain,
+        "--prefill-tokens",
+        "4",
+        "--decode-tokens",
+        "4",
+      }
+    )
+    test.equal(default.code, 0, table.concat(default.err, "\n"))
+    line = experts_at(default.out, 4) as string
+    test.truthy(line, table.concat(default.out, "\n"))
+    test.truthy(ends(line, "100.0% hit"), line)
+
+    local long_path = meta_file(meta(4096, nil, true), entries())
+    local long_vram = half_slot_vram(long_path)
+    local long = path_for("c") .. ".json"
+    fs.write(
+      long,
+      '{"models":{"m":{"path":"'
+        .. long_path
+        .. '"}},"vram":'
+        .. long_vram
+        .. "}"
+    )
+    local ladder = run({"bench", "m", "--config", long})
+    test.equal(ladder.code, 0, table.concat(ladder.err, "\n"))
+    line = experts_at(ladder.out, 2048) as string
+    test.truthy(line, table.concat(ladder.out, "\n"))
+    test.truthy(ends(line, "100.0% hit"), line)
   end
 )

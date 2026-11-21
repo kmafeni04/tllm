@@ -203,6 +203,23 @@ local record Types
     close: function()
   end
 
+  -- the expert cache of one model: the experts its blocks' slots hold, the
+  -- routes the current window counted, and the slots a pass will fill once its
+  -- arithmetic has returned
+  record ExpertBlock
+    prefix: string
+    slots: {integer}
+    counts: {integer: integer}
+    last: {integer: integer}
+    pending: {integer: integer} | nil
+  end
+
+  record ExpertCache
+    blocks: {ExpertBlock}
+    rounds: integer
+    round: integer
+  end
+
   record Mapped
     lib: Library
     tensors: {string: Tensor}
@@ -211,10 +228,10 @@ local record Types
     device: Copy | nil
     arena: ffi.CData | nil
     ctx: ffi.CData | nil
-    -- a model's plan: the tensors its own buffer holds, the expert matrices it
-    -- holds, and the copy they live in; nil for every other entry point
+    -- a model's plan: the tensors its own buffer holds, the copy they live in
+    -- and the cache of the experts its slots hold; nil for every other entry
     resident: {string: boolean} | nil
-    experts: {string: {ffi.CData | nil}} | nil
+    cache: ExpertCache | nil
     plan: compute.Placement | nil
     hold: function()
     close: function()
@@ -371,7 +388,9 @@ local record Types
     same_placement: function(compute.Placement, compute.Placement): boolean
     place: function(weights.Handle, integer, integer): compute.Placement
     reserve_of: function(Pool, {boolean}, integer): integer
-    placed_copy: function(Loaded, weights.Handle, compute.Placement): Copy | nil
+    placed_copy: function(
+      Loaded, weights.Handle, compute.Placement, {{integer}}
+    ): Copy | nil
     mapped_with_copy: function(
       Loaded, weights.Handle, Copy, compute.Placement
     ): Mapped

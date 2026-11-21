@@ -84,9 +84,9 @@ for.
 
 - FR-001 (US-001) WHEN a pass has chosen a block's experts and reads them from the mapping, THE
   SYSTEM SHALL read each matrix of each chosen expert whole, one read at that matrix's offset in the
-  model file, before the graph that multiplies by it runs; a chosen matrix the model's placement
-  marks resident SHALL NOT be read whole, and every other chosen matrix SHALL be read whole whether
-  or not the model's fixed weights are on the card.
+  model file, before the graph that multiplies by it runs; a chosen matrix the model's slots hold
+  and whose copy has landed SHALL NOT be read whole, and every other chosen matrix SHALL be read
+  whole, whatever its id, whether or not the model's fixed weights are on the card.
 - FR-002 (US-001, US-002) WHEN this handle has already read a matrix, THE SYSTEM SHALL NOT read it
   again, whether the next row asking for it is another row of the same pass or a pass that comes
   later.

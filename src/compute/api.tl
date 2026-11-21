@@ -87,6 +87,7 @@ local record compute
     ready: number
     routed: integer
     routed_bytes: integer
+    expert_hits: integer
     blob_reads: integer
     blob_bytes: integer
     blob_seconds: number
@@ -178,7 +179,8 @@ local record compute
     CacheType | nil,
     sequences?: integer,
     ubatch?: integer,
-    vram?: integer
+    vram?: integer,
+    profile?: string
   ): Model | nil, string | nil
 end
 

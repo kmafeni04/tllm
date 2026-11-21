@@ -255,19 +255,8 @@ local function device_free(): integer
   return bytes as integer
 end
 
-local function found_device(): boolean
-  local bytes, total = backend:memory()
-  return not (bytes is nil) and not (total is nil)
-end
-
 -- the cases that need a card say why they did not run
-local function on_device(name: string, body: function())
-  if found_device() then
-    test.it(name, body)
-  else
-    test.skip(name .. " (no CUDA device)", function() end)
-  end
-end
+local on_device = support.on_device
 
 local function agreeing(
   what: string,

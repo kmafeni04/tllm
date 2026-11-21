@@ -1,6 +1,6 @@
 # 36: The adaptive expert cache
 
-**Status**: pending   **Depends on**: 04, 15, 29, 34, 35
+**Status**: done   **Depends on**: 04, 15, 29, 34, 35
 
 ## Problem & context
 
@@ -218,16 +218,4 @@ cap.
 
 ## Amendments
 
-- `04/FR-006`: `profile` joins the top-level keys a read file may hold.
-- `04/FR-007`: a `profile` that is set and is not text is refused with one line naming `profile` and
-  exit code 1, checked after `vram`, so a file faulting both writes the `vram` line.
-- `04/FR-011`: the file's `profile` reaches `start`, nil when the file sets none and nil when no
-  file is read.
-- `29/FR-005`: the `experts` line ends with `; H% hit` as this spec's FR-010 gives it; every other
-  figure on that line is unchanged.
-- `29/FR-011`: the endpoint `bench` builds carries the file's `profile` beside its `vram`.
-- `34/FR-001`: a chosen matrix the model's slots hold and whose copy has landed is not read whole;
-  every other chosen matrix is, whatever its id.
-- `35/FR-004`: the experts a model copies into a block's slots are the experts that block's profile
-  seeded, or the lowest-numbered ones when `compute.model` is given no profile; `place` reports the
-  same `slots` counts and the same `slot_bytes` it reports today.
+- None.
