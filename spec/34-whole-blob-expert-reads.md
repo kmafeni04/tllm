@@ -14,7 +14,9 @@ The fix is request size, and it is not parallelism. One read of the whole matrix
 figure on one thread; queue depth was measured to buy nothing (io_uring was identical to `pread` at
 every size and depth), and OS threads would cost a C file and a Linux-only build. So each matrix of
 each chosen expert is read whole with one `pread` on the calling thread, before the graph that
-multiplies by it runs, and nothing else about how a pass reads weights changes.
+multiplies by it runs, and nothing else about how a pass reads weights changes. `37` may hand such a
+matrix over to the platform's submission interface instead, for a read the pass does not wait on; a
+matrix it reads on demand is still that `pread`.
 
 A handle remembers the matrices it has read and does not read one twice, which is what bounds what
 this buys: the first pass over a model whose experts the page cache holds pays one request per
@@ -86,7 +88,10 @@ for.
   SYSTEM SHALL read each matrix of each chosen expert whole, one read at that matrix's offset in the
   model file, before the graph that multiplies by it runs; a chosen matrix the model's slots hold
   and whose copy has landed SHALL NOT be read whole, and every other chosen matrix SHALL be read
-  whole, whatever its id, whether or not the model's fixed weights are on the card.
+  whole, whatever its id, whether or not the model's fixed weights are on the card. A matrix a
+  caller hands over may be read by the platform's submission interface instead of one blocking read
+  on the calling thread, as `37` hands it over and reaps it later; a matrix a pass reads on demand
+  SHALL still be one blocking read.
 - FR-002 (US-001, US-002) WHEN this handle has already read a matrix, THE SYSTEM SHALL NOT read it
   again, whether the next row asking for it is another row of the same pass or a pass that comes
   later.
@@ -104,8 +109,10 @@ for.
 
 ## Non-goals
 
-- No threads, no io_uring, no asynchronous read and no new dependency: every read is one `pread` on
-  the calling thread, because depth was measured to buy nothing and request size is what binds.
+- No threads, no new dependency and no second read of a matrix a pass waits on: `37` may hand a
+  matrix over to the platform's submission interface and reap it later, but every matrix a pass
+  reads on demand is one `pread` on the calling thread, because depth was measured to buy nothing
+  for the read that blocks a pass and request size is what binds.
 - No change to the mapping, nor to any tensor but the routed experts' three matrices: the graph
   keeps reading the mapping, which is what makes the second pass over an expert free and what
   leaves a zero-copy read path over that mapping open.

@@ -1,6 +1,6 @@
 # 37: Hand an expert read over and reap it later
 
-**Status**: pending   **Depends on**: 06, 34
+**Status**: done   **Depends on**: 06, 34
 
 ## Problem & context
 
@@ -41,6 +41,8 @@ local record reads
                       -- refused reap
     closed: boolean   -- set once `close` has returned, so a second `close`
                       -- gives nothing back
+    -- the mapped rings, their counters and the one block of buffers, which no
+    -- caller reads and only `close` gives back
   end
 
   -- what one read leaves behind once it is reaped
@@ -201,6 +203,10 @@ reads the mapping and the kernel already has those pages.
   afterwards; and that a second queue of depth 1, handed one matrix before its descriptor is closed,
   answers a second `submit` nil and one line saying the reap was refused, with `pending` 1
   afterwards, the queue shut, and a `close` on it raising nothing.
+- T-009 (FR-004): `a handed-over read that fails names its tensor and its index`, proves on the same
+  machine that a queue of depth 1, handed one matrix of a handle whose descriptor was opened for
+  writing, so the platform refuses the read while the handle still answers, answers a row holding
+  that tensor, its index, the bytes 0 and one line naming the tensor, the index and that 0.
 
 ## Open questions
 
@@ -211,7 +217,4 @@ reads the mapping and the kernel already has those pages.
 
 ## Amendments
 
-- `34/FR-001`: a matrix a caller hands over may be read by the platform's submission interface
-  instead of one blocking read on the calling thread, so `34`'s non-goal refusing `io_uring` and
-  asynchronous reads gives way to this one path, with no new dependency and still no thread, and a
-  matrix read on demand stays one blocking read.
+- None.
