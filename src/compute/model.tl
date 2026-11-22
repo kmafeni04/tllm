@@ -14,6 +14,7 @@ local lin = require("tllm.compute.linear")
 local mathx = require("tllm.compute.maths")
 local oncard = require("tllm.compute.placement")
 local defs = require("tllm.compute.types")
+local cores = require("tllm.cores")
 local gguf = require("tllm.gguf")
 local missx = require("tllm.miss")
 local prefetch = require("tllm.prefetch")
@@ -31,6 +32,7 @@ local type FeedForwardState = defs.FeedForwardState
 local type Graph = defs.Graph
 local type LinearShape = defs.LinearShape
 local type LinearState = defs.LinearState
+local type Loaded = defs.Loaded
 local type Mapped = defs.Mapped
 local type ExpertCache = defs.ExpertCache
 local type MissWindow = defs.MissWindow
@@ -40,6 +42,7 @@ local type Output = defs.Output
 local type Pool = defs.Pool
 local type Ahead = defs.Ahead
 local type SequenceState = defs.SequenceState
+local type Threads = defs.Threads
 
 local LOADED = engine.LOADED
 local free_copy = engine.free_copy
@@ -363,6 +366,22 @@ local function decided(ahead: Ahead)
   ahead.landed = 0
   ahead.experts = {}
 end
+-- the threadpool entries with the count this model chose: a copy, because
+-- another model of the same library carries its own
+local function threads_for(loaded: Loaded, count: integer): Threads | nil
+  local entries = loaded.threads
+  if not (entries is Threads) then
+    return nil
+  end
+  return {
+    make = entries.make,
+    give = entries.give,
+    set = entries.set,
+    set_n_threads = entries.set_n_threads,
+    n_threads = count,
+    pool = nil,
+  } as Threads
+end
 local function model_plan(
   backend: compute.Backend,
   handle: weights.Handle,
@@ -372,7 +391,8 @@ local function model_plan(
   rows: integer,
   vram: integer | nil,
   profile: string | nil,
-  forced: boolean | nil
+  forced: boolean | nil,
+  threads: integer
 ): ModelPlan | nil, string | nil
   local loaded = LOADED[backend]
   if loaded is nil then
@@ -816,7 +836,7 @@ local function model_plan(
       sequences,
       nil,
       nil,
-      loaded.threads
+      threads_for(loaded, threads)
     )
     if made is nil then
       return "model: no arena for its graphs"
@@ -1443,7 +1463,8 @@ local function build(
   ubatch?: integer,
   vram?: integer,
   profile?: string,
-  prefetch_value?: boolean
+  prefetch_value?: boolean,
+  threads_value?: integer
 ): compute.Model | nil, string | nil
   local loaded = LOADED[backend]
   if loaded is nil then
@@ -1460,6 +1481,13 @@ local function build(
   if rows < 1 then
     return nil, "model: ubatch is " .. rows
   end
+  if not (threads_value is nil) and not cores.fits(threads_value) then
+    return nil, "model: threads is " .. threads_value
+  end
+  local threads = threads_value
+  if threads is nil then
+    threads = cores.machine()
+  end
   local cached: compute.CacheType = cache_type or "f16"
   local plan, plan_line = model_plan(
     backend,
@@ -1470,7 +1498,8 @@ local function build(
     rows,
     vram,
     profile,
-    prefetch_value
+    prefetch_value,
+    threads
   )
   if plan is nil then
     return nil, plan_line
@@ -1515,6 +1544,7 @@ local function build(
   model.positions = plan.positions
   model.sequences = limit
   model.ubatch = rows
+  model.threads = threads
   model.measure = plan.measure
   model.placement = plan.placement
   model.read_ahead = plan.ahead.published

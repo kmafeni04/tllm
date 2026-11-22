@@ -179,9 +179,6 @@ local ARENA_SLACK: integer = 8192
 -- a graph's nodes are counted per row of the batch, with room to spare
 local TENSORS_PER_ROW: integer = 256
 local TENSOR_SPARE: integer = 4096
--- GGML_DEFAULT_N_THREADS in the pinned ggml source, the count a graph with no
--- pool is given today: the number `44` decides
-local THREADS: integer = 4
 local GGML_TYPE_F32: integer = 0
 local GGML_TYPE_F16: integer = 1
 local GGML_TYPE_Q4_0: integer = 2
@@ -294,10 +291,20 @@ local function threads_of(lib: Library): Threads | nil
   local set = lib.ggml_backend_reg_get_proc_address(
     reg, "ggml_backend_cpu_set_threadpool"
   )
-  if make is nil or give is nil or set is nil then
+  local count = lib.ggml_backend_reg_get_proc_address(
+    reg, "ggml_backend_set_n_threads"
+  )
+  if make is nil or give is nil or set is nil or count is nil then
     return nil
   end
-  return {make = make, give = give, set = set, pool = nil} as Threads
+  return {
+    make = make,
+    give = give,
+    set = set,
+    set_n_threads = count,
+    n_threads = nil,
+    pool = nil,
+  } as Threads
 end
 local function write_floats(cells: Floats, values: {number})
   for position, value in ipairs(values) do
@@ -520,25 +527,31 @@ local function pool_new(
   } as Pool
   -- the model's one threadpool, made with the arena beside it so that no graph
   -- of its passes pays a create and a join of its own: the entries are copied,
-  -- because the pool that replaces this one makes its own from them
+  -- because the pool that replaces this one makes its own from them, and the
+  -- count is the model's rather than the library's
   if threads is Threads then
-    local params = ffi.new("struct ggml_threadpool_params") as ffi.CData
-    lib.ggml_threadpool_params_init(params, THREADS)
-    local make = ffi.cast(
-      "ggml_threadpool *(*)(struct ggml_threadpool_params *)", threads.make
-    ) as function(ffi.CData): ffi.CData
-    local made = make(params)
-    if not (made is nil) then
-      -- the pool is given back with the arena even where the pool that holds it
-      -- is dropped without its free
-      local give = ffi.cast("void (*)(ggml_threadpool *)", threads.give)
-        as function(ffi.CData)
-      pool.threads = {
-        make = threads.make,
-        give = threads.give,
-        set = threads.set,
-        pool = ffi.gc(made, function(held: ffi.CData) give(held) end),
-      } as Threads
+    local count = threads.n_threads
+    if not (count is nil) then
+      local params = ffi.new("struct ggml_threadpool_params") as ffi.CData
+      lib.ggml_threadpool_params_init(params, count)
+      local make = ffi.cast(
+        "ggml_threadpool *(*)(struct ggml_threadpool_params *)", threads.make
+      ) as function(ffi.CData): ffi.CData
+      local made = make(params)
+      if not (made is nil) then
+        -- the pool is given back with the arena even where the pool that holds
+        -- it is dropped without its free
+        local give = ffi.cast("void (*)(ggml_threadpool *)", threads.give)
+          as function(ffi.CData)
+        pool.threads = {
+          make = threads.make,
+          give = threads.give,
+          set = threads.set,
+          set_n_threads = threads.set_n_threads,
+          n_threads = count,
+          pool = ffi.gc(made, function(held: ffi.CData) give(held) end),
+        } as Threads
+      end
     end
   end
   return pool
@@ -627,12 +640,23 @@ local function pool_backend(pool: Pool): ffi.CData | nil
     return made
   end
   local threadpool = threads.pool
-  if not (threadpool is nil) then
-    local set = ffi.cast(
-      "void (*)(ggml_backend *, ggml_threadpool *)", threads.set
-    ) as function(ffi.CData, ffi.CData)
-    set(made, threadpool)
+  if threadpool is nil then
+    return made
   end
+  -- the pinned ggml plans each graph from the backend's own n_threads, which
+  -- ggml_backend_cpu_init leaves at GGML_DEFAULT_N_THREADS: the pool's count is
+  -- set here, before the first graph this backend computes
+  local count = threads.n_threads
+  if not (count is nil) then
+    local set_count = ffi.cast(
+      "void (*)(ggml_backend *, int)", threads.set_n_threads
+    ) as function(ffi.CData, integer)
+    set_count(made, count)
+  end
+  local set = ffi.cast(
+    "void (*)(ggml_backend *, ggml_threadpool *)", threads.set
+  ) as function(ffi.CData, ffi.CData)
+  set(made, threadpool)
   return made
 end
 -- a context over the pool's arena, holding no number of its own when the

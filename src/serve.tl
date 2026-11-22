@@ -2,6 +2,7 @@ local fs = require("fs")
 local process = require("process")
 local chat = require("tllm.chat")
 local compute = require("tllm.compute")
+local cores = require("tllm.cores")
 local generate = require("tllm.generate")
 local gguf = require("tllm.gguf")
 local pause = require("tllm.pause")
@@ -36,6 +37,7 @@ local record serve
     vram: integer | nil
     profile: string | nil
     prefetch: boolean | nil
+    threads: integer | nil
   end
 
   record Worker
@@ -201,6 +203,7 @@ local record EndpointFields
   vram: integer | nil
   profile: string | nil
   prefetch: boolean | nil
+  threads: integer | nil
 end
 
 local DEFAULT_BUDGET: integer = 256
@@ -1918,6 +1921,7 @@ local function endpoint_json(endpoint: serve.Endpoint): string
     vram = endpoint.vram,
     profile = endpoint.profile,
     prefetch = endpoint.prefetch,
+    threads = endpoint.threads,
   }
   return tltp.json_encode(fields) as string
 end
@@ -2150,7 +2154,8 @@ function serve.build(
     endpoint.ubatch,
     endpoint.vram,
     endpoint.profile,
-    endpoint.prefetch
+    endpoint.prefetch,
+    endpoint.threads or cores.machine()
   )
   if generation is nil then
     return nil, generation_failure

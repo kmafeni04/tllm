@@ -18,8 +18,8 @@ command. Its `pparse` is the entry point: it returns errors instead of printing 
 never `Parser:format_error`, whose `usage` rendering is two lines.
 
 ```
-tllm serve [MODEL] [--config FILE] [--host HOST] [--port PORT]
-tllm bench MODEL [--config FILE] [--prefill-tokens N] [--decode-tokens N] [--dump-routing FILE]
+tllm serve [MODEL] [--config FILE] [--host HOST] [--port PORT] [--threads N]
+tllm bench MODEL [--config FILE] [--prefill-tokens N] [--decode-tokens N] [--dump-routing FILE] [--threads N]
 ```
 
 `--port` takes an integer from 1 to 65535 and the two token counts take positive integers. `serve`
@@ -55,7 +55,7 @@ one in `../targs/types/lde-test.d.tl` or generate it with tlcat, and put `types`
 - FR-001 (US-001) THE SYSTEM SHALL declare in `lde.json` the dependency `targs` at `^0.5.0`, hold the dispatcher in `src/cli.tl` exporting `run`, and keep `src/init.tl` as the entry point that calls `run` with the argument list and the two writers described above, then calls `os.exit` with the returned code, so that `lde run -- bench qwen3.8-27b` runs the `bench` command on the process arguments and exits with its code. `serve`'s process check is `03/FR-006`.
   Not testable: `lde.json`, the file layout and the process status are checked by hand, running `lde run -- bench qwen3.8-27b` and reading the line it prints and the shell's exit status.
 - FR-002 (US-003) WHEN `require("tllm.cli").run(args, write_out, write_err)` is called, where `args` is the command line without the program name (`{"serve", "qwen3.8-27b"}`) and the writers take one string ending in a newline, THE SYSTEM SHALL return an integer exit code, send every message through `write_out` or `write_err`, and never terminate the process.
-- FR-003 (US-001) THE SYSTEM SHALL accept an optional `MODEL` and the options `--config`, `--host` and `--port` for `serve`, and a required `MODEL` and the options `--config`, `--prefill-tokens`, `--decode-tokens` and `--dump-routing` for `bench`.
+- FR-003 (US-001) THE SYSTEM SHALL accept an optional `MODEL` and the options `--config`, `--host`, `--port` and `--threads` for `serve`, and a required `MODEL` and the options `--config`, `--prefill-tokens`, `--decode-tokens`, `--dump-routing` and `--threads` for `bench`.
 - FR-004 (US-001) WHEN `bench` is invoked, THE SYSTEM SHALL write the report and return the exit codes `29/FR-004` to `29/FR-008` describe, replacing the refusal line and exit code `2` this spec first shipped.
   Not testable: the report is `29`'s, and `29/T-001` to `29/T-004` prove every line and exit code of it.
 - FR-005 (US-002) IF no command is given, THEN THE SYSTEM SHALL write the usage text `--help` prints to stdout and return exit code 1. IF the command is neither `serve` nor `bench`, THEN THE SYSTEM SHALL write one line saying what is wrong to stderr and return exit code 1.

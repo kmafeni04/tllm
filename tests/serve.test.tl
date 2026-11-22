@@ -5,13 +5,18 @@ local process = require("process")
 local support = require("tests.support")
 local cli = require("tllm.cli")
 local compute = require("tllm.compute")
+local engine = require("tllm.compute.engine")
+local defs = require("tllm.compute.types")
+local cores = require("tllm.cores")
 local generate = require("tllm.generate")
 local serve = require("tllm.serve")
 local tokenizer = require("tllm.tokenizer")
 local weights = require("tllm.weights")
 local tltp = require("tltp")
 local type Entry = support.Entry
+local type Loaded = defs.Loaded
 local type Meta = support.Meta
+local type Threads = defs.Threads
 local u32, u64, text = support.u32, support.u64, support.text
 local padded, f32, zeros = support.padded, support.f32, support.zeros
 local ones, mint, mfloat, mtext =
@@ -248,7 +253,8 @@ local function build(
   context_path?: string,
   context_bytes?: integer,
   workers?: integer,
-  ubatch?: integer
+  ubatch?: integer,
+  threads?: integer
 ): tltp.Server
   local server, failure = serve.build(
     {
@@ -262,6 +268,7 @@ local function build(
       context_bytes = context_bytes,
       workers = workers,
       ubatch = ubatch,
+      threads = threads,
     }
   )
   test.equal(failure, nil, file_path)
@@ -3065,5 +3072,291 @@ test.it(
 
     serve.stop(bound)
     serve.stop(quiet)
+  end
+)
+
+-- the count a model is built with when nothing names one
+local DEFAULT_THREADS = cores.machine()
+
+-- a config file naming the entry `m` for this model, and the keys given
+local function config_with(file_path: string, keys: string): string
+  local location = temp_dir() .. "/config.json"
+  fs.write(
+    location, '{"models":{"m":{"path":"' .. file_path .. '"}}' .. keys .. "}"
+  )
+  return location
+end
+
+test.it(
+  "the count reaches start from the file, the flag and the default",
+  function()
+    local file_path = meta_file(t001_meta(), t001_entries())
+    local titled = config_with(file_path, ',"threads":3')
+    local three = run({"serve", "m", "--config", titled}, {})
+    test.equal(three.code, 0)
+    test.equal((three.endpoint as serve.Endpoint).threads, 3)
+
+    local flagged = run(
+      {"serve", "m", "--config", titled, "--threads", "5"}, {}
+    )
+    test.equal((flagged.endpoint as serve.Endpoint).threads, 5)
+
+    local plain = config_with(file_path, "")
+    local machine = run({"serve", "m", "--config", plain}, {})
+    test.equal((machine.endpoint as serve.Endpoint).threads, DEFAULT_THREADS)
+
+    local pair = config_with(file_path, ',"workers":2')
+    local shared = run({"serve", "m", "--config", pair}, {})
+    test.equal(
+      (shared.endpoint as serve.Endpoint).threads,
+      math.max(1, math.floor(DEFAULT_THREADS / 2))
+    )
+
+    local leaning = config_with(
+      file_path, ',"workers":' .. tostring(DEFAULT_THREADS + 1)
+    )
+    local one = run({"serve", "m", "--config", leaning}, {})
+    test.equal((one.endpoint as serve.Endpoint).threads, 1)
+
+    local alone = config_with(file_path, ',"workers":1')
+    local whole = run({"serve", "m", "--config", alone}, {})
+    test.equal((whole.endpoint as serve.Endpoint).threads, DEFAULT_THREADS)
+
+    -- a hand-written text pads its keys with spaces, the kernel's with tabs
+    test.equal(
+      cores.default(
+        "processor : 0\nphysical id : 0\ncore id : 0\n"
+          .. "processor : 1\nphysical id : 0\ncore id : 1\n"
+          .. "processor : 2\nphysical id : 0\ncore id : 2\n"
+      ),
+      2
+    )
+    test.equal(
+      cores.default(
+        "processor\t: 0\nprocessor\t: 1\nprocessor\t: 2\nprocessor\t: 3\n"
+      ),
+      3
+    )
+    test.equal(
+      cores.default("processor\t: 0\nphysical id\t: 0\ncore id\t: 0\n"), 1
+    )
+    test.equal(cores.default(""), 1)
+  end
+)
+
+local type Graphs = function(): integer
+
+-- what the model under the counting planner publishes, so a case can hand the
+-- wrapper the model once it exists
+local record Watched
+  graphs: Graphs | nil
+end
+
+-- what a model planned its graphs with: the calls the backend's
+-- ggml_backend_set_n_threads entry saw, the count it was given, and the graphs
+-- the model had computed when it was called
+local record Planned
+  calls: integer
+  count: integer
+  graphs: integer
+end
+
+local function counting_planner(
+  backend: compute.Backend, graphs_now: function(): integer
+): Planned, function()
+  local entries = (engine.LOADED[backend] as Loaded).threads as Threads
+  local set = ffi.cast("void (*)(ggml_backend *, int)", entries.set_n_threads)
+    as function(ffi.CData, integer)
+  local counts: Planned = {calls = 0, count = 0, graphs = 0}
+  entries.set_n_threads = ffi.cast(
+    "void (*)(ggml_backend *, int)",
+    function(device: ffi.CData, count: integer)
+      counts.calls = counts.calls + 1
+      counts.count = count
+      counts.graphs = graphs_now()
+      set(device, count)
+    end
+  ) as ffi.CData
+  local function restore()
+    entries.set_n_threads = ffi.cast("void (*)(ggml_backend *, int)", set)
+      as ffi.CData
+  end
+  return counts, restore
+end
+
+test.it(
+  "the count reaches the model and its graph planner",
+  function()
+    local bytes = meta_bytes(t001_meta(), t001_entries())
+    local counted = build(fixture(bytes), "m", nil, nil, nil, nil, nil, nil, 3)
+    test.equal((serve.model_of(counted) as serve.Model).generation.threads, 3)
+    serve.stop(counted)
+
+    local quiet = build(fixture(bytes), "m")
+    test.equal(
+      (serve.model_of(quiet) as serve.Model).generation.threads, DEFAULT_THREADS
+    )
+    serve.stop(quiet)
+
+    local backend = compute.load(nil, false) as compute.Backend
+    local handle = weights.load(fixture(bytes)) as weights.Handle
+    local box: Watched = {graphs = nil}
+    local counts, restore = counting_planner(
+      backend,
+      function(): integer
+        local now = box.graphs
+        if now is Graphs then
+          return now()
+        end
+        return 0
+      end
+    )
+    local built, failure = compute.model(
+      backend, handle, 32, nil, 1, nil, nil, nil, nil, 3
+    )
+    test.equal(failure, nil)
+    local model = built as compute.Model
+    test.equal(model.threads, 3)
+    test.equal(counts.calls, 0)
+    box.graphs = function(): integer return model.measure.graphs end
+    test.equal(model:reserve("", 32), nil)
+    local rows, line = model:pass({{sequence = "", token = 0, position = 0}})
+    test.equal(line, nil)
+    test.truthy(rows ~= nil, "the pass ran")
+    test.equal(counts.calls, 1)
+    test.equal(counts.count, 3)
+    test.equal(counts.graphs, 0)
+    model:close()
+    restore()
+
+    local plain_handle = weights.load(fixture(bytes)) as weights.Handle
+    local plain_counts, plain_restore = counting_planner(
+      backend, function(): integer return 0 end
+    )
+    local plain = compute.model(backend, plain_handle, 32, nil, 1)
+      as compute.Model
+    test.equal(plain.threads, DEFAULT_THREADS)
+    test.equal(plain:reserve("", 32), nil)
+    local plain_rows, plain_line = plain:pass(
+      {{sequence = "", token = 0, position = 0}}
+    )
+    test.equal(plain_line, nil)
+    test.truthy(plain_rows ~= nil, "the pass ran")
+    test.equal(plain_counts.count, DEFAULT_THREADS)
+    plain:close()
+    plain_restore()
+  end
+)
+
+test.it(
+  "a count outside one to 512 is refused",
+  function()
+    local file_path = meta_file(t001_meta(), t001_entries())
+    local bad: {string} = {'"8"', "0", "1.5", "-1", "513"}
+    for _, value in ipairs(bad) do
+      local location = config_with(file_path, ',"threads":' .. value)
+      local bad_run = run({"serve", "m", "--config", location}, {})
+      test.equal(bad_run.code, 1)
+      test.equal(bad_run.starts, 0)
+      test.equal(#bad_run.err, 1)
+      test.includes(bad_run.err[1], "threads")
+      test.includes(bad_run.err[1], location)
+    end
+
+    local flags: {{string}} = {
+      {"serve", "--threads", "0"},
+      {"serve", "--threads", "1.5"},
+      {"serve", "--threads", "513"},
+      {"bench", "m", "--threads", "513"},
+    }
+    for _, args in ipairs(flags) do
+      local bad_run = run(args, {})
+      test.equal(bad_run.code, 1)
+      test.equal(#bad_run.err, 1)
+      test.includes(bad_run.err[1], "--threads")
+      test.equal(bad_run.starts, 0)
+    end
+
+    local backend = compute.load(nil, false) as compute.Backend
+    local handle = weights.load(
+      fixture(meta_bytes(t001_meta(), t001_entries()))
+    ) as weights.Handle
+    for _, count in ipairs({0, 513}) do
+      local built, line = compute.model(
+        backend, handle, 32, nil, 1, nil, nil, nil, nil, count
+      )
+      test.equal(built, nil)
+      local refusal = line as string
+      test.includes(refusal, "model")
+      test.includes(refusal, "threads")
+    end
+  end
+)
+
+-- the Threads line of one process's status, which a model's pool raises by the
+-- count it holds less the calling thread
+local function threads_of_process(pid: integer): integer
+  local status = fs.read("/proc/" .. tostring(pid) .. "/status") as string
+  return tonumber(status:match("Threads:%s*(%d+)")) as integer
+end
+
+local function thread_counts(server: tltp.Server): {integer: integer}
+  local counts: {integer: integer} = {}
+  for _, worker in ipairs(workers_of(server)) do
+    counts[worker.slot] = threads_of_process(worker.pid)
+  end
+  return counts
+end
+
+-- a pool whose workers keep their model on the CPU, so that each holds the
+-- threadpool its endpoint's count makes: a card that would hold the weights
+-- leaves a worker with no pool at all
+local function cpu_pool(file_path: string, threads: integer): tltp.Server
+  local server, failure = serve.build(
+    {
+      host = "127.0.0.1",
+      port = 9090,
+      name = "m",
+      path = file_path,
+      sessions = 4,
+      kv_cache = "f32",
+      context_path = temp_dir(),
+      context_bytes = POOL_BUDGET,
+      workers = 2,
+      vram = 1,
+      threads = threads,
+    }
+  )
+  test.equal(failure, nil, file_path)
+  return server as tltp.Server
+end
+
+test.it(
+  "a worker decodes the count from its endpoint json",
+  function()
+    local bytes = meta_bytes(t001_meta(), t001_entries())
+    local narrow = cpu_pool(fixture(bytes), 2)
+    test.equal(#workers_of(narrow), 2)
+    local narrow_counts = thread_counts(narrow)
+
+    local wide = cpu_pool(fixture(bytes), 4)
+    test.equal(#workers_of(wide), 2)
+    local wide_counts = thread_counts(wide)
+    for slot, count in pairs(narrow_counts) do
+      test.equal(wide_counts[slot], count + 2)
+    end
+
+    local pids: {integer} = {}
+    for _, worker in ipairs(workers_of(narrow)) do
+      pids[#pids + 1] = worker.pid
+    end
+    for _, worker in ipairs(workers_of(wide)) do
+      pids[#pids + 1] = worker.pid
+    end
+    serve.stop(narrow)
+    serve.stop(wide)
+    for _, pid in ipairs(pids) do
+      test.equal(fs.exists("/proc/" .. tostring(pid)), false)
+    end
   end
 )

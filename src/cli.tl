@@ -3,6 +3,7 @@ local targs = require("targs")
 local bench = require("tllm.bench")
 local compute = require("tllm.compute")
 local config = require("tllm.config")
+local cores = require("tllm.cores")
 local serve = require("tllm.serve")
 
 local cli = {}
@@ -31,6 +32,13 @@ local function build(): targs.Parser
       type = "number",
     }
   )
+  serve_parser:option(
+    {
+      name = "threads",
+      placeholder = "N",
+      type = "number",
+    }
+  )
 
   local bench_parser = parser:command(
     {
@@ -55,6 +63,13 @@ local function build(): targs.Parser
     }
   )
   bench_parser:option({name = "dump-routing", placeholder = "FILE"})
+  bench_parser:option(
+    {
+      name = "threads",
+      placeholder = "N",
+      type = "number",
+    }
+  )
 
   return parser
 end
@@ -161,6 +176,35 @@ end
 -- 04/FR-011: the chunk bound a file names none keeps
 local DEFAULT_UBATCH: integer = 512
 
+-- 44/FR-006: the flag's count, nil when the flag was not given, and the
+-- refusal when it is not one ggml can hold
+local function flag_threads(
+  command: targs.Parser, write_err: function(string)
+): integer | nil, boolean
+  local value = command:get_option("threads")
+  if not (value is number) then
+    return nil, false
+  end
+  if not cores.fits(value) then
+    write_err(
+      one_line(
+        "'--threads' expects an integer from 1 to 512, got " .. tostring(value)
+      )
+    )
+    return nil, true
+  end
+  return value as integer, false
+end
+
+-- 44/FR-005: the default shared among the file's workers
+local function shared(count: integer, workers: integer): integer
+  local each = math.floor(count / workers)
+  if each < 1 then
+    return 1
+  end
+  return each
+end
+
 local function serve_code(
   command: targs.Parser,
   write_err: function(string),
@@ -195,6 +239,11 @@ local function serve_code(
     given_host = host
   end
 
+  local flag_count, refused = flag_threads(command, write_err)
+  if refused then
+    return 1
+  end
+
   local word_value = model_of(command)
   local word: string | nil = nil
   if word_value is string then
@@ -227,6 +276,11 @@ local function serve_code(
     cache_type = file_cache
   end
 
+  local threads = flag_count or settings.threads
+  if threads is nil then
+    threads = shared(cores.machine(), settings.workers or 1)
+  end
+
   local chosen = chosen_model(
     "serve", settings.models, word, path_word, write_err
   )
@@ -249,6 +303,7 @@ local function serve_code(
       vram = settings.vram,
       profile = settings.profile,
       prefetch = settings.prefetch,
+      threads = threads,
     },
     write_err
   )
@@ -288,6 +343,11 @@ local function bench_code(
       return 1
     end
     decode = count as integer
+  end
+
+  local flag_count, refused = flag_threads(command, write_err)
+  if refused then
+    return 1
   end
 
   local word_value = model_of(command)
@@ -346,6 +406,7 @@ local function bench_code(
       vram = settings.vram,
       profile = settings.profile,
       prefetch = settings.prefetch,
+      threads = flag_count or settings.threads or cores.machine(),
     },
     write_out,
     write_err

@@ -296,8 +296,9 @@ interface`, as `37`'s cases do. A case that does not ask for a card builds its m
   computing from bytes that did not land.
 - T-008 (FR-008, FR-009, FR-014): `the queue is taken, sized and given back`, proves on the routing
   fixture, with the handle's largest expert matrix `m` bytes and `reads.offered` true, that a model
-  built with `prefetch.memory` answering 1000000 has a `read_ahead` whose depth is at least 4 and
-  whose bytes are at least `m`, and that its `close` together with the handle's `release` leaves the
+  built with `threads` 1, so that no worker thread's allocation is counted among the regions held
+  after it closes, and `prefetch.memory` answering 1000000 has a `read_ahead` whose depth is at
+  least 4 and whose bytes are at least `m`, and that its `close` together with the handle's `release` leaves the
   descriptors and the mapped regions the process held before the handle was loaded, a second
   `close` changing neither; that a four-expert copy of the routing fixture, both blocks' `ffn_gate_inp.weight` holding
   the four rows `{1, 0}`, `{0, 1}`, `{0, 0}` and `{0, 0}`, its `expert_used_count` 3 and its three

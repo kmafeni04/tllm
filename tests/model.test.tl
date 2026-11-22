@@ -6,6 +6,7 @@ local clock = require("tllm.clock")
 local compute = require("tllm.compute")
 local engine = require("tllm.compute.engine")
 local defs = require("tllm.compute.types")
+local cores = require("tllm.cores")
 local gguf = require("tllm.gguf")
 local weights = require("tllm.weights")
 local type Entry = support.Entry
@@ -1059,19 +1060,23 @@ local function cached_model(
   handle: weights.Handle,
   positions: integer,
   cache: compute.CacheType,
-  sequences: integer
+  sequences: integer,
+  threads?: integer
 ): compute.Model
   local model, failure = compute.model(
-    backend, handle, positions, cache, sequences
+    backend, handle, positions, cache, sequences, nil, nil, nil, nil, threads
   )
   test.equal(failure, nil)
   return model as compute.Model
 end
 
 local function model_sequences(
-  handle: weights.Handle, positions: integer, sequences: integer
+  handle: weights.Handle,
+  positions: integer,
+  sequences: integer,
+  threads?: integer
 ): compute.Model
-  return cached_model(handle, positions, "f32", sequences)
+  return cached_model(handle, positions, "f32", sequences, threads)
 end
 
 local function contributing_entries(): {Entry}
@@ -1231,8 +1236,8 @@ test.it(
     }
 
     local function pair(): number, number
-      local batched = model_sequences(handle, 4, 4)
-      local single = model_sequences(handle, 4, 4)
+      local batched = model_sequences(handle, 4, 4, 4)
+      local single = model_sequences(handle, 4, 4, 4)
       for _, name in ipairs({"a", "b", "c", "d"}) do
         test.equal(batched:reserve(name, 4), nil)
         test.equal(single:reserve(name, 4), nil)
@@ -1920,9 +1925,12 @@ local function counting_threads(): Counting, function()
   return counts, restore
 end
 
--- the threads the process holds, which a pool of four threads raises by three:
--- the pools of the models the cases before this one built are given back first,
--- so the count is the pools this case holds and not another case's garbage
+-- the count a model given no threads of its own is built with: the machine's
+local DEFAULT_COUNT = cores.machine()
+
+-- the threads the process holds, which a pool of n threads raises by n - 1: the
+-- pools of the models the cases before this one built are given back first, so
+-- the count is the pools this case holds and not another case's garbage
 local function threads_now(): integer
   collectgarbage("collect")
   local status = fs.read("/proc/self/status") as string
@@ -1942,7 +1950,7 @@ test.it(
     local model = built as compute.Model
     test.equal(counts.made, 1)
     test.equal(counts.gave, 0)
-    test.equal(threads_now(), before + 3)
+    test.equal(threads_now(), before + DEFAULT_COUNT - 1)
 
     forward(model, 0, 0)
     test.equal(counts.sets, 1)
@@ -1955,7 +1963,7 @@ test.it(
     test.equal(counts.made, 1)
     test.equal(counts.gave, 0)
     test.equal(counts.sets, 1)
-    test.equal(threads_now(), before + 3)
+    test.equal(threads_now(), before + DEFAULT_COUNT - 1)
 
     model:close()
     restore()
@@ -1974,7 +1982,7 @@ test.it(
     test.equal(model:reserve("", 4), nil)
     test.equal(counts.made, 1)
     local after_build = threads_now()
-    test.equal(after_build, before + 3)
+    test.equal(after_build, before + DEFAULT_COUNT - 1)
 
     local got, line = model:pass(
       {

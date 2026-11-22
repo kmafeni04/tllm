@@ -356,7 +356,8 @@ local function built(
   vram?: integer,
   profile?: string,
   prefetch_value?: boolean,
-  sequences?: integer
+  sequences?: integer,
+  threads?: integer
 ): compute.Model
   local backend = compute.load(nil, false) as compute.Backend
   local model, failure = compute.model(
@@ -368,7 +369,8 @@ local function built(
     1,
     vram,
     profile,
-    prefetch_value
+    prefetch_value,
+    threads
   )
   test.equal(failure, nil)
   return model as compute.Model
@@ -996,7 +998,7 @@ needs_interface(
         local before_fd = descriptors()
         local before_rings = rings(1048576)
         local handle = weights.load(backing.path) as weights.Handle
-        local model = built(handle)
+        local model = built(handle, nil, nil, nil, nil, 1)
         test.truthy(model.read_ahead.depth >= 4)
         test.truthy(model.read_ahead.bytes >= largest_expert(handle))
         model:close()

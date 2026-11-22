@@ -1,6 +1,6 @@
 # 44: The thread count
 
-**Status**: pending   **Depends on**: 04, 43
+**Status**: done   **Depends on**: 04, 43
 
 ## Problem & context
 
@@ -43,6 +43,10 @@ chosen when a model is built and then fixed; nothing changes it under a running 
 local record cores
   -- the model's default thread count, from a /proc/cpuinfo text
   default: function(cpuinfo: string): integer
+  -- this machine's default thread count
+  machine: function(): integer
+  -- whether a count is one ggml can be given, 1 to 512
+  fits: function(count: number): boolean
 end
 
 local record compute
@@ -117,7 +121,7 @@ The `Config` record in `src/config.tl` gains `threads: integer | nil`. This snip
 - T-001 (FR-001, FR-003, FR-004, FR-005, FR-006): `the count reaches start from the file, the flag and the default`, proves with `04`'s `run`, an `environment` and a start function that a file naming `threads` 3 for the entry `m` reaches `start` with 3, that the same file and `--threads 5` reaches it with 5, that a file naming no `threads` reaches it with the count `cores.default` gives for this machine's `/proc/cpuinfo`, that a file naming `workers` 2 and no `threads` reaches it with that default divided by two, rounded down and at least 1, that a file naming `workers` one more than the default and no `threads` reaches it with 1, that `workers` 1 reaches it with the default itself, and that `cores.default` gives 2 for a text holding three distinct pairs, 3 for a text of four processors and no pair, and 1 for a text of one pair and for an empty text.
 - T-002 (FR-007, FR-010): `the count reaches the model and its graph planner`, proves on `18/T-001`'s fixture that `serve.build` on an endpoint with `threads` 3 returns a server whose `serve.model_of(server).generation.threads` is 3 and that an endpoint naming none gives the default; and that with the `ggml_backend_set_n_threads` entry `compute.load` resolves into the table it keeps beside the library replaced by a counting wrapper before `compute.model` is called, `compute.model(backend, handle, 32, nil, 1, nil, nil, nil, nil, 3)` exposes 3 and the first `pass` of it calls that wrapper once with 3 before that pass's first graph is computed, and a model built with no `threads` calls it with the default.
 - T-003 (FR-002, FR-006, FR-010): `a count outside one to 512 is refused`, proves that files naming `threads` `"8"`, 0, 1.5, -1 and 513 each return 1 with one stderr line holding `threads` and the file's path and call no start function, that `serve --threads 0`, `serve --threads 1.5`, `serve --threads 513` and `bench --threads 513` each return 1 with one stderr line holding `--threads`, and that `compute.model` given `threads` 0 and given 513 returns nil and one line holding `model` and `threads`.
-- T-004 (FR-008): `a worker decodes the count from its endpoint json`, proves on `28/T-001`'s fixture with a context path and `workers` 2 that `serve.build` on an endpoint with `threads` 2 gives two workers, that a second build on an endpoint whose `threads` is 4 gives two workers each holding exactly two more threads in its `/proc` status entry's `Threads` line than the workers of the 2 build, and that both servers' `stop` leaves no worker process behind.
+- T-004 (FR-008): `a worker decodes the count from its endpoint json`, proves on `28/T-001`'s fixture with a context path, `workers` 2 and `vram` 1, so that a worker's model is built on the CPU and holds a threadpool rather than copying its weights to the card as `43/FR-006` leaves it, that `serve.build` on an endpoint with `threads` 2 gives two workers, that a second build on an endpoint whose `threads` is 4 gives two workers each holding exactly two more threads in its `/proc` status entry's `Threads` line than the workers of the 2 build, and that both servers' `stop` leaves no worker process behind.
 
 ## Open questions
 
@@ -125,10 +129,4 @@ The `Config` record in `src/config.tl` gains `threads: integer | nil`. This snip
 
 ## Amendments
 
-- `02/FR-003`: both commands also accept `--threads N`, and the usage lines in its context gain it.
-- `04/FR-006`: `threads` joins the top-level keys a file may hold.
-- `04/FR-007`: a `threads` that is set and is not an integer from 1 to 512 is refused, checked after `prefetch`, with the one line naming `threads`.
-- `04/FR-011`: the endpoint also receives `threads`, the `--threads` value when given, then the file's value, then the default `44/FR-004` defines divided as `44/FR-005` says.
-- `29/FR-011`: bench's endpoint also receives `threads`, the flag's value, then the file's, then the default `44/FR-004` defines.
-- `43/FR-001`: the one threadpool is created with the model's `threads`, the configured or default count, not four; `T-001`'s `Threads` line expectation follows that count, gaining `n - 1` rather than three.
-- `43/FR-003`: the threadpool made for a replacement pool, and the backend it is set on, use the same count as the model's.
+- None.

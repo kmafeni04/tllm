@@ -129,6 +129,11 @@ local record Types
     make: ffi.CData
     give: ffi.CData
     set: ffi.CData
+    -- the registry's ggml_backend_set_n_threads, which the backend that plans
+    -- the model's graphs is told the pool's count through
+    set_n_threads: ffi.CData
+    -- the count the pool is made with: a model's own, nil before one is chosen
+    n_threads: integer | nil
     pool: ffi.CData | nil
   end
 

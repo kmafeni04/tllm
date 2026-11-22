@@ -1,6 +1,7 @@
 local fs = require("fs")
 local clock = require("tllm.clock")
 local compute = require("tllm.compute")
+local cores = require("tllm.cores")
 local serve = require("tllm.serve")
 local tokenizer = require("tllm.tokenizer")
 local tltp = require("tltp")
@@ -17,6 +18,7 @@ local record bench
     vram: integer | nil
     profile: string | nil
     prefetch: boolean | nil
+    threads: integer | nil
   end
 
   run: function(Settings, function(string), function(string)): integer
@@ -308,6 +310,7 @@ function bench.run(
       vram = settings.vram,
       profile = settings.profile,
       prefetch = settings.prefetch,
+      threads = settings.threads or cores.machine(),
     }
   )
   if server is nil then

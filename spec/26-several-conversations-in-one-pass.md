@@ -332,8 +332,8 @@ recorded numbers are unchanged, the sequence's positions being the geometry's `p
   `sequences` argument holds one sequence, so its `reserve("a", 1)` returns nil and a second
   `reserve("b", 1)` returns a line.
 - T-003 (FR-026): `a pass costs no more than its rows one by one`, proves on T-001's fixture that
-  each of three fresh pairs of models built with `sequences` 4, each pair reserving `"a"`, `"b"`,
-  `"c"` and `"d"` at 4 positions, times one pass of the four rows `{"a", 0, 0}`, `{"b", 0, 0}`,
+  each of three fresh pairs of models built with `sequences` 4 and `threads` 4, each pair reserving
+  `"a"`, `"b"`, `"c"` and `"d"` at 4 positions, times one pass of the four rows `{"a", 0, 0}`, `{"b", 0, 0}`,
   `{"c", 0, 0}` and `{"d", 0, 0}` on one model against four passes of one row each on the other,
   and that the sum of the three one-pass times is no longer than the sum of the three four-pass
   times, the times being the monotonic wall times `24/T-004` takes, after one throwaway pair has

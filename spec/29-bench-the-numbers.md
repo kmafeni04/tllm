@@ -201,7 +201,8 @@ refusal lines through the second, and hands back the exit code. The `generation`
   `host` is `127.0.0.1`, whose `port` is 8080, whose `ubatch` is the config file's `ubatch` or
   512 when it names none, and whose `vram` is the config file's `vram`, nil when it names none, and whose `profile` is
   the config file's `profile`, nil when it names none, and whose `prefetch` is the config file's
-  `prefetch`, nil when it names none, so
+  `prefetch`, nil when it names none, and whose `threads` is the `--threads` value when given, then
+  the config file's `threads`, then the default `44/FR-004` defines, so
   a bench run measures the tier a server would have, binds no socket, starts no worker process and
   creates no context directory.
   Not testable: `sessions`, `workers`, `context_path`, `context_bytes`, `host` and `port` exist

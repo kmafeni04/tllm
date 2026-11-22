@@ -27,8 +27,8 @@ prefill sends one sequence's chunk in one pass, so that path is reached, and a p
 old pool's threadpool is freed after its backend, and the grown pool makes its own. One pool per
 model and one graph at a time, which is `32`'s rule, so no two graphs ever share a pool.
 
-The pool is made at four threads, ggml's default, which is what a model gets today. Choosing a better
-number is `44`'s, and it is not decided here.
+The count the pool is made with is `44`'s: the configured or default number a model is given, not
+ggml's four.
 
 Reaching the calls takes care, because the library the engine holds does not export them. It is
 `ffi.load("target/tllm/libggml.so")`, and `ggml_threadpool_new`, `ggml_threadpool_free` and
@@ -61,14 +61,16 @@ speed on a real model.
 ## Functional requirements
 
 - FR-001 (US-001) WHEN a model whose weights are in host memory is built, THE SYSTEM SHALL create
-  one ggml threadpool of four threads and hold it with the model, so that building the model creates
-  exactly one and the passes it runs create none.
+  one ggml threadpool of the model's `threads`, the configured or default count `44` defines, and
+  hold it with the model, so that building the model creates exactly one and the passes it runs
+  create none.
 - FR-002 (US-001) WHEN a graph of that model's pass is computed, THE SYSTEM SHALL compute it on the
   CPU backend the model holds with that threadpool set on that backend before the first graph it
   computes, so that every graph of the model's passes runs on that pool's threads.
 - FR-003 (US-001) IF a pass holds more rows than the arena was measured at, THEN THE SYSTEM SHALL
-  replace the pool with one sized for that pass, freeing the threadpool the replaced pool held, so
-  that the model holds one threadpool after the replacement as it did before it.
+  replace the pool with one sized for that pass, freeing the threadpool the replaced pool held, the
+  replacement's threadpool and the backend it is set on using the same count as the model's, so that
+  the model holds one threadpool after the replacement as it did before it.
 - FR-004 (US-001) WHEN a model's `close` is called, THE SYSTEM SHALL free the threadpool it holds,
   after the CPU backend that held it, so that a closed model leaves no thread behind and a second
   `close` frees nothing further.
@@ -90,8 +92,7 @@ speed on a real model.
 - No pool for the maths handle of `11` or for a block handle built outside a model, whose arena
   `32/FR-006` gives it: each graph they compute keeps the threadpool ggml makes for it and frees
   after.
-- No thread count choice: the pool is four threads and nothing reads the machine's core count; `44`
-  decides the number.
+- No thread count choice here: the number is `44`'s.
 - No change to the routes, the sampler or `29`'s report lines, and no shared pool between worker
   processes: `28`'s workers each build a model and so each hold a pool of their own.
 
@@ -103,8 +104,8 @@ speed on a real model.
   `context_length` 32 by `compute.model(backend, handle, 32, nil)` makes one threadpool and frees
   none, that the first `forward(0, p)` sets that pool on the backend its graph is computed on, that
   twenty of them, p from 0 to 19 and 5 graphs each, make and free none more, and that the `Threads`
-  line of `/proc/self/status` is exactly three larger after the build than before it, four threads
-  being three workers, and the same after those twenty.
+  line of `/proc/self/status` is exactly `n - 1` larger after the build than before it, `n` being the
+  count `44/FR-004` gives this machine, and the same after those twenty.
 - T-002 (FR-003): `a wider pass takes a new pool and frees the old`, proves that with the same
   wrappers, on `15/T-002`'s mixed fixture built by `compute.model(backend, handle, 4, nil, 1)` with
   the sequence `""` reserved at 4 positions, a `pass` of that sequence's three rows at positions 0, 1

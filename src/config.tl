@@ -1,5 +1,6 @@
 local fs = require("fs")
 local compute = require("tllm.compute")
+local cores = require("tllm.cores")
 local tltp = require("tltp")
 
 local config = {}
@@ -26,6 +27,7 @@ local record Config
   vram: integer | nil
   profile: string | nil
   prefetch: boolean | nil
+  threads: integer | nil
 end
 
 local DEFAULT_CONTEXT_BYTES: integer = 1073741824
@@ -98,6 +100,7 @@ local function unknown_key(fields: Fields): string | nil
     vram = true,
     profile = true,
     prefetch = true,
+    threads = true,
   }
   local keys: {string} = {}
   for key in pairs(fields) do
@@ -340,6 +343,19 @@ local function parse(
     settings.prefetch = prefetch
   elseif not (prefetch is nil) then
     return fault("config " .. file_path .. ": prefetch must be a boolean")
+  end
+
+  local threads = fields.threads
+  local bad_threads = "config "
+    .. file_path
+    .. ": threads must be an integer from 1 to 512"
+  if threads is number then
+    if not cores.fits(threads) then
+      return fault(bad_threads)
+    end
+    settings.threads = threads as integer
+  elseif not (threads is nil) then
+    return fault(bad_threads)
   end
 
   local names: {string} = {}

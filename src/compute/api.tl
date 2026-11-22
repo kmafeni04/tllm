@@ -171,6 +171,7 @@ local record compute
     positions: integer
     sequences: integer
     ubatch: integer
+    threads: integer
     measure: Measure
     placement: Placement
     read_ahead: ReadAhead
@@ -210,7 +211,8 @@ local record compute
     ubatch?: integer,
     vram?: integer,
     profile?: string,
-    prefetch?: boolean
+    prefetch?: boolean,
+    threads?: integer
   ): Model | nil, string | nil
 end
 
