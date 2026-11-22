@@ -72,8 +72,8 @@ end
 ```
 
 The offsets are `34`'s: a matrix of a stacked tensor sits `index * (tensor.bytes / dims[3])` bytes
-into the tensor's own region, and `weights.Handle.mapping` is the address the file was mapped at, so
-a tensor's `data` says which position of the file the read asks for. A reaped read's bytes are
+into the tensor's own region, and `weights.Shard.mapping` is the address that file was mapped at, so
+a tensor's `data` says which position of that file the read asks for. A reaped read's bytes are
 whatever the file holds there; nothing here copies them into a graph, because the graph `34` serves
 reads the mapping and the kernel already has those pages.
 
@@ -104,10 +104,10 @@ reads the mapping and the kernel already has those pages.
   THE SYSTEM SHALL answer nil and one line naming the tensor and the index; IF the matrix holds more
   bytes than one buffer of the queue holds, THEN THE SYSTEM SHALL answer nil and one line naming the
   tensor, the index and both byte counts; IF the queue is shut, THEN THE SYSTEM SHALL answer nil and
-  one line saying the queue is closed, before it touches an entry; IF the handle's descriptor is
-  closed, THEN THE SYSTEM SHALL answer nil and one line saying the handle is released, as `34/FR-004`
-  refuses a released handle; IF the platform refuses the post, THEN THE SYSTEM SHALL shut the queue
-  and answer nil and one line naming the tensor, the index and the refused post.
+  one line saying the queue is closed, before it touches an entry; IF the tensor's shard's descriptor
+  is closed, THEN THE SYSTEM SHALL answer nil and one line saying the handle is released, as
+  `34/FR-004` refuses a released handle; IF the platform refuses the post, THEN THE SYSTEM SHALL shut
+  the queue and answer nil and one line naming the tensor, the index and the refused post.
 - FR-003 (US-001) WHEN `wait` is called, THE SYSTEM SHALL answer one row for each read handed over
   since the last `wait`, including each read FR-005 reaped inside a handover, and none for a read it
   already answered, in the order the reads were handed over, each row holding the tensor's name, the
@@ -183,8 +183,8 @@ reads the mapping and the kernel already has those pages.
   size it was given, that `submit` on a two-dimensional tensor and on an index past the end of a
   stacked tensor each answer nil and one line naming the tensor and the index, and that `submit` of a
   matrix of 8 bytes on a queue of depth 1 with 4 bytes per buffer answers nil and one line naming the
-  tensor, the index and both byte counts, and that `submit` of a matrix of a handle whose descriptor
-  the case closed answers nil and one line saying the handle is released.
+  tensor, the index and both byte counts, and that `submit` of a matrix of a tensor whose shard's
+  descriptor the case closed answers nil and one line saying the handle is released.
 - T-006 (FR-008): `an interface that cannot be set up takes nothing`, proves on a machine where
   `reads.offered` answers true, otherwise skipping with the line `no submission interface`, that
   `open` answers nil and one line saying so when the process's soft `RLIMIT_NOFILE` has been lowered
@@ -204,8 +204,8 @@ reads the mapping and the kernel already has those pages.
   answers a second `submit` nil and one line saying the reap was refused, with `pending` 1
   afterwards, the queue shut, and a `close` on it raising nothing.
 - T-009 (FR-004): `a handed-over read that fails names its tensor and its index`, proves on the same
-  machine that a queue of depth 1, handed one matrix of a handle whose descriptor was opened for
-  writing, so the platform refuses the read while the handle still answers, answers a row holding
+  machine that a queue of depth 1, handed one matrix of a tensor whose shard's descriptor was opened
+  for writing, so the platform refuses the read while the handle still answers, answers a row holding
   that tensor, its index, the bytes 0 and one line naming the tensor, the index and that 0.
 
 ## Open questions

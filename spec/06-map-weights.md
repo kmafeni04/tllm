@@ -13,8 +13,8 @@ have neither.
 
 This spec adds two modules and no command. `tllm.ggml` is the type table: one lookup from a ggml
 type code to the type's name, its block element count and its block byte size. `tllm.weights`
-opens a GGUF file, maps its bytes once, and returns a handle holding each tensor's pointer, shape
-and size. Nothing is dequantised, nothing is copied and no model family is involved.
+opens a GGUF file's shards, maps each file's bytes once, and returns a handle holding each tensor's
+pointer, shape and size. Nothing is dequantised, nothing is copied and no model family is involved.
 
 ```teal
 local record ggml
@@ -29,6 +29,15 @@ local record ggml
 end
 
 local record weights
+  record Shard
+    path: string
+    bytes: integer
+    alignment: integer
+    data_start: integer
+    mapping: integer
+    descriptor: integer
+  end
+
   record Tensor
     name: string
     dims: {integer}
@@ -36,18 +45,20 @@ local record weights
     elements: integer
     bytes: integer
     data: ffi.CData
+    shard: Shard
   end
 
   record Handle
     path: string
-    alignment: integer
-    data_start: integer
+    shards: {Shard}
     tensors: {string: Tensor}
     mappers: integer
     release: function(Handle): string | nil
   end
 
-  load: function(path: string, info?: gguf.Info): Handle | nil, string | nil
+  load: function(
+    path: string, info?: gguf.Info, extra?: {string}
+  ): Handle | nil, string | nil
 end
 ```
 
@@ -106,21 +117,23 @@ file read-only through POSIX `mmap` using the `ffi` that `05` already imports. M
 file rather than each tensor's region is the only choice that costs one call: `mmap` refuses an
 offset that is not a page boundary, and a tensor offset is only aligned to `general.alignment`.
 The mapping is the reason the handle exists: a 16-gigabyte model costs no heap, the kernel reads a
-tensor's pages when the engine first touches them, and one `release` gives the file back. Nothing
-is copied, so the pointer a tensor hands out stays valid until `release` and never after. The
-descriptor `mmap` needs stays open on the handle, on the failing path closed before `load`
-returns, so the handle holds the mapping and that one descriptor, which is what `US-004` asks: a
-`release` leaves nothing behind. `34` reads whole matrices through that descriptor.
+tensor's pages when the engine first touches them, and one `release` gives the files back. Nothing
+is copied, so the pointer a tensor hands out stays valid until `release` and never after. Each
+file's descriptor that `mmap` needs stays open on that file's `shards` entry, on the failing path
+closed before `load` returns, so the shards hold their mappings and their descriptors, which is what
+`US-004` asks: a `release` leaves nothing behind. `34` reads whole matrices through the descriptor of
+the shard that states the tensor.
 
 `05` stops at the end of the tensor table and, as amended by this spec, exposes that position as
-`table_end`. The loader needs it to compute `data_start`: the first byte of tensor data is the
-table's end rounded up to the next multiple of the alignment the file states, or 32 when it states
-none, which is ggml's default.
+`table_end`. The loader needs it to compute a file's `data_start`: the first byte of its tensor data
+is that file's table's end rounded up to the next multiple of the alignment that file states, or 32
+when it states none, which is ggml's default.
 
 The refusals are ordered as `05` orders its own: a file the reader refuses fails there, then the
 alignment before any tensor, then the tensors in file order. A tensor is refused when its bytes
 cannot be read: its type code is not in the table, its first dimension is not a multiple of the
-block, its data would run past the file's last byte, or another tensor info already took its name.
+block, its data would run past the last byte of the file that states it, or another tensor info in
+a file already loaded took its name.
 A tensor with no dimensions counts as one dimension of 1, as `05` counts it when summing
 `parameters`.
 
@@ -132,42 +145,42 @@ table is checked against the rows above.
 - US-001 (P1) As the engine author, I want to ask what a ggml type code means, so that the loader and a later forward pass agree on a tensor's shape from the same table.
 - US-002 (P1) As the engine author, I want one call that turns a GGUF file's tensor table into pointers and sizes, so that the model's weights are in reach without copying the file.
 - US-003 (P1) As a person with a model whose tensors do not fit its header, I want one line naming the tensor at fault, so that I can tell a damaged file from a broken loader.
-- US-004 (P2) As the engine author, I want to hand the file's bytes back when a model is dropped, so that a load leaves nothing behind.
+- US-004 (P2) As the engine author, I want to hand the files' bytes back when a model is dropped, so that a load leaves nothing behind.
 
 ## Functional requirements
 
 - FR-001 (US-001) THE SYSTEM SHALL return, for each type code the table in this document lists, a record whose `code` is that code and whose `name`, `block_elements` and `block_bytes` are the name, block element count and block byte size the table states.
 - FR-002 (US-001) IF `type_of` is called with a type code the table does not list, THEN THE SYSTEM SHALL return nil.
-- FR-003 (US-002) WHEN `weights.load(path)` is called on a file whose header `gguf.read` accepts, THE SYSTEM SHALL return a handle whose `path` is the path passed to `load` and whose `tensors` holds one entry per tensor info in the file keyed by the info's name, each entry holding `name`, `dims` and `kind`, the type table entry for the info's type code.
-- FR-004 (US-002) THE SYSTEM SHALL set `alignment` to the scalar of the metadata entry `general.alignment` when the file states that key and to 32 when it does not, and `data_start` to the smallest position at or after the record's `table_end` that is a multiple of `alignment`.
-- FR-005 (US-002) THE SYSTEM SHALL give each tensor a `data` field pointing at the file's byte `data_start` plus the tensor's offset bytes into the file.
+- FR-003 (US-002) WHEN `weights.load(path)` is called on a file whose header `gguf.read` accepts, THE SYSTEM SHALL return a handle whose `path` is the path passed to `load`, whose `shards` holds one entry per file loaded with that file's path, size, alignment and data start, and whose `tensors` holds one entry per tensor info in every loaded file keyed by the info's name, each entry holding `name`, `dims`, `kind`, the type table entry for the info's type code, and `shard`, the `shards` entry of the file that states it.
+- FR-004 (US-002) THE SYSTEM SHALL set each shard's `alignment` to the scalar of that file's metadata entry `general.alignment` when the file states that key and to 32 when it does not, and its `data_start` to the smallest position at or after that file's `table_end` that is a multiple of that file's `alignment`.
+- FR-005 (US-002) THE SYSTEM SHALL give each tensor a `data` field pointing at its own shard's byte `data_start` plus the tensor's offset bytes into that shard.
 - FR-006 (US-002) THE SYSTEM SHALL set a tensor's `elements` to the product of its dimensions, a tensor with no dimensions holding 1, and its `bytes` to the tensor's first dimension, or 1 when it has none, divided by the block element count, multiplied by the block byte size and by the product of the remaining dimensions, that product being 1 when there are none.
-- FR-007 (US-004) WHEN the handle's `release` is called and nothing holds the handle, THE SYSTEM SHALL unmap the file's bytes so that they no longer appear in the process's mappings, and a second call on the same handle SHALL return without unmapping again.
-- FR-014 (US-004) IF the handle is still held when `release` is called, THEN THE SYSTEM SHALL leave the mapping alone and return one line saying how many holders remain, because every tensor pointer would dangle.
+- FR-007 (US-004) WHEN the handle's `release` is called and nothing holds the handle, THE SYSTEM SHALL unmap every shard's bytes so that none appears in the process's mappings, and a second call on the same handle SHALL return without unmapping again.
+- FR-014 (US-004) IF the handle is still held when `release` is called, THEN THE SYSTEM SHALL leave the mappings alone and return one line saying how many holders remain, because every tensor pointer would dangle.
 - FR-015 (US-004) THE SYSTEM SHALL count a holder with `weights.attach` and give the count back with `weights.detach`, so a record over the mapping can say when it is done with it.
 - FR-008 (US-003) IF `gguf.read` returns a failure for the path, THEN THE SYSTEM SHALL return nil and that line unchanged; WHEN a `gguf.Info` the caller already read is supplied, THE SYSTEM SHALL read the metadata from it and not read the file again, so a build that loads the weights and the vocabulary walks the file's metadata once.
 - FR-009 (US-003) IF `general.alignment` is present and its entry has no `scalar`, or its `scalar` is less than 1 or is not a whole number, THEN THE SYSTEM SHALL return nil and one line naming that key.
-- FR-010 (US-003) IF a tensor info's type code is not in the type table, or its first dimension, or 1 when it has no dimensions, is not a multiple of that type's block element count, or its data would end past the file's last byte, or two tensor infos share a name, THEN THE SYSTEM SHALL return nil and one line naming the tensor, and the type code when the type code is at fault.
-- FR-011 (US-003) IF the file cannot be opened for mapping, or the mapping fails, THEN THE SYSTEM SHALL return nil and one line naming the path, leaving no descriptor open.
+- FR-010 (US-003) IF a tensor info's type code is not in the type table, or its first dimension, or 1 when it has no dimensions, is not a multiple of that type's block element count, or its data would end past the last byte of the file that states it, or two tensor infos across the files loaded share a name, THEN THE SYSTEM SHALL return nil and one line naming the tensor, the file that states it, and the type code when the type code is at fault.
+- FR-011 (US-003) IF the file cannot be opened for mapping, or the mapping fails, THEN THE SYSTEM SHALL return nil and one line naming the path, leaving no descriptor open; a load of several files SHALL unmap and close every file it mapped before the refused one, so a refused load leaves no mapping and no descriptor behind.
   Not testable: forcing `open` or `mmap` to fail needs a descriptor limit the suite cannot set
-  portably; the branch returns nil and one line holding the path and closes the descriptor, which a
-  reader confirms by inspection.
+  portably; that the shards mapped before a later refusal are given back is proved by `41/T-002`,
+  and the failing branch itself a reader confirms by inspection.
 - FR-012 (US-003) IF more than one refusal applies to a file the reader accepts, THEN THE SYSTEM SHALL report the alignment before a tensor, and the first tensor in file order when several tensors are at fault.
-- FR-013 (US-004) WHEN the mapping succeeds, THE SYSTEM SHALL keep the descriptor `load` opened for it on the handle, and the handle's `release` SHALL close it as it unmaps the file.
+- FR-013 (US-004) WHEN each mapping succeeds, THE SYSTEM SHALL keep the descriptor `load` opened for it in that file's `shards` entry, and the handle's `release` SHALL close every one as it unmaps the file.
 
 ## Non-goals
 
 - No dequantisation and no forward pass: a tensor's bytes stay as stored, no type is decoded to floats, and no model family, layer or plugin is named.
 - No bench: `bench` loads no model, and `serve` maps the model through `weights.load` under `08`.
-- No copy and no shard: nothing is read into a buffer, nothing is cached, the mapping is read-only, and a model split across several files is loaded one file at a time.
+- No copy and no shard: nothing is read into a buffer, nothing is cached, and the mapping is read-only.
 
 ## Tests
 
 - T-001 (FR-001): the pin is `24/T-001`'s cost case, which asserts that a stated shape costs 272
   bytes as q8_0 and 144 as q4_0, so a block shape that drifted from ggml's own fails there and no
   case here repeats the table.
-- T-003 (FR-003, FR-005, FR-006): `tensors come back by name with their bytes`, proves on a fixture holding an f32 tensor of dimensions 2 and 3, a q4_0 tensor of dimensions 64 and 2 and an f32 tensor with no dimensions, with the data written at aligned offsets, that `path` is the fixture's path, that `tensors` holds exactly those three names, that each `dims` and `kind.name` is as the file states, that `elements` and `bytes` are 6 and 24 for the first, 128 and 72 for the second and 1 and 4 for the third, and that reading `bytes` from each `data` gives that tensor's bytes.
-- T-004 (FR-004): `alignment and the data start come from the file`, proves a fixture stating `general.alignment` 64 returns `alignment` 64 and a `data_start` at or after the `table_end` that `gguf.read` gives for it, a multiple of 64 and less than that `table_end` plus 64, and that the same tensor table with no `general.alignment` returns `alignment` 32 and a `data_start` at or after its `table_end`, a multiple of 32 and less than that `table_end` plus 32.
+- T-003 (FR-003, FR-005, FR-006): `tensors come back by name with their bytes`, proves on a fixture holding an f32 tensor of dimensions 2 and 3, a q4_0 tensor of dimensions 64 and 2 and an f32 tensor with no dimensions, with the data written at aligned offsets, that `path` is the fixture's path, that `shards` holds one entry for it, that `tensors` holds exactly those three names, that each `dims` and `kind.name` is as the file states, that `elements` and `bytes` are 6 and 24 for the first, 128 and 72 for the second and 1 and 4 for the third, that each tensor's `shard` is that entry, and that reading `bytes` from each `data` gives that tensor's bytes.
+- T-004 (FR-004): `alignment and the data start come from the file`, proves a fixture stating `general.alignment` 64 returns a shard whose `alignment` is 64 and whose `data_start` is at or after the `table_end` that `gguf.read` gives for it, a multiple of 64 and less than that `table_end` plus 64, and that the same tensor table with no `general.alignment` returns a shard whose `alignment` is 32 and whose `data_start` is at or after its `table_end`, a multiple of 32 and less than that `table_end` plus 32.
 - T-005 (FR-007, FR-013): `release unmaps the file`, proves the fixture's path appears in `/proc/self/maps` after `load`, no longer appears after `release`, and that a second `release` returns with the path still absent. What the process holds of `/proc/self/fd` across `load` and `release` is `34/T-006`'s.
 - T-006 (FR-008): `a file the reader refuses is refused with its line`, proves a path that does not exist and a file whose first four bytes are `GGML` each return nil and one line holding the path.
 - T-007 (FR-009, FR-012): `an alignment that is not a positive integer is refused`, proves `general.alignment` as a string, as 0 and as 64.5 each return nil and one line holding `general.alignment`, and that a fixture stating `general.alignment` 0 with a tensor of type 4 returns the alignment line, not the tensor line.

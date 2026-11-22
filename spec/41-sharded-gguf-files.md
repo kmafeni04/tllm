@@ -1,6 +1,6 @@
 # 41: Sharded GGUF files
 
-**Status**: pending   **Depends on**: 05, 06, 34, 37
+**Status**: done   **Depends on**: 05, 06, 34, 37
 
 ## Problem & context
 
@@ -111,14 +111,4 @@ alignment before its tensors, and its tensors in file order.
 
 ## Amendments
 
-- `06/FR-003`: the handle also holds `shards`, one entry per file loaded, each tensor also holds `shard`, the entry of the file that states it, and `weights.load` takes a third, optional `extra: {string}` of files to merge; `06`'s non-goal that a split model is loaded one file at a time is removed.
-- `06/FR-004`: the alignment and data start are each shard's own, from that shard's `general.alignment` or 32 and its own `table_end`, one pair per `shards` entry, and the handle holds neither.
-- `06/FR-005`: a tensor's `data` points into its own shard at that shard's data start plus the tensor's offset.
-- `06/FR-007`: `release` unmaps every shard's bytes, not one file's.
-- `06/FR-010`: the past-the-end check is against the tensor's own shard and its line names that file, and the duplicate-name check spans every loaded file.
-- `06/FR-011`: for a split, a shard that cannot be opened or mapped unmaps and closes every shard the load already mapped before it answers nil.
-- `06/FR-013`: each shard's descriptor is kept in its `shards` entry and `release` closes every one.
-- `34/FR-001`: the read is at that matrix's offset in the tensor's shard, through that shard's descriptor.
-- `34/FR-004`: a closed shard descriptor is refused as a released handle is.
-- `34/FR-005`: `release` closes every shard's descriptor once; `34/T-006`'s descriptor count becomes one per shard.
-- `37/FR-002`: the position and the descriptor are the tensor's shard's, and a closed shard descriptor is what "released" means; the `Handle.mapping` its Problem & context names is the tensor's shard's mapping.
+- None.

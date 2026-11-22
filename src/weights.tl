@@ -16,6 +16,18 @@ void free(void *ptr);
 )
 
 local record weights
+  record Shard
+    path: string
+    bytes: integer
+    alignment: integer
+    data_start: integer
+    -- the address the file was mapped at, 0 once given back, so a tensor
+    -- pointer is a position in the file, and the descriptor whole-matrix
+    -- reads go through, -1 once given back
+    mapping: integer
+    descriptor: integer
+  end
+
   record Tensor
     name: string
     dims: {integer}
@@ -23,17 +35,13 @@ local record weights
     elements: integer
     bytes: integer
     data: ffi.CData
+    shard: Shard
   end
 
   record Handle
     path: string
-    alignment: integer
-    data_start: integer
+    shards: {Shard}
     tensors: {string: Tensor}
-    -- the mapping's address, so a tensor pointer is a position in the file,
-    -- and the descriptor the whole-matrix reads go through: -1 once released
-    mapping: integer
-    descriptor: integer
     -- the matrices this handle has read whole, by tensor name then index
     read_matrices: {string: {integer: boolean}}
     buffer: ffi.CData | nil
@@ -42,12 +50,15 @@ local record weights
     release: function(Handle): string | nil
   end
 
-  load: function(path: string, info?: gguf.Info): Handle | nil, string | nil
+  load: function(
+    path: string, info?: gguf.Info, extra?: {string}
+  ): Handle | nil, string | nil
   attach: function(Handle)
   detach: function(Handle)
   read: function(Handle, Tensor, index: integer): boolean | nil, string | nil
 end
 
+local type Shard = weights.Shard
 local type Tensor = weights.Tensor
 local type Handle = weights.Handle
 
@@ -63,8 +74,6 @@ local record LibC
   free: function(ffi.CData)
 end
 
-local C = ffi.C as LibC
-
 local record Planned
   info: gguf.Tensor
   kind: ggml.Type
@@ -72,7 +81,11 @@ local record Planned
   bytes: integer
 end
 
+local C = ffi.C as LibC
+
 local ALIGNMENT_KEY = "general.alignment"
+local SPLIT_COUNT = "split.count"
+local SPLIT_NO = "split.no"
 local DEFAULT_ALIGNMENT = 32
 local PROT_READ = 1
 local MAP_PRIVATE = 2
@@ -98,6 +111,90 @@ local function alignment_of(info: gguf.Info): integer | nil, string | nil
     return nil, ALIGNMENT_KEY .. ": not a positive integer"
   end
   return scalar as integer
+end
+
+-- the whole number a file states for `key`: nil with no line when it states
+-- none, and the refusal when it states something else
+local function stated(info: gguf.Info, key: string): integer | nil, string | nil
+  local entry: gguf.Value | nil = info.metadata[key]
+  if entry is nil then
+    return nil
+  end
+  local scalar = entry.scalar
+  if scalar is nil or scalar % 1 ~= 0 then
+    return nil, key .. " is not a whole number"
+  end
+  return scalar as integer
+end
+
+local function five(value: integer): string
+  return string.format("%05d", value)
+end
+
+-- the path before a shard's `-NNNNN-of-MMMMM.gguf` name, or nil when this
+-- path is not the first shard of a split of that count
+local function stem_of(path: string, count: integer): string | nil
+  local stem, digits = path:match("^(.*)%-00001%-of%-(%d+)%.gguf$")
+  if not (stem is string) or not (digits is string) then
+    return nil
+  end
+  if digits ~= five(count) then
+    return nil
+  end
+  return stem
+end
+
+local function give_back(shard: Shard)
+  if shard.mapping == 0 then
+    return
+  end
+  C.munmap(ffi.cast("void *", shard.mapping) as ffi.CData, shard.bytes)
+  if shard.descriptor ~= RELEASED then
+    C.close(shard.descriptor)
+  end
+  shard.mapping = 0
+  shard.descriptor = RELEASED
+end
+
+-- the refusal of a shard's split keys against the index and count its name
+-- carries, or nil when they agree
+local function shard_keys(
+  header: gguf.Info,
+  file_path: string,
+  expected_no: integer,
+  expected_count: integer
+): string | nil
+  local count, count_failure = stated(header, SPLIT_COUNT)
+  if not (count_failure is nil) then
+    return file_path .. ": " .. count_failure
+  end
+  if count is nil then
+    return file_path
+      .. ": does not state split.count "
+      .. tostring(expected_count)
+  end
+  if count ~= expected_count then
+    return file_path
+      .. ": split.count "
+      .. tostring(count)
+      .. ", the name gives "
+      .. tostring(expected_count)
+  end
+  local split_no, no_failure = stated(header, SPLIT_NO)
+  if not (no_failure is nil) then
+    return file_path .. ": " .. no_failure
+  end
+  if split_no is nil then
+    return file_path .. ": does not state split.no " .. tostring(expected_no)
+  end
+  if split_no ~= expected_no then
+    return file_path
+      .. ": split.no "
+      .. tostring(split_no)
+      .. ", the name gives "
+      .. tostring(expected_no)
+  end
+  return nil
 end
 
 local function plan(
@@ -132,75 +229,182 @@ local function plan(
 end
 
 function weights.load(
-  path: string, given_info?: gguf.Info
+  path: string, given_info?: gguf.Info, extra?: {string}
 ): Handle | nil, string | nil
-  local info: gguf.Info
-  if given_info is nil then
-    local read, read_failure = gguf.read(path)
+  local shards: {Shard} = {}
+  local tensors: {string: Tensor} = {}
+  local names: {string: boolean} = {}
+  local loaded: {string: boolean} = {}
+
+  -- maps one file's bytes and plans its tensors; the caller checks its split
+  -- keys
+  local function add_file(
+    file_path: string, header: gguf.Info
+  ): boolean | nil, string | nil
+    local alignment, alignment_failure = alignment_of(header)
+    if alignment is nil then
+      return nil, file_path .. ": " .. (alignment_failure as string)
+    end
+    local data_start = rounded_up(header.table_end, alignment)
+    local size = header.bytes
+
+    local planned: {Planned} = {}
+    for _, tensor in ipairs(header.tensors) do
+      local kind = ggml.type_of(tensor.type_code)
+      if kind is nil then
+        return nil,
+          fault(file_path, tensor.name)
+            .. ": type code "
+            .. tostring(tensor.type_code)
+            .. " is not supported"
+      end
+      if names[tensor.name] then
+        return nil, fault(file_path, tensor.name) .. ": duplicate name"
+      end
+      names[tensor.name] = true
+
+      local entry, plan_failure = plan(file_path, tensor, kind)
+      if entry is nil then
+        return nil, plan_failure
+      end
+      if data_start + tensor.offset + entry.bytes > size then
+        return nil,
+          fault(file_path, tensor.name)
+            .. ": data runs past the end of the file"
+      end
+      planned[#planned + 1] = entry
+    end
+
+    local descriptor = C.open(file_path, O_RDONLY)
+    if descriptor < 0 then
+      return nil, file_path .. ": cannot be opened for mapping"
+    end
+    local mapping = C.mmap(nil, size, PROT_READ, MAP_PRIVATE, descriptor, 0)
+    if mapping == MAP_FAILED then
+      C.close(descriptor)
+      return nil, file_path .. ": cannot be mapped"
+    end
+
+    local shard: Shard = {
+      path = file_path,
+      bytes = size,
+      alignment = alignment,
+      data_start = data_start,
+      mapping = ffi.cast("intptr_t", mapping) as integer,
+      descriptor = descriptor,
+    }
+    shards[#shards + 1] = shard
+    loaded[file_path] = true
+
+    local base = shard.mapping
+    for _, entry in ipairs(planned) do
+      tensors[entry.info.name] = {
+        name = entry.info.name,
+        dims = entry.info.dims,
+        kind = entry.kind,
+        elements = entry.elements,
+        bytes = entry.bytes,
+        data = ffi.cast("void *", base + data_start + entry.info.offset)
+          as ffi.CData,
+        shard = shard,
+      }
+    end
+    return true
+  end
+
+  -- one sibling, read and checked against the index and count its name carries
+  local function add_sibling(
+    stem: string, index: integer, count: integer
+  ): boolean | nil, string | nil
+    local sibling = stem
+      .. "-"
+      .. five(index + 1)
+      .. "-of-"
+      .. five(count)
+      .. ".gguf"
+    if loaded[sibling] then
+      return true
+    end
+    local read, read_failure = gguf.read(sibling)
     if read is nil then
       return nil, read_failure
     end
-    info = read
-  else
-    info = given_info
+    local refusal = shard_keys(read, sibling, index, count)
+    if not (refusal is nil) then
+      return nil, refusal
+    end
+    return add_file(sibling, read)
   end
 
-  local alignment, alignment_failure = alignment_of(info)
-  if alignment is nil then
-    return nil, path .. ": " .. (alignment_failure as string)
-  end
-  local data_start = rounded_up(info.table_end, alignment)
-  local size = info.bytes
+  -- adds a path's file and, when it states a split count above 1, its siblings
+  local function add_group(
+    file_path: string, info?: gguf.Info
+  ): boolean | nil, string | nil
+    if loaded[file_path] then
+      return true
+    end
+    local header = info
+    if header is nil then
+      local read, read_failure = gguf.read(file_path)
+      if read is nil then
+        return nil, read_failure
+      end
+      header = read
+    end
 
-  local planned: {Planned} = {}
-  local seen: {string: boolean} = {}
-  for _, tensor in ipairs(info.tensors) do
-    local kind = ggml.type_of(tensor.type_code)
-    if kind is nil then
+    local count, count_failure = stated(header, SPLIT_COUNT)
+    if not (count_failure is nil) then
+      return nil, file_path .. ": " .. count_failure
+    end
+    if count is nil or count < 2 then
+      return add_file(file_path, header)
+    end
+
+    local stem = stem_of(file_path, count)
+    if stem is nil then
       return nil,
-        fault(path, tensor.name)
-          .. ": type code "
-          .. tostring(tensor.type_code)
-          .. " is not supported"
+        file_path
+          .. ": the name does not end -00001-of-"
+          .. five(count)
+          .. ".gguf"
     end
-    if seen[tensor.name] then
-      return nil, fault(path, tensor.name) .. ": duplicate name"
+    local refused = shard_keys(header, file_path, 0, count)
+    if not (refused is nil) then
+      return nil, refused
     end
-    seen[tensor.name] = true
-
-    local entry, plan_failure = plan(path, tensor, kind)
-    if entry is nil then
-      return nil, plan_failure
+    local added, failure = add_file(file_path, header)
+    if added is nil then
+      return nil, failure
     end
-    if data_start + tensor.offset + entry.bytes > size then
-      return nil,
-        fault(path, tensor.name) .. ": data runs past the end of the file"
+    for index = 1, count - 1 do
+      local ok, line = add_sibling(stem, index, count)
+      if ok is nil then
+        return nil, line
+      end
     end
-    planned[#planned + 1] = entry
+    return true
   end
 
-  local descriptor = C.open(path, O_RDONLY)
-  if descriptor < 0 then
-    return nil, path .. ": cannot be opened for mapping"
-  end
-  local mapping = C.mmap(nil, size, PROT_READ, MAP_PRIVATE, descriptor, 0)
-  if mapping == MAP_FAILED then
-    C.close(descriptor)
-    return nil, path .. ": cannot be mapped"
+  local function give_all_back()
+    for _, shard in ipairs(shards) do
+      give_back(shard)
+    end
   end
 
-  local base = ffi.cast("intptr_t", mapping) as integer
-  local tensors: {string: Tensor} = {}
-  for _, entry in ipairs(planned) do
-    tensors[entry.info.name] = {
-      name = entry.info.name,
-      dims = entry.info.dims,
-      kind = entry.kind,
-      elements = entry.elements,
-      bytes = entry.bytes,
-      data = ffi.cast("void *", base + data_start + entry.info.offset)
-        as ffi.CData,
-    }
+  local added, failure = add_group(path, given_info)
+  if added is nil then
+    give_all_back()
+    return nil, failure
+  end
+
+  if not (extra is nil) then
+    for _, other in ipairs(extra) do
+      local ok, line = add_group(other)
+      if ok is nil then
+        give_all_back()
+        return nil, line
+      end
+    end
   end
 
   local released = false
@@ -208,14 +412,14 @@ function weights.load(
     if released then
       return nil
     end
-    -- the tensors point into the mapping, so it outlives every holder
+    -- the tensors point into the mappings, so they outlive every holder
     if handle.mappers > 0 then
       return "release: " .. handle.mappers .. " still use it"
     end
     released = true
-    C.munmap(mapping, size)
-    C.close(handle.descriptor)
-    handle.descriptor = RELEASED
+    for _, shard in ipairs(handle.shards) do
+      give_back(shard)
+    end
     if handle.buffer ~= nil then
       C.free(handle.buffer as ffi.CData)
       handle.buffer = nil
@@ -226,11 +430,8 @@ function weights.load(
 
   return {
     path = path,
-    alignment = alignment,
-    data_start = data_start,
+    shards = shards,
     tensors = tensors,
-    mapping = ffi.cast("intptr_t", mapping) as integer,
-    descriptor = descriptor,
     read_matrices = {},
     buffer = nil,
     buffer_bytes = 0,
@@ -267,13 +468,14 @@ end
 function weights.read(
   handle: Handle, tensor: Tensor, index: integer
 ): boolean | nil, string | nil
+  local shard = tensor.shard
   local each, why = matrix_of(tensor, index)
   if each is nil then
-    return nil, fault(handle.path, tensor.name) .. ": " .. (why as string)
+    return nil, fault(shard.path, tensor.name) .. ": " .. (why as string)
   end
   local bytes = each as integer
-  if handle.descriptor == RELEASED then
-    return nil, fault(handle.path, tensor.name) .. ": the handle is released"
+  if shard.descriptor == RELEASED then
+    return nil, fault(shard.path, tensor.name) .. ": the handle is released"
   end
 
   local seen = handle.read_matrices[tensor.name]
@@ -285,7 +487,7 @@ function weights.read(
     local grown = C.realloc(handle.buffer, bytes)
     if grown is nil then
       return nil,
-        fault(handle.path, tensor.name)
+        fault(shard.path, tensor.name)
           .. ": no room for a matrix of "
           .. tostring(bytes)
           .. " bytes"
@@ -296,13 +498,13 @@ function weights.read(
 
   local position = (
     ffi.cast("intptr_t", tensor.data) as integer
-  ) - handle.mapping + index * bytes
+  ) - shard.mapping + index * bytes
   local moved = C.pread(
-    handle.descriptor, handle.buffer as ffi.CData, bytes, position
+    shard.descriptor, handle.buffer as ffi.CData, bytes, position
   )
   if moved < bytes then
     return nil,
-      fault(handle.path, tensor.name)
+      fault(shard.path, tensor.name)
         .. ": matrix "
         .. tostring(index)
         .. " holds "

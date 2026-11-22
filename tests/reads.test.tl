@@ -152,8 +152,8 @@ end
 
 local function address_space(): integer
   local contents = fs.read("/proc/self/statm") as string
-  local field = contents:match("^(%d+)") as string
-  return (tonumber(field) as integer) * PAGE_BYTES
+  local digits = contents:match("^(%d+)") as string
+  return (tonumber(digits) as integer) * PAGE_BYTES
 end
 
 local function limits_of(resource: integer): Limit
@@ -378,10 +378,9 @@ needs_interface(
     reads.close(narrow)
 
     local released = load_file(file_path)
-    C.close(released.descriptor)
-    local gone, gone_line = reads.submit(
-      queue, released, released.tensors[STACKED], 0
-    )
+    local released_stack = released.tensors[STACKED] as weights.Tensor
+    C.close(released_stack.shard.descriptor)
+    local gone, gone_line = reads.submit(queue, released, released_stack, 0)
     test.equal(gone, nil)
     test.includes(gone_line as string, "released")
     test.includes(gone_line as string, STACKED)
@@ -493,8 +492,8 @@ needs_interface(
     local handle = load_file(file_path)
     local stack = stack_of(handle)
     -- a descriptor the platform refuses to read while fcntl still answers
-    C.close(handle.descriptor)
-    handle.descriptor = C.open(file_path, 1)
+    C.close(stack.shard.descriptor)
+    stack.shard.descriptor = C.open(file_path, 1)
     local queue = opened(1, each)
 
     test.equal(reads.submit(queue, handle, stack, 1), true)
@@ -510,8 +509,8 @@ needs_interface(
     test.includes(fault, "read 0")
     test.equal(queue.pending, 0)
 
-    C.close(handle.descriptor)
-    handle.descriptor = -1
+    C.close(stack.shard.descriptor)
+    stack.shard.descriptor = -1
     reads.close(queue)
     handle.release(handle)
   end

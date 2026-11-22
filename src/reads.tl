@@ -447,20 +447,21 @@ function reads.open(depth: integer, bytes: integer): Queue | nil, string | nil
 end
 
 function reads.submit(
-  queue: Queue, handle: Handle, tensor: Tensor, index: integer
+  queue: Queue, _: Handle, tensor: Tensor, index: integer
 ): boolean | nil, string | nil
   if queue.shut then
     return nil, CLOSED
   end
+  local shard = tensor.shard
   local each, why = matrix_of(tensor, index)
   if each is nil then
-    return nil, line_of(handle.path, tensor.name, index, why as string)
+    return nil, line_of(shard.path, tensor.name, index, why as string)
   end
   local count = each as integer
   if count > queue.bytes then
     return nil,
       line_of(
-        handle.path,
+        shard.path,
         tensor.name,
         index,
         "holds "
@@ -469,11 +470,9 @@ function reads.submit(
           .. tostring(queue.bytes)
       )
   end
-  if
-    handle.descriptor == RELEASED or C.fcntl(handle.descriptor, F_GETFD) < 0
-  then
+  if shard.descriptor == RELEASED or C.fcntl(shard.descriptor, F_GETFD) < 0 then
     return nil,
-      line_of(handle.path, tensor.name, index, "the handle is released")
+      line_of(shard.path, tensor.name, index, "the handle is released")
   end
 
   local slot, refused = free_slot(queue)
@@ -485,20 +484,20 @@ function reads.submit(
   queue.next = tag + 1
   local position = (
     ffi.cast("intptr_t", tensor.data) as integer
-  ) - handle.mapping + index * count
-  local answer = post(queue, slot, tag, handle.descriptor, position, count)
+  ) - shard.mapping + index * count
+  local answer = post(queue, slot, tag, shard.descriptor, position, count)
   if answer < 1 then
     shut(queue, answer)
     queue.free[#queue.free + 1] = slot
     return nil,
-      line_of(handle.path, tensor.name, index, "the platform refused the post")
+      line_of(shard.path, tensor.name, index, "the platform refused the post")
   end
 
   queue.held[tag] = {
     slot = slot,
     tensor = tensor.name,
     index = index,
-    path = handle.path,
+    path = shard.path,
     wanted = count,
     landed = nil,
     fault = nil,
