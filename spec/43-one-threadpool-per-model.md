@@ -1,6 +1,6 @@
 # 43: One threadpool per model, not one per graph
 
-**Status**: pending   **Depends on**: 11, 15, 16, 21, 32, 33
+**Status**: done   **Depends on**: 11, 15, 16, 21, 32, 33
 
 ## Problem & context
 
@@ -80,9 +80,10 @@ speed on a real model.
 - FR-006 (US-003) WHEN a model's weights are in device memory or its placement marks at least one
   tensor, THE SYSTEM SHALL hold no threadpool and compute every graph of its passes on the device
   backend.
-  Not testable: the case needs a CUDA device, and the suite's device cases skip on a machine
-  without one, as this machine has none; a reader confirms that only the host path of
-  `pool_backend` makes a pool.
+  Not testable: nothing a model publishes reports a threadpool, and only a model's host arena is
+  handed the entries that make one; a reader confirms that `on_the_cpu` is the one place they enter
+  `compute.model` and that `pass_arena` only carries the entries of the arena it replaces, so a
+  model whose weights are in device memory, or whose placement marks a tensor, holds none.
 
 ## Non-goals
 
@@ -99,11 +100,11 @@ speed on a real model.
 - T-001 (FR-001, FR-002): `a model makes one threadpool and keeps it`, proves that with the
   threadpool entries `compute.load` resolves into the table it keeps beside the library replaced by
   counting wrappers before `compute.model` is called, building `15/T-001`'s fixture with
-  `context_length` 32 by `compute.model(backend, handle, 32)` makes one threadpool and frees none,
-  that the first `forward(0, p)` sets that pool on the backend its graph is computed on, that twenty
-  of them, p from 0 to 19 and 5 graphs each, make and free none more, and that the `Threads` line of
-  `/proc/self/status` is exactly three larger after the build than before it, four threads being
-  three workers, and the same after those twenty.
+  `context_length` 32 by `compute.model(backend, handle, 32, nil)` makes one threadpool and frees
+  none, that the first `forward(0, p)` sets that pool on the backend its graph is computed on, that
+  twenty of them, p from 0 to 19 and 5 graphs each, make and free none more, and that the `Threads`
+  line of `/proc/self/status` is exactly three larger after the build than before it, four threads
+  being three workers, and the same after those twenty.
 - T-002 (FR-003): `a wider pass takes a new pool and frees the old`, proves that with the same
   wrappers, on `15/T-002`'s mixed fixture built by `compute.model(backend, handle, 4, nil, 1)` with
   the sequence `""` reserved at 4 positions, a `pass` of that sequence's three rows at positions 0, 1
@@ -120,7 +121,4 @@ speed on a real model.
 
 ## Amendments
 
-- `32/FR-005`: the pool a model's host arena lives in also carries the model's one ggml threadpool,
-  made beside that arena, given to the model's CPU backend when that backend is made, and freed with
-  that pool, so a replacement hands the model a grown arena and a threadpool of its own; the arena
-  `32/FR-006` gives a block handle carries none.
+- None.

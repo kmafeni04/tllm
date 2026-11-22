@@ -26,6 +26,7 @@ local find_backends = engine.find_backends
 local load_library = engine.load_library
 local probe_version = engine.probe_version
 local refusal_line = engine.refusal_line
+local threads_of = engine.threads_of
 
 local mapped_of = oncard.mapped_of
 local tier = oncard.tier
@@ -101,6 +102,7 @@ function compute.load(
     lib = handle,
     device = found,
     offload = offload ~= false,
+    threads = threads_of(handle),
   }
   return backend
 end

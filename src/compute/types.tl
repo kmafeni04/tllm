@@ -115,6 +115,21 @@ local record Types
     ggml_backend_buffer_free: function(ffi.CData)
     ggml_backend_tensor_set: function(ffi.CData, ffi.CData, integer, integer)
     ggml_backend_tensor_get: function(ffi.CData, ffi.CData, integer, integer)
+    ggml_threadpool_params_init: function(ffi.CData, integer)
+    ggml_backend_reg_by_name: function(string): ffi.CData | nil
+    ggml_backend_reg_get_proc_address: function(
+      ffi.CData, string
+    ): ffi.CData | nil
+  end
+
+  -- the model's one threadpool: the entries the loaded CPU backend module
+  -- answers for it, which the library handle does not export, and the pool
+  -- they made, made beside the arena that pool's graphs are built in
+  record Threads
+    make: ffi.CData
+    give: ffi.CData
+    set: ffi.CData
+    pool: ffi.CData | nil
   end
 
   record TensorView
@@ -152,6 +167,9 @@ local record Types
     lib: Library
     device: ffi.CData | nil
     offload: boolean
+    -- the threadpool entries this library answers, resolved once here so that
+    -- a model makes its one pool from them; nil where it found no CPU module
+    threads: Threads | nil
   end
 
   -- tensors written into host memory at once, or into the device buffer of the
@@ -195,6 +213,10 @@ local record Types
     device_held: {string: integer}
     devices: {string: ffi.CData}
     held: {string: integer}
+    -- the threadpool the model's graphs run on, made beside this arena and
+    -- freed with it: nil for every arena but a model's own, which is every
+    -- arena a block handle or the maths build
+    threads: Threads | nil
   end
 
   -- the arena a run of blocks builds its graphs in, held through one box so a

@@ -815,7 +815,8 @@ local function model_plan(
       ),
       sequences,
       nil,
-      nil
+      nil,
+      loaded.threads
     )
     if made is nil then
       return "model: no arena for its graphs"
@@ -1250,7 +1251,8 @@ local function pass_arena(
     state.sized(rows),
     rows,
     math.ceil(old.tensors / math.max(old.rows, 1)),
-    old.bytes
+    old.bytes,
+    old.threads
   )
   if wider is nil then
     return nil, "pass: no arena for " .. rows .. " rows"

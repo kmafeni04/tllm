@@ -127,7 +127,10 @@ record `29` declares, and `29/FR-009` is amended to say so.
   the worst case of one graph and not the sum of the run's blocks, and WHEN a pass holds more rows
   than that arena was measured at, replace it with one sized the same way for that pass, as
   `33/FR-003` says, the block handles of that model building over the arena the model then holds and
-  the block device buffers that pool holds going with it.
+  the block device buffers that pool holds going with it; the pool a model's host arena lives in also
+  carries the model's one ggml threadpool, made beside that arena, given to the model's CPU backend
+  when that backend is made, and freed with that pool, so a replacement hands the model a grown arena
+  and a threadpool of its own, and the arena FR-006 gives a block handle carries none.
   Not testable: nothing a model publishes reports its arena's size or how many allocations it made;
   a reader confirms the one allocation and the largest-graph sizing in the tree.
 - FR-006 (US-004) WHEN a block handle is built outside a model, THE SYSTEM SHALL give it one arena of

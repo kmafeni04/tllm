@@ -26,6 +26,7 @@ local type Params = defs.Params
 local type Pool = defs.Pool
 local type Session = defs.Session
 local type TensorView = defs.TensorView
+local type Threads = defs.Threads
 
 -- struct ggml_tensor here is the fields up to data, byte-exact for the pinned
 -- ggml commit: tensor_of writes the mapping into the library's tensor memory
@@ -35,6 +36,8 @@ typedef struct ggml_context ggml_context;
 typedef struct ggml_tensor ggml_tensor;
 typedef struct ggml_cgraph ggml_cgraph;
 typedef struct ggml_backend ggml_backend;
+typedef struct ggml_backend_reg ggml_backend_reg;
+typedef struct ggml_threadpool ggml_threadpool;
 typedef struct ggml_backend_buffer * ggml_backend_buffer_t;
 typedef struct ggml_backend_buffer_type * ggml_backend_buffer_type_t;
 typedef struct ggml_backend_device * ggml_backend_dev_t;
@@ -58,6 +61,21 @@ struct ggml_tensor {
   size_t view_offs;
   void *data;
 };
+
+struct ggml_threadpool_params {
+  bool cpumask[512];
+  int n_threads;
+  int prio;
+  uint32_t poll;
+  bool strict_cpu;
+  bool paused;
+};
+
+void ggml_threadpool_params_init(
+  struct ggml_threadpool_params *params, int n_threads);
+ggml_backend_reg *ggml_backend_reg_by_name(const char *name);
+void *ggml_backend_reg_get_proc_address(
+  ggml_backend_reg *reg, const char *name);
 
 const char *ggml_version(void);
 size_t ggml_tensor_overhead(void);
@@ -161,6 +179,9 @@ local ARENA_SLACK: integer = 8192
 -- a graph's nodes are counted per row of the batch, with room to spare
 local TENSORS_PER_ROW: integer = 256
 local TENSOR_SPARE: integer = 4096
+-- GGML_DEFAULT_N_THREADS in the pinned ggml source, the count a graph with no
+-- pool is given today: the number `44` decides
+local THREADS: integer = 4
 local GGML_TYPE_F32: integer = 0
 local GGML_TYPE_F16: integer = 1
 local GGML_TYPE_Q4_0: integer = 2
@@ -257,6 +278,26 @@ local function cpu_backend(lib: Library): ffi.CData | nil
     return nil
   end
   return lib.ggml_backend_dev_init(device, nil)
+end
+-- the threadpool entries are built into the CPU module ggml loads at run time
+-- and not into the library handle, so they are looked up through the registry
+-- entry the library answers: a library without that module answers none
+local function threads_of(lib: Library): Threads | nil
+  local reg = lib.ggml_backend_reg_by_name("CPU")
+  if reg is nil then
+    return nil
+  end
+  local make = lib.ggml_backend_reg_get_proc_address(reg, "ggml_threadpool_new")
+  local give = lib.ggml_backend_reg_get_proc_address(
+    reg, "ggml_threadpool_free"
+  )
+  local set = lib.ggml_backend_reg_get_proc_address(
+    reg, "ggml_backend_cpu_set_threadpool"
+  )
+  if make is nil or give is nil or set is nil then
+    return nil
+  end
+  return {make = make, give = give, set = set, pool = nil} as Threads
 end
 local function write_floats(cells: Floats, values: {number})
   for position, value in ipairs(values) do
@@ -453,7 +494,8 @@ local function pool_new(
   device_held: {string: integer},
   rows: integer,
   tensors: integer,
-  nodes: integer
+  nodes: integer,
+  threads?: Threads
 ): Pool | nil
   -- the numbers a graph keeps sit in a buffer after its descriptors, so the
   -- arena starts and ends on the alignment that buffer needs
@@ -462,7 +504,7 @@ local function pool_new(
   if block is nil then
     return nil
   end
-  return {
+  local pool = {
     lib = lib,
     host = finalised(block),
     bytes = size,
@@ -474,7 +516,32 @@ local function pool_new(
     device_held = device_held,
     devices = {},
     held = {},
+    threads = nil,
   } as Pool
+  -- the model's one threadpool, made with the arena beside it so that no graph
+  -- of its passes pays a create and a join of its own: the entries are copied,
+  -- because the pool that replaces this one makes its own from them
+  if threads is Threads then
+    local params = ffi.new("struct ggml_threadpool_params") as ffi.CData
+    lib.ggml_threadpool_params_init(params, THREADS)
+    local make = ffi.cast(
+      "ggml_threadpool *(*)(struct ggml_threadpool_params *)", threads.make
+    ) as function(ffi.CData): ffi.CData
+    local made = make(params)
+    if not (made is nil) then
+      -- the pool is given back with the arena even where the pool that holds it
+      -- is dropped without its free
+      local give = ffi.cast("void (*)(ggml_threadpool *)", threads.give)
+        as function(ffi.CData)
+      pool.threads = {
+        make = threads.make,
+        give = threads.give,
+        set = threads.set,
+        pool = ffi.gc(made, function(held: ffi.CData) give(held) end),
+      } as Threads
+    end
+  end
+  return pool
 end
 local function pool_free(pool: Pool)
   local host = pool.host
@@ -494,6 +561,20 @@ local function pool_free(pool: Pool)
   if not (cpu is nil) then
     pool.cpu = nil
     pool.lib.ggml_backend_free(cpu)
+  end
+  -- the pool goes after the backend made over it, and the threadpool that
+  -- backend held goes with it, so a closed model leaves no thread behind
+  local threads = pool.threads
+  if threads is Threads then
+    pool.threads = nil
+    local threadpool = threads.pool
+    if not (threadpool is nil) then
+      threads.pool = nil
+      ffi.gc(threadpool, nil)
+      local give = ffi.cast("void (*)(ggml_threadpool *)", threads.give)
+        as function(ffi.CData)
+      give(threadpool)
+    end
   end
 end
 -- the device buffer one block's graphs run in, allocated the first time that
@@ -536,6 +617,22 @@ local function pool_backend(pool: Pool): ffi.CData | nil
   end
   local made = cpu_backend(pool.lib)
   pool.cpu = made
+  if made is nil then
+    return nil
+  end
+  -- the pool the graphs run on is given to the backend the first time that
+  -- backend is made, before its first graph
+  local threads = pool.threads
+  if not (threads is Threads) then
+    return made
+  end
+  local threadpool = threads.pool
+  if not (threadpool is nil) then
+    local set = ffi.cast(
+      "void (*)(ggml_backend *, ggml_threadpool *)", threads.set
+    ) as function(ffi.CData, ffi.CData)
+    set(made, threadpool)
+  end
   return made
 end
 -- a context over the pool's arena, holding no number of its own when the
@@ -909,7 +1006,8 @@ local function sized_pool(
   builds: {Build},
   rows: integer,
   per_row: integer | nil,
-  floor: integer | nil
+  floor: integer | nil,
+  threads?: Threads
 ): Pool | nil
   -- a graph's nodes repeat for every row it holds, so one measurement carries
   -- to the next size: a measuring context that runs short stops the process
@@ -957,7 +1055,9 @@ local function sized_pool(
   if host == 0 then
     return nil
   end
-  return pool_new(lib, copy, host, device, device_held, rows, made, tensors)
+  return pool_new(
+    lib, copy, host, device, device_held, rows, made, tensors, threads
+  )
 end
 -- one graph of one block, or of the pass, in the arena the pool holds: the
 -- arena is written over for every graph, so nothing is read through a tensor
@@ -1177,6 +1277,7 @@ return {
   ints_of = ints_of,
   host_tensor = host_tensor,
   pool_free = pool_free,
+  threads_of = threads_of,
   run = run,
   sized_pool = sized_pool,
   graph_run = graph_run,

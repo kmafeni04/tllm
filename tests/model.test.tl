@@ -1,12 +1,17 @@
+local ffi = require("ffi")
 local fs = require("fs")
 local test = require("lde-test")
 local support = require("tests.support")
 local clock = require("tllm.clock")
 local compute = require("tllm.compute")
+local engine = require("tllm.compute.engine")
+local defs = require("tllm.compute.types")
 local gguf = require("tllm.gguf")
 local weights = require("tllm.weights")
 local type Entry = support.Entry
+local type Loaded = defs.Loaded
 local type Meta = support.Meta
+local type Threads = defs.Threads
 local u32, u64, text, padded =
   support.u32, support.u64, support.text, support.padded
 local f32, zeros, ones = support.f32, support.zeros, support.ones
@@ -1843,5 +1848,171 @@ test.it(
         test.equal(pass_line, line)
       end
     )
+  end
+)
+
+-- what a model did with the threadpool entries compute.load resolved: the pools
+-- it made, the one it gave to a backend, the backend it gave it to, and the
+-- threadpools it freed
+local record Counting
+  made: integer
+  gave: integer
+  sets: integer
+  pool: ffi.CData | nil
+  given: ffi.CData | nil
+end
+
+-- the entries replaced by wrappers that count what a model does with them, and
+-- the function that puts the resolved entries back
+local function counting_threads(): Counting, function()
+  -- the entries are the table compute.load keeps beside the library, so the
+  -- wrappers are what the next model built from this backend resolves
+  local held = engine.LOADED[backend] as Loaded
+  local entries = held.threads as Threads
+  local counts: Counting = {
+    made = 0,
+    gave = 0,
+    sets = 0,
+    pool = nil,
+    given = nil,
+  }
+  local make = ffi.cast(
+    "ggml_threadpool *(*)(struct ggml_threadpool_params *)", entries.make
+  ) as function(ffi.CData): ffi.CData
+  local give = ffi.cast("void (*)(ggml_threadpool *)", entries.give)
+    as function(ffi.CData)
+  local set = ffi.cast(
+    "void (*)(ggml_backend *, ggml_threadpool *)", entries.set
+  ) as function(ffi.CData, ffi.CData)
+
+  entries.make = ffi.cast(
+    "ggml_threadpool *(*)(struct ggml_threadpool_params *)",
+    function(params: ffi.CData): ffi.CData
+      counts.made = counts.made + 1
+      local made = make(params)
+      counts.pool = made
+      return made
+    end
+  ) as ffi.CData
+  entries.give = ffi.cast(
+    "void (*)(ggml_threadpool *)",
+    function(threadpool: ffi.CData)
+      counts.gave = counts.gave + 1
+      give(threadpool)
+    end
+  ) as ffi.CData
+  entries.set = ffi.cast(
+    "void (*)(ggml_backend *, ggml_threadpool *)",
+    function(device: ffi.CData, threadpool: ffi.CData)
+      counts.sets = counts.sets + 1
+      counts.given = threadpool
+      set(device, threadpool)
+    end
+  ) as ffi.CData
+  local function restore()
+    entries.make = ffi.cast(
+      "ggml_threadpool *(*)(struct ggml_threadpool_params *)", make
+    ) as ffi.CData
+    entries.give = ffi.cast("void (*)(ggml_threadpool *)", give) as ffi.CData
+    entries.set = ffi.cast("void (*)(ggml_backend *, ggml_threadpool *)", set)
+      as ffi.CData
+  end
+  return counts, restore
+end
+
+-- the threads the process holds, which a pool of four threads raises by three:
+-- the pools of the models the cases before this one built are given back first,
+-- so the count is the pools this case holds and not another case's garbage
+local function threads_now(): integer
+  collectgarbage("collect")
+  local status = fs.read("/proc/self/status") as string
+  return tonumber(status:match("Threads:%s*(%d+)")) as integer
+end
+
+test.it(
+  "a model makes one threadpool and keeps it",
+  function()
+    local counts, restore = counting_threads()
+    local handle = loaded(
+      with_integer(t001_meta(), "qwen35moe.context_length", 32), t001_entries()
+    )
+    local before = threads_now()
+    local built, failure = compute.model(backend, handle, 32, nil)
+    test.equal(failure, nil)
+    local model = built as compute.Model
+    test.equal(counts.made, 1)
+    test.equal(counts.gave, 0)
+    test.equal(threads_now(), before + 3)
+
+    forward(model, 0, 0)
+    test.equal(counts.sets, 1)
+    test.truthy(counts.given == counts.pool)
+
+    for position = 1, 19 do
+      forward(model, 0, position)
+    end
+    test.equal(model.measure.graphs, 100)
+    test.equal(counts.made, 1)
+    test.equal(counts.gave, 0)
+    test.equal(counts.sets, 1)
+    test.equal(threads_now(), before + 3)
+
+    model:close()
+    restore()
+  end
+)
+
+test.it(
+  "a wider pass takes a new pool and frees the old",
+  function()
+    local counts, restore = counting_threads()
+    local handle = loaded(t002_meta(), mixed_entries())
+    local before = threads_now()
+    local built, failure = compute.model(backend, handle, 4, nil, 1)
+    test.equal(failure, nil)
+    local model = built as compute.Model
+    test.equal(model:reserve("", 4), nil)
+    test.equal(counts.made, 1)
+    local after_build = threads_now()
+    test.equal(after_build, before + 3)
+
+    local got, line = model:pass(
+      {
+        {sequence = "", token = 1, position = 0},
+        {sequence = "", token = 2, position = 1},
+        {sequence = "", token = 1, position = 2},
+      }
+    )
+    test.equal(line, nil)
+    test.equal(#(got as {{number}}), 3)
+    test.equal(model.measure.graphs, 8)
+    test.equal(counts.made, 2)
+    test.equal(counts.gave, 1)
+    test.equal(threads_now(), after_build)
+
+    model:close()
+    restore()
+  end
+)
+
+test.it(
+  "no pool survives close",
+  function()
+    local counts, restore = counting_threads()
+    local handle = loaded(
+      with_integer(t001_meta(), "qwen35moe.context_length", 32), t001_entries()
+    )
+    local before = threads_now()
+    local built, failure = compute.model(backend, handle, 32, nil)
+    test.equal(failure, nil)
+    local model = built as compute.Model
+    forward(model, 0, 0)
+    model:close()
+    test.equal(counts.gave, 1)
+    test.equal(threads_now(), before)
+    model:close()
+    test.equal(counts.gave, 1)
+
+    restore()
   end
 )
