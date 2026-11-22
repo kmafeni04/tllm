@@ -55,6 +55,7 @@ local record Report
   reads: integer
   read_bytes: integer
   read_seconds: number
+  direct: integer
   routes: integer
   hits: integer
   ahead: integer
@@ -107,6 +108,7 @@ local function zeroed(measure: compute.Measure)
   measure.blob_reads = 0
   measure.blob_bytes = 0
   measure.blob_seconds = 0
+  measure.direct_reads = 0
   measure.prefetch_reads = 0
   measure.prefetch_named = 0
   measure.prefetch_landed = 0
@@ -169,6 +171,7 @@ local function driven(
     reads = measure.blob_reads,
     read_bytes = measure.blob_bytes,
     read_seconds = measure.blob_seconds,
+    direct = measure.direct_reads,
     routes = measure.routed,
     hits = measure.expert_hits,
     ahead = measure.prefetch_reads,
@@ -266,7 +269,7 @@ local function reported(
     string.format(
       "experts %d: %d routed, %.1f MB; per turn %d reads, %.1f MB read, "
         .. "%.3f ms; %.1f%% hit; %d ahead, %.1f%% landed; read ahead %s; "
-        .. "%.1f%% over PCIe, pool %.1f GB/s, link %.1f GB/s\n",
+        .. "%.1f%% over PCIe, pool %.1f GB/s, link %.1f GB/s; %d direct\n",
       length,
       routed,
       megabytes,
@@ -279,7 +282,8 @@ local function reported(
       state,
       policy.share * 100,
       policy.pool,
-      policy.link
+      policy.link,
+      report.direct
     )
   )
 end

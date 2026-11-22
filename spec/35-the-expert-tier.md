@@ -174,7 +174,9 @@ a pool, whose models are the workers' own, writes no line at all.
 - FR-006 (US-003) WHEN a pass chooses an expert whose three matrices its model's `placement` does not
   mark, THE SYSTEM SHALL read those matrices whole from the mapping as `34/FR-001` reads them and
   count the reads and their bytes in `measure` as `34/FR-003` counts them, and SHALL read no matrix
-  whole for an expert its `placement` marks.
+  whole for an expert its `placement` marks. The matrices it reads whole are those `34/FR-001` still
+  reads whole after `42`'s page-cache exception, so a resident matrix its `placement` does not mark
+  is not read whole.
 - FR-007 (US-004) WHEN `serve.build` builds a server whose model runs in its own process, THE SYSTEM
   SHALL build that model with the endpoint's `vram`.
 - FR-008 (US-004) WHEN a worker builds its model, THE SYSTEM SHALL build it with the `vram` the

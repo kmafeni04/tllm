@@ -12,6 +12,8 @@ int munmap(void *addr, size_t length);
 long pread(int fd, void *buf, size_t count, off_t offset);
 void *realloc(void *ptr, size_t size);
 void free(void *ptr);
+int getpagesize(void);
+int mincore(void *addr, size_t length, unsigned char *vec);
 ]]
 )
 
@@ -56,6 +58,9 @@ local record weights
   attach: function(Handle)
   detach: function(Handle)
   read: function(Handle, Tensor, index: integer): boolean | nil, string | nil
+  -- true when every page the matrix spans is in the page cache, false when
+  -- the index names no matrix or the check cannot be made
+  resident: function(Handle, Tensor, index: integer): boolean
 end
 
 local type Shard = weights.Shard
@@ -72,6 +77,8 @@ local record LibC
   pread: function(integer, ffi.CData, integer, integer): integer
   realloc: function(ffi.CData | nil, integer): ffi.CData
   free: function(ffi.CData)
+  getpagesize: function(): integer
+  mincore: function(ffi.CData, integer, ffi.CData): integer
 end
 
 local record Planned
@@ -463,6 +470,41 @@ local function matrix_of(
     return nil, "holds no matrix " .. tostring(index)
   end
   return math.floor(tensor.bytes / matrices)
+end
+
+-- whether every page from the one holding the matrix's first byte through
+-- the one holding its last is in the page cache, asked without faulting a
+-- page in
+function weights.resident(_: Handle, tensor: Tensor, index: integer): boolean
+  local each = matrix_of(tensor, index)
+  if each is nil or (each as integer) < 1 then
+    return false
+  end
+  local bytes = each as integer
+  local page = C.getpagesize()
+  if page < 1 then
+    return false
+  end
+  local address = ffi.cast("intptr_t", tensor.data) as integer
+  local first = (tonumber(address) as integer) + index * bytes
+  local last = first + bytes - 1
+  local start = first - first % page
+  local count = math.floor((last - last % page - start) / page) + 1
+  local pages = ffi.new("uint8_t[?]", count)
+  local answer = C.mincore(
+    ffi.cast("void *", start) as ffi.CData, count * page, pages
+  )
+  if answer ~= 0 then
+    return false
+  end
+  local flags = ffi.string(pages as ffi.CData, count)
+  for at = 1, count do
+    local flag = flags:byte(at) or 0
+    if flag % 2 == 0 then
+      return false
+    end
+  end
+  return true
 end
 
 function weights.read(

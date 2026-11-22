@@ -129,7 +129,8 @@ are the queue the model took, so a case reads the size it was given without reac
   THE SYSTEM SHALL hand over one whole-matrix read for each matrix of each expert FR-001 named for
   the following block that `34/FR-001` would read whole and that this handle has not read whole, one
   handover for an expert whatever rows named it, and SHALL add one to `measure.prefetch_reads` for
-  each matrix handed over.
+  each matrix handed over. The matrices it hands over SHALL still include one `42`'s page-cache path
+  would take, so read-ahead checks no residency and its handovers are unchanged.
 - FR-004 (US-001) WHEN the following block is about to build the graph that multiplies by its chosen
   experts, THE SYSTEM SHALL wait for every read FR-003 handed over for it, whatever experts that
   block routes, record every matrix that landed whole as one the handle has read so `34/FR-002`

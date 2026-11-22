@@ -237,7 +237,8 @@ local TOKEN_8 = "^token 8: (%d+%.%d%d%d) ms, compute (%d+%.%d%d%d) ms, "
 local EXPERTS_8 = "^experts 8: (%d+) routed, (%d+%.%d) MB; per turn (%d+) "
   .. "reads, (%d+%.%d) MB read, (%d+%.%d%d%d) ms; (%d+%.%d)%% hit; "
   .. "(%d+) ahead, (%d+%.%d)%% landed; read ahead (%a+); "
-  .. "(%d+%.%d)%% over PCIe, pool (%d+%.%d) GB/s, link (%d+%.%d) GB/s$"
+  .. "(%d+%.%d)%% over PCIe, pool (%d+%.%d) GB/s, link (%d+%.%d) GB/s; "
+  .. "(%d+) direct$"
 
 test.it(
   "a rung reports and adds up",
@@ -611,50 +612,58 @@ end
 test.it(
   "bench reports the expert reads",
   function()
-    local file_path = meta_file(meta(260, nil, true), wide_entries())
-    local got = run(
-      {
-        "bench",
-        file_path,
-        "--prefill-tokens",
-        "8",
-        "--decode-tokens",
-        "8",
-      }
+    -- no room for the experts in the page cache, so a turn's chosen matrices
+    -- are read rather than computed where they lie
+    support.with_memory(
+      function(): integer | nil return 0 end,
+      function()
+        local file_path = meta_file(meta(260, nil, true), wide_entries())
+        local got = run(
+          {
+            "bench",
+            file_path,
+            "--prefill-tokens",
+            "8",
+            "--decode-tokens",
+            "8",
+          }
+        )
+        test.equal(got.code, 0)
+        test.equal(#got.out, 4, table.concat(got.out, "\n"))
+
+        local _, _, reads, read_bytes, ms = got.out[4]:match(EXPERTS_8)
+        test.truthy(reads, got.out[4])
+
+        -- the same load the bench server makes, run over this fixture here, so
+        -- the figures are compared with a measure rather than with a guess
+        -- about this machine: the turn routes one expert, as this pass does
+        local handle = weights.load(file_path) as weights.Handle
+        local backend = compute.load() as compute.Backend
+        local model = compute.model(backend, handle, nil, "f16", 1)
+          as compute.Model
+        local planes, line = model:forward(0, 0)
+        test.equal(line, nil)
+        test.truthy(planes ~= nil, "the pass ran")
+        local whole = model.measure.blob_reads
+        test.equal(tonumber(reads as string), whole, got.out[4])
+        test.equal(
+          read_bytes,
+          string.format("%.1f", model.measure.blob_bytes / 1000000),
+          got.out[4]
+        )
+        if whole > 0 then
+          test.equal(
+            read_bytes,
+            string.format("%.1f", whole * WIDE_MATRIX / 1000000),
+            got.out[4]
+          )
+          test.truthy((tonumber(ms as string) as number) > 0, got.out[4])
+        end
+
+        model:close()
+        test.equal(handle.release(handle), nil)
+      end
     )
-    test.equal(got.code, 0)
-    test.equal(#got.out, 4, table.concat(got.out, "\n"))
-
-    local _, _, reads, read_bytes, ms = got.out[4]:match(EXPERTS_8)
-    test.truthy(reads, got.out[4])
-
-    -- the same load the bench server makes, run over this fixture here, so the
-    -- figures are compared with a measure rather than with a guess about this
-    -- machine: the turn routes one expert, as this pass does
-    local handle = weights.load(file_path) as weights.Handle
-    local backend = compute.load() as compute.Backend
-    local model = compute.model(backend, handle, nil, "f16", 1) as compute.Model
-    local planes, line = model:forward(0, 0)
-    test.equal(line, nil)
-    test.truthy(planes ~= nil, "the pass ran")
-    local whole = model.measure.blob_reads
-    test.equal(tonumber(reads as string), whole, got.out[4])
-    test.equal(
-      read_bytes,
-      string.format("%.1f", model.measure.blob_bytes / 1000000),
-      got.out[4]
-    )
-    if whole > 0 then
-      test.equal(
-        read_bytes,
-        string.format("%.1f", whole * WIDE_MATRIX / 1000000),
-        got.out[4]
-      )
-      test.truthy((tonumber(ms as string) as number) > 0, got.out[4])
-    end
-
-    model:close()
-    test.equal(handle.release(handle), nil)
   end
 )
 
@@ -733,7 +742,8 @@ test.it(
     test.truthy(
       line:match(
         "; 0%.0%% hit; 0 ahead, 0%.0%% landed; read ahead (%a+); "
-          .. "%d+%.%d%% over PCIe, pool %d+%.%d GB/s, link %d+%.%d GB/s$"
+          .. "%d+%.%d%% over PCIe, pool %d+%.%d GB/s, link %d+%.%d GB/s; "
+          .. "%d+ direct$"
       ),
       line
     )
@@ -761,7 +771,7 @@ test.it(
     test.truthy(
       line:match(
         "; 100%.0%% hit; 0 ahead, 0%.0%% landed; read ahead (%a+); "
-          .. "0%.0%% over PCIe, pool 0%.0 GB/s, link 0%.0 GB/s$"
+          .. "0%.0%% over PCIe, pool 0%.0 GB/s, link 0%.0 GB/s; %d+ direct$"
       ),
       line
     )
@@ -784,7 +794,7 @@ test.it(
     test.truthy(
       line:match(
         "; 100%.0%% hit; 0 ahead, 0%.0%% landed; read ahead (%a+); "
-          .. "0%.0%% over PCIe, pool 0%.0 GB/s, link 0%.0 GB/s$"
+          .. "0%.0%% over PCIe, pool 0%.0 GB/s, link 0%.0 GB/s; %d+ direct$"
       ),
       line
     )
@@ -835,7 +845,8 @@ test.it(
     local line = experts_at(got.out, 8) as string
     test.truthy(line, table.concat(got.out, "\n"))
     local share, pool, link = line:match(
-      "; (%d+%.%d)%% over PCIe, pool (%d+%.%d) GB/s, link (%d+%.%d) GB/s$"
+      "; (%d+%.%d)%% over PCIe, pool (%d+%.%d) GB/s, link (%d+%.%d) GB/s; "
+        .. "%d+ direct$"
     )
     test.truthy(share, line)
     if not on_card then
@@ -846,5 +857,62 @@ test.it(
     end
     local percent = tonumber(share as string) as number
     test.truthy(percent >= 10.0 and percent <= 95.0, line)
+  end
+)
+
+test.it(
+  "bench reports the direct matrices",
+  function()
+    local file_path = meta_file(meta(260, nil, true), entries())
+    -- a card that holds every fixed tensor and no expert slot, so a turn's
+    -- chosen matrices come from the mapping
+    local body = '{"models":{"m":{"path":"'
+      .. file_path
+      .. '"}},"prefetch":false'
+    if support.found_device() then
+      body = body .. ',"vram":' .. no_slot_vram(file_path)
+    end
+    local config_path = path_for("c") .. ".json"
+    fs.write(config_path, body .. "}")
+    local args = {
+      "bench",
+      "m",
+      "--config",
+      config_path,
+      "--prefill-tokens",
+      "8",
+      "--decode-tokens",
+      "8",
+    }
+    local function tail(): string, string
+      local got = run(args)
+      test.equal(got.code, 0, table.concat(got.err, "\n"))
+      local line = experts_at(got.out, 8) as string
+      test.truthy(line, table.concat(got.out, "\n"))
+      local reads, direct = line:match(
+        "per turn (%d+) reads, .-; (%d+) direct$"
+      )
+      test.truthy(direct, line)
+      return reads as string, direct as string
+    end
+
+    -- the fixture's expert matrices hold 96 bytes in all
+    support.with_memory(
+      function(): integer | nil return 96 end,
+      function()
+        local reads, direct = tail()
+        test.equal(tonumber(reads), 0)
+        test.greater(tonumber(direct) as number, 0)
+      end
+    )
+
+    support.with_memory(
+      function(): integer | nil return 0 end,
+      function()
+        local reads, direct = tail()
+        test.equal(tonumber(direct), 0)
+        test.greater(tonumber(reads) as number, 0)
+      end
+    )
   end
 )

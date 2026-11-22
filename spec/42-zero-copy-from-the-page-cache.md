@@ -1,6 +1,6 @@
 # 42: Zero-copy from the page cache
 
-**Status**: pending   **Depends on**: 15, 29, 34, 35, 38, 39
+**Status**: done   **Depends on**: 15, 29, 34, 35, 38, 39
 
 ## Problem & context
 
@@ -20,9 +20,10 @@ or the path is off, `34`'s read runs exactly as it does today and fills the cach
 The path is on only when the page cache has room for the experts. The room is the figure `38`
 computes: `prefetch.memory` over the bytes the handle's expert matrices hold. At `0.55` and above
 the path is on; below it, or when the figure is nil, or when the handle holds no expert matrix, it
-is off. The gate is settled when the model is built, so a later spec, `43`, can print it at
-start-up. This spec publishes it as `model.zero_copy` and counts its use each turn in
-`measure.direct_reads`.
+is off. The build reads that figure once and settles both `38`'s room and this gate from it, so a
+stubbed `prefetch.memory` is asked once per build. The gate is settled when the model is built, so a
+later spec, `43`, can print it at start-up. This spec publishes it as `model.zero_copy` and counts
+its use each turn in `measure.direct_reads`.
 
 The path is checked each time a matrix would be read whole, not once per handle. A matrix taken
 from the page cache is not recorded as read, so a later pass asks again and takes `34`'s read if the
@@ -93,7 +94,7 @@ matrix lies in a hole and no expert matrix is resident whole. T-002 uses it with
 - T-001 (FR-001, FR-005): `a resident blob is computed where it lies`, proves on the resident fixture that with `prefetch.memory` answering 52 a model has `zero_copy` false and a pass of token 0 at position 0 counts 3 blob reads and 0 direct reads, and that with the stub answering 53 a second model over a freshly loaded handle has `zero_copy` true and a pass counts 0 blob reads and 3 direct reads, and that this second pass's `measure.blob_bytes` and `measure.blob_seconds` are 0, and that the two passes return score rows every number of which is equal, so the same greedy token; and proves that a model of the same fixture whose stub answers nil has `zero_copy` false, and that a model of `38`'s routing fixture with its six expert tensors removed, with the stub answering 53, has `zero_copy` false.
 - T-002 (FR-002, FR-006): `an evicted blob takes the read path`, proves on the evicted fixture, with `prefetch.memory` answering 49152, that `weights.resident` answers false for each of the three chosen matrices and false for an index the tensor does not hold, that asking it again before any read for one of those matrices answers false, so the check faulted no page in, and that a pass counts 0 direct reads and 3 blob reads.
 - T-003 (FR-003, FR-004): `a blob in the page cache is checked again`, proves on the resident fixture, with `prefetch.memory` answering 53, that a first pass counts 3 direct reads and 0 blob reads, that after `weights.resident` is replaced by one answering false a second pass counts 3 more blob reads and no more direct reads and returns the same score rows, and that after `weights.resident` is restored a third pass counts neither a blob read nor a direct read, the handle having read those matrices whole.
-- T-004 (FR-007): `bench reports the direct matrices`, proves that `bench m --config F --prefill-tokens 8 --decode-tokens 8` on a config naming `29`'s fixture and `prefetch` false, with `prefetch.memory` answering 96, writes an `experts 8:` line ending `; N direct` with N above 0 and its reads 0, and that the same call with the stub answering 0 writes an `experts 8:` line ending `; 0 direct` with its reads above 0.
+- T-004 (FR-007): `bench reports the direct matrices`, proves that `bench m --config F --prefill-tokens 8 --decode-tokens 8` on a config naming `29`'s fixture, `prefetch` false and, where the machine has a card, a `vram` that holds every fixed tensor and no expert slot, so a turn's chosen matrices come from the mapping, with `prefetch.memory` answering 96, writes an `experts 8:` line ending `; N direct` with N above 0 and its reads 0, and that the same call with the stub answering 0 writes an `experts 8:` line ending `; 0 direct` with its reads above 0.
 
 ## Open questions
 
@@ -101,7 +102,4 @@ matrix lies in a hole and no expert matrix is resident whole. T-002 uses it with
 
 ## Amendments
 
-- `34/FR-001`: a chosen matrix whose every page is in the page cache, when the model's `zero_copy` is true, is not read whole; it is left to the graph that reads the mapping, and only every other chosen matrix is read whole.
-- `35/FR-006`: the matrices it asks to be read whole are those `34/FR-001` still reads whole after the page-cache exception, so a resident matrix its placement does not mark is not read whole.
-- `38/FR-003`: the predicted matrices it hands over still include one the page-cache path would take, so read-ahead does not check residency and its handovers are unchanged.
-- `39/FR-005`: the whole-matrix demand read before either miss path is the one `34/FR-001` asks for after the page-cache exception; a resident matrix needs no demand read before it is computed.
+- None.

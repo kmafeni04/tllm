@@ -85,11 +85,12 @@ file the whole read asks for.
 - FR-001 (US-001) WHEN a pass has chosen a block's experts and reads them from the mapping, THE
   SYSTEM SHALL read each matrix of each chosen expert whole, one read at that matrix's offset in the
   tensor's shard, before the graph that multiplies by it runs; a chosen matrix the model's slots hold
-  and whose copy has landed SHALL NOT be read whole, and every other chosen matrix SHALL be read
-  whole, whatever its id, whether or not the model's fixed weights are on the card. A matrix a
-  caller hands over may be read by the platform's submission interface instead of one blocking read
-  on the calling thread, as `37` hands it over and reaps it later; a matrix a pass reads on demand
-  SHALL still be one blocking read.
+  and whose copy has landed SHALL NOT be read whole, a chosen matrix whose every page is in the page
+  cache while the model's `zero_copy` is `42/FR-005`'s true SHALL NOT be read whole, and every other
+  chosen matrix SHALL be read whole, whatever its id, whether or not the model's fixed weights are on
+  the card. A matrix a caller hands over may be read by the platform's submission interface instead
+  of one blocking read on the calling thread, as `37` hands it over and reaps it later; a matrix a
+  pass reads on demand SHALL still be one blocking read.
 - FR-002 (US-001, US-002) WHEN this handle has already read a matrix, THE SYSTEM SHALL NOT read it
   again, whether the next row asking for it is another row of the same pass or a pass that comes
   later.

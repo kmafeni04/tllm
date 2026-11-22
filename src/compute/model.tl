@@ -275,11 +275,24 @@ local function expert_bytes_of(handle: weights.Handle): integer, integer
   end
   return total, largest
 end
+-- the gate the page-cache path is on by: the machine's free bytes over the
+-- bytes every expert matrix of the handle holds, at least 0.55 of them
+local ZERO_COPY_ROOM: number = 0.55
+
+local function zero_copy_of(expert_bytes: integer, free: integer | nil): boolean
+  if expert_bytes < 1 or not (free is integer) then
+    return false
+  end
+  return (free as integer) / expert_bytes >= ZERO_COPY_ROOM
+end
 -- the queue a model takes for read-ahead and the state the gate opens it in:
 -- a model given `prefetch` false takes none, one whose handle holds no expert
 -- matrix takes none, and a platform without the interface takes none
 local function read_ahead_of(
-  handle: weights.Handle, experts_used: integer, forced: boolean | nil
+  handle: weights.Handle,
+  experts_used: integer,
+  forced: boolean | nil,
+  free: integer | nil
 ): Ahead
   local total, largest = expert_bytes_of(handle)
   local ahead: Ahead = {
@@ -314,7 +327,6 @@ local function read_ahead_of(
     ahead.published.open = true
     return ahead
   end
-  local free = prefetch.memory()
   local room: number | nil = nil
   if free is integer then
     room = free / total
@@ -693,9 +705,13 @@ local function model_plan(
     widest = most_rows
   end
 
+  -- the machine's free bytes for the page cache, read once at the build: the
+  -- room read-ahead opens on and the one the page-cache path is gated by
+  local free_bytes = prefetch.memory()
   -- the queue read-ahead hands reads to, after every fault the model's own
   -- keys and shapes name and before the profile is read
-  local ahead = read_ahead_of(handle, geometry.experts_used, forced)
+  local ahead = read_ahead_of(handle, geometry.experts_used, forced, free_bytes)
+  local zero_copy = zero_copy_of(ahead.expert_bytes, free_bytes)
   local miss: MissWindow = {
     policy = {
       share = 0,
@@ -960,6 +976,7 @@ local function model_plan(
     blob_reads = 0,
     blob_bytes = 0,
     blob_seconds = 0,
+    direct_reads = 0,
     graphs = 0,
     prefetch_reads = 0,
     prefetch_named = 0,
@@ -981,7 +998,15 @@ local function model_plan(
   end
 
   local feed_forward, feed_line = feed_forward_of(
-    backend, handle, geometry, box, measure, final_mapped, ahead, miss
+    backend,
+    handle,
+    geometry,
+    box,
+    measure,
+    final_mapped,
+    ahead,
+    miss,
+    zero_copy
   )
   if feed_forward is nil then
     pool_free(final_arena)
@@ -1042,6 +1067,7 @@ local function model_plan(
     copy = copy,
     ahead = ahead,
     miss = miss,
+    zero_copy = zero_copy,
   }
 end
 -- what the embedding row of this token refuses, before any graph is built
@@ -1490,6 +1516,7 @@ local function build(
   model.measure = plan.measure
   model.placement = plan.placement
   model.read_ahead = plan.ahead.published
+  model.zero_copy = plan.zero_copy
   model.miss = plan.miss.policy
   local measure = model.measure
   model.routing_sink = nil

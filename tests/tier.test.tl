@@ -513,31 +513,37 @@ test.it(
 on_device(
   "one expert on the card and one off gives the same reply",
   function()
-    local handle = loaded(t001_meta(), t001_entries({1, 0, 0, 1}, 1))
-    local first = compute.model(backend, handle, 2, "f32") as compute.Model
-    local routes: {integer} = {}
-    first.routing_sink = function(routing: compute.Routing)
-      routes[#routes + 1] = routing.experts[1]
-    end
-    local full_zero = scores_of(first, 0, 0)
-    local full_one = scores_of(first, 1, 1)
-    test.deepEqual(routes, {0, 1})
-    test.equal(first.measure.blob_reads, 0)
+    -- no room for the experts in the page cache, so a missed expert is read
+    support.with_memory(
+      function(): integer | nil return 0 end,
+      function()
+        local handle = loaded(t001_meta(), t001_entries({1, 0, 0, 1}, 1))
+        local first = compute.model(backend, handle, 2, "f32") as compute.Model
+        local routes: {integer} = {}
+        first.routing_sink = function(routing: compute.Routing)
+          routes[#routes + 1] = routing.experts[1]
+        end
+        local full_zero = scores_of(first, 0, 0)
+        local full_one = scores_of(first, 1, 1)
+        test.deepEqual(routes, {0, 1})
+        test.equal(first.measure.blob_reads, 0)
 
-    local cap = first.placement.resident_bytes + first.placement.reserve + math.floor(
-      first.placement.slot_bytes / 2
+        local cap = first.placement.resident_bytes + first.placement.reserve + math.floor(
+          first.placement.slot_bytes / 2
+        )
+        first:close()
+
+        local second = compute.model(backend, handle, 2, "f32", 1, 1, cap)
+          as compute.Model
+        test.deepEqual(second.placement.slots, {1})
+        local capped_zero = scores_of(second, 0, 0)
+        local capped_one = scores_of(second, 1, 1)
+        equal_rows(capped_zero, full_zero)
+        equal_rows(capped_one, full_one)
+        test.greater(second.measure.blob_reads, 0)
+        second:close()
+        test.equal(handle.release(handle), nil)
+      end
     )
-    first:close()
-
-    local second = compute.model(backend, handle, 2, "f32", 1, 1, cap)
-      as compute.Model
-    test.deepEqual(second.placement.slots, {1})
-    local capped_zero = scores_of(second, 0, 0)
-    local capped_one = scores_of(second, 1, 1)
-    equal_rows(capped_zero, full_zero)
-    equal_rows(capped_one, full_one)
-    test.greater(second.measure.blob_reads, 0)
-    second:close()
-    test.equal(handle.release(handle), nil)
   end
 )

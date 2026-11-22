@@ -392,18 +392,6 @@ local function closed(model: compute.Model, handle: weights.Handle)
   test.equal(handle.release(handle), nil)
 end
 
--- a stub of the machine's free bytes for the length of the body, restored even
--- when the body fails
-local function with_memory(answer: function(): integer | nil, body: function())
-  local real = prefetch.memory
-  prefetch.memory = answer
-  local ok, failure = pcall(function(): string | nil body(); return nil end)
-  prefetch.memory = real
-  if not ok then
-    error(failure as string, 0)
-  end
-end
-
 local function with_decide(
   answer: function(number | nil, integer, integer, boolean): boolean,
   body: function()
@@ -417,8 +405,19 @@ local function with_decide(
   end
 end
 
+-- read-ahead open on a machine whose page cache holds none of the experts, so
+-- every chosen matrix takes `34`'s read
 local function plenty(body: function())
-  with_memory(function(): integer | nil return 1000000 end, body)
+  with_decide(
+    function(
+      _room: number | nil, _named: integer, _landed: integer, _open: boolean
+    ): boolean
+      return true
+    end,
+    function()
+      support.with_memory(function(): integer | nil return 0 end, body)
+    end
+  )
 end
 
 local function scores_of(
@@ -566,7 +565,7 @@ needs_interface(
     local figures: {integer | nil} = {192, 96, 116, 135, nil}
     local at = 0
     local handle = loaded(routing_meta(), routing_entries())
-    with_memory(
+    support.with_memory(
       function(): integer | nil at = at + 1; return figures[at] end,
       function()
         local model = built(handle)
@@ -613,7 +612,7 @@ needs_interface(
         return true
       end,
       function()
-        with_memory(
+        support.with_memory(
           function(): integer | nil return 0 end,
           function()
             local forced_handle = loaded(routing_meta(), routing_entries())
@@ -770,14 +769,10 @@ local function experts_at(out: {string}, length: integer): string | nil
   return nil
 end
 
-local function ends(line: string, suffix: string): boolean
-  return #line >= #suffix and line:sub(-#suffix) == suffix
-end
-
 needs_interface(
   "the key forced, refused and reaching the model",
   function()
-    with_memory(
+    support.with_memory(
       function(): integer | nil return 0 end,
       function()
         local handle = loaded(routing_meta(), routing_entries())
@@ -844,9 +839,9 @@ needs_interface(
     local line = experts_at(got.out, 8) as string
     test.truthy(line, table.concat(got.out, "\n"))
     test.truthy(
-      ends(
-        line,
-        "read ahead open; 0.0% over PCIe, pool 0.0 GB/s, " .. "link 0.0 GB/s"
+      line:match(
+        "read ahead open; 0%.0%% over PCIe, pool 0%.0 GB/s, "
+          .. "link 0%.0 GB/s; %d+ direct$"
       ),
       line
     )
@@ -911,10 +906,9 @@ needs_interface(
     local line = experts_at(got.out, 8) as string
     test.truthy(line, table.concat(got.out, "\n"))
     test.truthy(
-      ends(
-        line,
-        "; 0 ahead, 0.0% landed; read ahead closed; 0.0% over PCIe, "
-          .. "pool 0.0 GB/s, link 0.0 GB/s"
+      line:match(
+        "; 0 ahead, 0%.0%% landed; read ahead closed; 0%.0%% over PCIe, "
+          .. "pool 0%.0 GB/s, link 0%.0 GB/s; %d+ direct$"
       ),
       line
     )
@@ -943,7 +937,8 @@ needs_interface(
     test.truthy(
       line:match(
         "; 3 ahead, 100%.0%% landed; read ahead open; "
-          .. "%d+%.%d%% over PCIe, pool %d+%.%d GB/s, link %d+%.%d GB/s$"
+          .. "%d+%.%d%% over PCIe, pool %d+%.%d GB/s, link %d+%.%d GB/s; "
+          .. "%d+ direct$"
       ),
       line
     )
@@ -969,8 +964,8 @@ needs_interface(
       ),
       0
     )
-    with_memory(
-      function(): integer | nil return 1000000 end,
+    support.with_memory(
+      function(): integer | nil return 0 end,
       function()
         local model = built(handle, nil, nil, true, 2)
         test.equal(model.read_ahead.open, true)

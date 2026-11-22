@@ -91,6 +91,7 @@ local record compute
     blob_reads: integer
     blob_bytes: integer
     blob_seconds: number
+    direct_reads: integer
     graphs: integer
     prefetch_reads: integer
     prefetch_named: integer
@@ -173,6 +174,7 @@ local record compute
     measure: Measure
     placement: Placement
     read_ahead: ReadAhead
+    zero_copy: boolean
     miss: MissPolicy
     routing_sink: (function(Routing) | nil)
     forward: function(Model, integer, integer): {number} | nil, string | nil

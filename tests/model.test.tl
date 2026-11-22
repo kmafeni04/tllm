@@ -1770,35 +1770,48 @@ local function expert_bytes(handle: weights.Handle): integer
   return total
 end
 
+-- no room for the experts in the page cache, so `34`'s read runs and fills it
+local NO_ROOM = function(): integer | nil return 0 end
+
 test.it(
   "a matrix is read once for the handle",
   function()
-    local model = read_model(loaded(t001_meta(), read_entries()))
-    test.equal(model.measure.blob_reads, 0)
+    support.with_memory(
+      NO_ROOM,
+      function()
+        local model = read_model(loaded(t001_meta(), read_entries()))
+        test.equal(model.measure.blob_reads, 0)
 
-    local rows, line = model:pass(read_rows(0, 1))
-    test.equal(line, nil)
-    test.truthy(rows ~= nil, "the pass ran")
-    test.equal(model.measure.blob_reads, 3, "one read per chosen matrix")
+        local rows, line = model:pass(read_rows(0, 1))
+        test.equal(line, nil)
+        test.truthy(rows ~= nil, "the pass ran")
+        test.equal(model.measure.blob_reads, 3, "one read per chosen matrix")
 
-    local later, later_line = model:pass(read_rows(2, 2))
-    test.equal(later_line, nil)
-    test.truthy(later ~= nil, "the pass ran")
-    test.equal(model.measure.blob_reads, 3, "the handle read them already")
+        local later, later_line = model:pass(read_rows(2, 2))
+        test.equal(later_line, nil)
+        test.truthy(later ~= nil, "the pass ran")
+        test.equal(model.measure.blob_reads, 3, "the handle read them already")
+      end
+    )
   end
 )
 
 test.it(
   "a pass counts the expert reads",
   function()
-    local handle = loaded(t001_meta(), read_entries())
-    local model = read_model(handle)
-    local rows, line = model:pass(read_rows(0, 0))
-    test.equal(line, nil)
-    test.truthy(rows ~= nil, "the pass ran")
-    test.equal(model.measure.blob_reads, 3)
-    test.equal(model.measure.blob_bytes, expert_bytes(handle))
-    test.greater(model.measure.blob_seconds, 0)
+    support.with_memory(
+      NO_ROOM,
+      function()
+        local handle = loaded(t001_meta(), read_entries())
+        local model = read_model(handle)
+        local rows, line = model:pass(read_rows(0, 0))
+        test.equal(line, nil)
+        test.truthy(rows ~= nil, "the pass ran")
+        test.equal(model.measure.blob_reads, 3)
+        test.equal(model.measure.blob_bytes, expert_bytes(handle))
+        test.greater(model.measure.blob_seconds, 0)
+      end
+    )
   end
 )
 
@@ -1822,8 +1835,13 @@ test.it(
     local line = at_fault as string
     test.includes(line, "blk.0.ffn_down_exps.weight")
 
-    local rows, pass_line = read_model(held):pass(read_rows(0, 0))
-    test.equal(rows, nil, pass_line)
-    test.equal(pass_line, line)
+    support.with_memory(
+      NO_ROOM,
+      function()
+        local rows, pass_line = read_model(held):pass(read_rows(0, 0))
+        test.equal(rows, nil, pass_line)
+        test.equal(pass_line, line)
+      end
+    )
   end
 )

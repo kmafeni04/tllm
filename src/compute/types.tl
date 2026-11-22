@@ -302,6 +302,8 @@ local record Types
     owner: boolean
     ahead: Ahead | nil
     miss: MissWindow | nil
+    -- whether the page-cache path is on for the model this state serves
+    zero_copy: boolean
     -- the mapping's own view of the handle, which the misses computed on the
     -- CPU read rather than the card's copy, and the arena their graphs build in
     host: Mapped | nil
@@ -355,6 +357,7 @@ local record Types
     copy: Copy | nil
     ahead: Ahead
     miss: MissWindow
+    zero_copy: boolean
   end
 
   record SequenceState

@@ -676,16 +676,28 @@ local function expert_bytes(
   end
   return total
 end
+-- whether this handle has read this matrix whole already
+local function already_read(
+  mapped: Mapped, name: string, expert: integer
+): boolean
+  local held = mapped.handle.read_matrices[name]
+  if not (held is {integer: boolean}) then
+    return false
+  end
+  return held[expert] == true
+end
 -- the whole read of the chosen experts: one request per matrix this handle has
 -- not read yet, filling the page cache behind the pointer the choice graph
--- multiplies by. The graph over a device copy reads no mapping, so it reads no
--- matrix
+-- multiplies by, and a matrix every page of which the page cache already holds
+-- left to that graph when `zero_copy` is on. The graph over a device copy
+-- reads no mapping, so it reads no matrix
 local function read_experts(
   mapped: Mapped,
   prefix: string,
   chosen: {integer: boolean},
   experts: integer,
-  measure: compute.Measure | nil
+  measure: compute.Measure | nil,
+  zero_copy: boolean
 ): string | nil
   local plan = mapped.plan
   local copy = mapped.device
@@ -697,6 +709,7 @@ local function read_experts(
   local started = clock.now()
   local count = 0
   local bytes = 0
+  local direct = 0
   for _, name in ipairs(tier.experts) do
     local tensor = mapped.tensors[prefix .. name]
     if tensor is Tensor and #tensor.dims >= 3 then
@@ -706,35 +719,36 @@ local function read_experts(
         if held is ExpertCache then
           in_slot = cachex.slot_of(held, block, expert) ~= nil
         end
-        if chosen[expert] and not in_slot then
-          local moved, line = weights.read(mapped.handle, tensor, expert)
-          if moved is nil then
-            return line as string
-          end
-          if moved == true then
-            count = count + 1
-            bytes = bytes + each
+        if
+          chosen[expert]
+          and not in_slot
+          and not already_read(mapped, tensor.name, expert)
+        then
+          if zero_copy and weights.resident(mapped.handle, tensor, expert) then
+            direct = direct + 1
+          else
+            local moved, line = weights.read(mapped.handle, tensor, expert)
+            if moved is nil then
+              return line as string
+            end
+            if moved == true then
+              count = count + 1
+              bytes = bytes + each
+            end
           end
         end
       end
     end
   end
-  if count > 0 and measure is compute.Measure then
-    measure.blob_reads = measure.blob_reads + count
-    measure.blob_bytes = measure.blob_bytes + bytes
-    measure.blob_seconds = measure.blob_seconds + (clock.now() - started)
+  if measure is compute.Measure then
+    measure.direct_reads = measure.direct_reads + direct
+    if count > 0 then
+      measure.blob_reads = measure.blob_reads + count
+      measure.blob_bytes = measure.blob_bytes + bytes
+      measure.blob_seconds = measure.blob_seconds + (clock.now() - started)
+    end
   end
   return nil
-end
--- whether this handle has read this matrix whole already
-local function already_read(
-  mapped: Mapped, name: string, expert: integer
-): boolean
-  local held = mapped.handle.read_matrices[name]
-  if not (held is {integer: boolean}) then
-    return false
-  end
-  return held[expert] == true
 end
 -- a matrix an ahead read landed whole is one no later read makes again
 local function marked_read(mapped: Mapped, name: string, expert: integer)
@@ -1424,7 +1438,9 @@ local function feed_forward_block(
   end
 
   wait_ahead(state)
-  local read_line = read_experts(mapped, prefix, chosen, experts, state.measure)
+  local read_line = read_experts(
+    mapped, prefix, chosen, experts, state.measure, state.zero_copy
+  )
   if read_line is string then
     return nil, read_line
   end
@@ -1568,7 +1584,8 @@ local function feed_forward_of(
   measure?: compute.Measure,
   given?: Mapped,
   ahead?: Ahead,
-  miss?: MissWindow
+  miss?: MissWindow,
+  zero_copy?: boolean
 ): compute.FeedForward | nil, string | nil
   local loaded = LOADED[backend]
   if loaded is nil then
@@ -1602,6 +1619,7 @@ local function feed_forward_of(
     owner = pool.owned,
     ahead = ahead,
     miss = miss,
+    zero_copy = zero_copy == true,
     host = host_view(attachment),
   }
   local finished = false

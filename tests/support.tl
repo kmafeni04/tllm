@@ -1,10 +1,12 @@
 local ffi = require("ffi")
 local test = require("lde-test")
 local compute = require("tllm.compute")
+local prefetch = require("tllm.prefetch")
 
 local FLOAT_BYTES: integer = 4
 
 local type Floats = {integer: number}
+local type MemoryAnswer = function(): integer | nil
 
 local record support
   FLOAT_BYTES: integer
@@ -42,6 +44,7 @@ local record support
   mtext: function(string, string): Meta
   mstrings: function(string, {string}): Meta
   mint_array: function(string, {integer}): Meta
+  with_integer: function({Meta}, string, integer): {Meta}
   both: function({Entry}, {Entry}): {Entry}
   without: function({Entry}, string): {Entry}
   without_meta: function({Meta}, string): {Meta}
@@ -51,6 +54,7 @@ local record support
   refused: function({number} | nil, string | nil): string
   found_device: function(): boolean
   on_device: function(string, function())
+  with_memory: function(answer: MemoryAnswer, body: function())
 end
 
 function support.u16(value: integer): string
@@ -212,6 +216,27 @@ function support.mint_array(name: string, values: {integer}): support.Meta
   return {name = name, code = 9, bytes = support.array(5, items)}
 end
 
+-- the metadata list with `name` set to `value`, added when it holds no such
+-- entry
+function support.with_integer(
+  meta: {support.Meta}, name: string, value: integer
+): {support.Meta}
+  local result: {support.Meta} = {}
+  local found = false
+  for _, entry in ipairs(meta) do
+    if entry.name == name then
+      result[#result + 1] = support.mint(name, value)
+      found = true
+    else
+      result[#result + 1] = entry
+    end
+  end
+  if not found then
+    result[#result + 1] = support.mint(name, value)
+  end
+  return result
+end
+
 function support.both(
   first: {support.Entry}, second: {support.Entry}
 ): {support.Entry}
@@ -301,5 +326,16 @@ function support.on_device(name: string, body: function())
 end
 
 support.FLOAT_BYTES = FLOAT_BYTES
+
+-- the body under a stubbed prefetch.memory, restored even when the body fails
+function support.with_memory(answer: MemoryAnswer, body: function())
+  local real = prefetch.memory
+  prefetch.memory = answer
+  local ok, failure = pcall(function(): string | nil body(); return nil end)
+  prefetch.memory = real
+  if not ok then
+    error(failure as string, 0)
+  end
+end
 
 return support

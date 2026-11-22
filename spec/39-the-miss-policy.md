@@ -105,7 +105,9 @@ them.
   products from the mapping; WHEN it is assigned to DMA, THE SYSTEM SHALL copy its three matrices
   into tensors of the graph's own arena in the device buffer its existing pool owns, held for the
   length of that graph with no separate model-owned buffer, and compute its three matrix products
-  there, with `34/FR-001`'s whole-matrix demand read made before either path that needs it.
+  there, with `34/FR-001`'s whole-matrix demand read made before either path that needs it, which is
+  the read `34/FR-001` asks for after `42`'s page-cache exception: a resident matrix needs no demand
+  read before it is computed.
 - FR-006 (US-001) WHEN one block has misses on both paths, THE SYSTEM SHALL issue the DMA copies
   and device arithmetic without waiting for the CPU subset, run the CPU subset while that device
   work proceeds, and combine the block's result only after both subsets have completed.
