@@ -121,9 +121,6 @@ end
 - No reading a call out of a reply: parsing a function call from the reply text, `tool_calls` in the
   response, a `finish_reason` naming a tool call and streaming those are a later spec, so generation
   still ends only at an end id or at the budget, the way `16` and `19` ship it.
-- No message shape beyond a string `role` and a string `content`: a content that is a list of typed
-  parts, and the image and video branches that shape carries, stay the ones `20` reads without
-  running.
 
 ## Tests
 

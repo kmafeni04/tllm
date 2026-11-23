@@ -301,6 +301,58 @@ local function entry_fault(index: integer): string
     .. " is not an object with string role and content"
 end
 
+local function content_fault(index: integer): string
+  return "messages: entry " .. tostring(index) .. " has no usable content"
+end
+
+local function part_fault(index: integer, part: integer): string
+  return "messages: entry "
+    .. tostring(index)
+    .. " part "
+    .. tostring(part)
+    .. " is not an object with string type and text"
+end
+
+local function content_of(
+  value: Loose, index: integer
+): string | nil, string | nil
+  if value is string then
+    return value
+  end
+  if not (value is LooseObject) then
+    return nil, content_fault(index)
+  end
+  local parts = value as {Loose}
+  if #parts == 0 then
+    return nil, content_fault(index)
+  end
+  local texts: {string} = {}
+  for part_index = 1, #parts do
+    local part = parts[part_index]
+    if not (part is LooseObject) then
+      return nil, part_fault(index, part_index)
+    end
+    local fields = part as Fields
+    local kind = fields["type"]
+    local text = fields.text
+    if not (kind is string) or (kind == "text" and not (text is string)) then
+      return nil, part_fault(index, part_index)
+    end
+    if kind ~= "text" then
+      return nil,
+        "messages: entry "
+          .. tostring(index)
+          .. " part "
+          .. tostring(part_index)
+          .. " has type "
+          .. (kind as string)
+          .. ", only text parts are read"
+    end
+    texts[#texts + 1] = text as string
+  end
+  return table.concat(texts)
+end
+
 local function messages_of(value: Loose): {chat.Message} | nil, string | nil
   if value is nil then
     return nil, "messages: the body holds none"
@@ -320,11 +372,14 @@ local function messages_of(value: Loose): {chat.Message} | nil, string | nil
     end
     local fields = entry as Fields
     local role = fields.role
-    local content = fields.content
-    if not (role is string) or not (content is string) then
+    if not (role is string) then
       return nil, entry_fault(index)
     end
-    messages[index] = {role = role as string, content = content as string}
+    local content, content_line = content_of(fields.content, index)
+    if content is nil then
+      return nil, content_line
+    end
+    messages[index] = {role = role as string, content = content}
   end
   return messages, nil
 end

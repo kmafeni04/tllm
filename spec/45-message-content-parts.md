@@ -1,6 +1,6 @@
 # 45: A message whose content is a list of parts
 
-**Status**: pending   **Depends on**: 18
+**Status**: done   **Depends on**: 18
 
 ## Problem & context
 
@@ -81,8 +81,4 @@ only a string; that bullet is struck from `22` when this spec ships, because it 
 
 ## Amendments
 
-- `18/FR-008`: a message entry is valid only when it is an object whose `role` is a string and
-  whose `content` is a string or an array of one or more parts as `45`/FR-001, `45`/FR-003 and
-  `45`/FR-004 describe, a `content` that is neither is refused as `45`/FR-005 says, and the fault a
-  part causes names its message's position and the part's position, and its type when that is not
-  `text`, rather than the entry alone.
+- None.

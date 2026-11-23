@@ -122,7 +122,9 @@ end
   and 256 when it holds none, and the generation SHALL stop at that budget.
 - FR-008 (US-004) IF the body is empty, is not JSON, or decodes to anything but a JSON object, or
   `messages` is absent, is not an array, holds no entry, or holds an entry that is not an object
-  whose `role` and `content` are strings, or `temperature` is present and is not a number or is
+  whose `role` is a string and whose `content` is a string or an array of one or more parts as
+  `45`/FR-001, `45`/FR-003 and `45`/FR-004 describe, a `content` that is neither being refused as
+  `45`/FR-005 says, or `temperature` is present and is not a number or is
   below zero, or `top_k` is present and is not a whole number or is below one, or `max_tokens` is
   present and is not a whole number or is below one, or `seed` is present and is not a whole number,
   or `stream` is present and is not a boolean (that check coming after `seed`), or `session_id` is
@@ -133,7 +135,8 @@ end
   SHALL answer `BadRequest` with a body decoding to an object whose single member is
   `error`, an object whose `type` is `invalid_request_error` and whose `message` names the first
   fault in the order this requirement names them: `body`; `messages` and, for an entry, its position
-  counting from one; the member at fault.
+  counting from one, and for a part, its message's position and its own position counting from one,
+  and its `type` when that is not `text`; the member at fault.
 - FR-009 (US-004) WHEN `chat.render` and `tokenizer:encode` have answered, THE SYSTEM SHALL take
   the server's one model over the file's window, its `positions` being the file's context length,
   and, IF the prompt's ids plus the budget minus one are more than the `positions` that model was

@@ -554,6 +554,78 @@ test.it(
 )
 
 test.it(
+  "text parts answer as the joined string",
+  function()
+    local server = build(meta_file(t001_meta(), t001_entries()), "m")
+
+    local one = answered(
+      server,
+      '{"messages":[{"role":"user","content":[{"type":"text","text":"a"}]}]}'
+    )
+    test.deepEqual(
+      one.choices[1].message,
+      {role = "assistant", content = string.rep("a", 256)}
+    )
+    test.deepEqual(
+      one.usage,
+      {
+        prompt_tokens = 1,
+        completion_tokens = 256,
+        total_tokens = 257,
+        prompt_tokens_details = {cached_tokens = 0},
+      }
+    )
+
+    local joined = answered(
+      server,
+      '{"messages":[{"role":"user","content":[{"type":"text","text":"b"},{"type":"text","text":"a"}]}]}'
+    )
+    test.deepEqual(
+      joined.choices[1].message,
+      {role = "assistant", content = string.rep("a", 256)}
+    )
+    test.deepEqual(
+      joined.usage,
+      {
+        prompt_tokens = 2,
+        completion_tokens = 256,
+        total_tokens = 258,
+        prompt_tokens_details = {cached_tokens = 0},
+      }
+    )
+
+    local reversed = answered(
+      server,
+      '{"messages":[{"role":"user","content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]}]}'
+    )
+    test.equal(reversed.choices[1].message.content:sub(1, 3), "caa")
+
+    local counted = build(
+      meta_file(
+        replaced(
+          t001_meta(),
+          mtext(
+            "tokenizer.chat_template",
+            "{% for message in messages %}{% if message.role == 'system' %}a{% else %}b{% endif %}{% endfor %}"
+          )
+        ),
+        t001_entries()
+      ),
+      "m"
+    )
+    local parts = answered(
+      counted,
+      '{"messages":[{"role":"user","content":[{"type":"text","text":"a"},{"type":"text","text":"b"},{"type":"text","text":"c"}]}]}'
+    )
+    local whole = answered(
+      counted, '{"messages":[{"role":"user","content":"abc"}]}'
+    )
+    test.equal(parts.usage.prompt_tokens, 1)
+    test.equal(parts.usage.prompt_tokens, whole.usage.prompt_tokens)
+  end
+)
+
+test.it(
   "the sampling numbers in the body steer the reply",
   function()
     local server = build(meta_file(t001_meta(), t001_entries()), "m")
@@ -621,6 +693,39 @@ test.it(
       {
         '{"messages":[{"role":"user","content":"aaaaaa"}]}',
         {"messages", "max_tokens", "6", "256", "260"},
+      },
+    }
+
+    for _, held in ipairs(cases) do
+      local decoded = rejected(server, held[1])
+      for _, word in ipairs(held[2]) do
+        test.includes(decoded.error.message, word, held[1])
+      end
+    end
+  end
+)
+
+test.it(
+  "a part or message the engine cannot read is a bad request",
+  function()
+    local server = build(meta_file(t001_meta(), t001_entries()), "m")
+
+    local cases: {{string, {string}}} = {
+      {
+        '{"messages":[{"role":"user","content":"a"},{"role":"user","content":[{"type":"text","text":"b"},{"type":"image_url","image_url":{"url":"x"}}]}]}',
+        {"messages", "2", "2", "image_url"},
+      },
+      {
+        '{"messages":[{"role":"user","content":"a"},{"role":"user","content":[{"type":"text","text":"b"},{"type":"text"}]}]}',
+        {"messages", "2", "2"},
+      },
+      {
+        '{"messages":[{"role":"user","content":"a"},{"role":"user","content":[{"text":"a"},{"type":"text","text":"b"}]}]}',
+        {"messages", "2", "1"},
+      },
+      {
+        '{"messages":[{"role":"user","content":"a"},{"role":"user","content":[]}]}',
+        {"messages", "2"},
       },
     }
 
