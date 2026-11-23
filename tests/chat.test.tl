@@ -873,3 +873,31 @@ test.it(
     test.equal(line:find("tojson", 1, true), nil, line)
   end
 )
+
+-- ONE_TURN's generation opener, and that opener with the empty thinking block
+-- already closed: the two tails the file's own template writes.
+local OPEN_TAIL = "<|im_start|>assistant\n<think>\n"
+local CLOSED_TAIL = "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+local THINK_HEAD = ONE_TURN:sub(1, #ONE_TURN - #OPEN_TAIL)
+
+local function wrote_flagged(template: string, flag: boolean): string
+  local prompt, failure = chat.render(with_template(template), ONE, nil, flag)
+  test.equal(failure, nil, template)
+  return prompt as string
+end
+
+local ONLY_DEFINED = "{% if enable_thinking is defined %}t{% endif %}"
+  .. "{% if preserve_thinking is defined %}p{% endif %}"
+
+test.it(
+  "the value a render call is given decides the closer the file's template writes",
+  function()
+    test.equal(wrote_flagged(fixture.chat, false), THINK_HEAD .. CLOSED_TAIL)
+    test.equal(wrote_flagged(fixture.chat, true), ONE_TURN)
+    test.equal(wrote_plain(fixture.chat), ONE_TURN)
+
+    test.equal(wrote_flagged(ONLY_DEFINED, false), "t")
+    test.equal(wrote_flagged(ONLY_DEFINED, true), "t")
+    test.equal(wrote_plain(ONLY_DEFINED), "")
+  end
+)

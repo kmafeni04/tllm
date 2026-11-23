@@ -25,9 +25,9 @@ expressions written in Python syntax. The tags run are `{{ }}`, `{% if %}`, `{% 
 `{% else %}`, `{% for ... in ... %}`, `{% set %}` and `{% macro %}`, and the filters run are `trim`,
 `length` and `tojson`; a tag outside that set, a filter outside it, and a method outside the seven
 that spec 20 names are refused as `FR-007` states. A template is rendered with `messages`,
-`add_generation_prompt`, `tools` when a tool list is given, `loop`, the names `{% set %}` binds,
-macro names, `namespace(...)`, `raise_exception` and the seven string methods, which `FR-011`
-states and a test asserts.
+`add_generation_prompt`, `tools` when a tool list is given, `enable_thinking` when a thinking value
+is given, `loop`, the names `{% set %}` binds, macro names, `namespace(...)`, `raise_exception` and
+the seven string methods, which `FR-011` states and a test asserts.
 
 `tokenizer.load` keeps `tokenizer.chat_template` as read and refuses neither its absence nor its
 kind, in the shape `10/FR-012` fixed for `pre` and `merges`, so a file is never refused for a key
@@ -112,10 +112,12 @@ tests here use hand-made fixtures, because a 23 GB file cannot be a test input.
   that text, so that a request renders the same template without lexing or parsing it again, and
   SHALL keep its refusal under that text too when the template cannot be read.
 - FR-011 (US-003) WHEN an expression is evaluated, THE SYSTEM SHALL make reachable only `messages`,
-  `add_generation_prompt`, `tools` from the tool list `22/FR-001` binds, the name a `{% for %}` in
-  scope binds, `loop`, the names `{% set %}` binds, macro names, `namespace(...)`,
-  `raise_exception` and the seven string methods spec 20 names, so that a template naming anything
-  else reaches nil and opens no file and starts no process.
+  `add_generation_prompt`, `tools` from the tool list `22/FR-001` binds, `enable_thinking` from the
+  thinking input `46/FR-007` binds, the name a `{% for %}` in scope binds, `loop`, the names
+  `{% set %}` binds, macro names, `namespace(...)`, `raise_exception` and the seven string methods
+  spec 20 names, so that a template naming anything else reaches nil and opens no file and starts
+  no process. A call that gives no thinking value leaves it unbound as `46/FR-008` states, so the
+  nil-reach this requirement proves still holds for such a call.
 
 ## Non-goals
 

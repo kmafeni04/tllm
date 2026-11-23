@@ -1,6 +1,6 @@
 # 46: Thinking off unless the request asks for it
 
-**Status**: pending   **Depends on**: 17, 18, 20, 22
+**Status**: done   **Depends on**: 17, 18, 20, 22
 
 ## Problem & context
 
@@ -156,16 +156,4 @@ worker, which resolves the member from that body exactly as this spec states.
 
 ## Amendments
 
-- `20/FR-001`: `enable_thinking` leaves the list of names a render call leaves unbound, because
-  `46/FR-007` binds it when the caller gives a value; the unbound case this requirement's tests
-  record still stands under `46/FR-008`, and `20`'s non-goal bullet listing `enable_thinking`,
-  `preserve_thinking` and `reasoning_content` as request inputs holds only for the last two now.
-- `18/FR-005`: `enable_thinking` and `chat_template_kwargs` join the members that requirement
-  honours rather than ignores, because `46/FR-001` to `46/FR-006` read them. Its default, that a
-  member other than the names it lists is ignored, no longer covers those two, and every member
-  outside both its lists stays ignored, the way `30`'s and `31`'s honoured members already sit inside
-  the requirement.
-- `17/FR-011`: the reachable names gain `enable_thinking`, bound from the thinking input
-  `46/FR-007` states, in the clause shape `22/FR-001` gave `tools`; a call that gives no value
-  leaves it unbound as `46/FR-008` states, so the nil-reach this requirement proves still holds for
-  such a call.
+- None.

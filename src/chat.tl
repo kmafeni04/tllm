@@ -9,7 +9,10 @@ local record chat
   end
 
   render: function(
-    tokenizer.Tokenizer, {Message}, tools?: json.Value
+    tokenizer.Tokenizer,
+    {Message},
+    tools?: json.Value,
+    enable_thinking?: boolean
   ): string | nil, string | nil
 end
 
@@ -2275,7 +2278,10 @@ local templates: {string: Block} = {}
 local template_failures: {string: string} = {}
 
 function chat.render(
-  built: tokenizer.Tokenizer, messages: {Msg}, tools?: json.Value
+  built: tokenizer.Tokenizer,
+  messages: {Msg},
+  tools?: json.Value,
+  enable_thinking?: boolean
 ): string | nil, string | nil
   local template = built.template
   if template is nil then
@@ -2342,6 +2348,9 @@ function chat.render(
   }
   if tools is json.Value then
     names.tools = of_json(tools)
+  end
+  if enable_thinking is boolean then
+    names.enable_thinking = as_boolean(enable_thinking)
   end
   local root: Scope = {names = names, parent = nil}
   local run: Runner = {

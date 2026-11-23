@@ -1,4 +1,5 @@
 local fs = require("fs")
+local json = require("json")
 local process = require("process")
 local chat = require("tllm.chat")
 local compute = require("tllm.compute")
@@ -99,6 +100,7 @@ local record Request
   stream: boolean
   session_id: string | nil
   stop: {string} | nil
+  enable_thinking: boolean
 end
 
 local record Held
@@ -391,6 +393,40 @@ local function whole(value: Loose): integer | nil
   return value as integer
 end
 
+-- the one kind a body member of the wrong type never becomes: the sentinel
+-- json_decode hands back for JSON null, which is a table like an object is
+local NULL = json.null as LooseObject
+
+-- 46/FR-001 to 46/FR-006: the thinking value this request binds, or the one
+-- line naming the member the route cannot read. A member of either name is
+-- refused before any member binds or wins.
+local function thinking_of(given: Fields): boolean | nil, string | nil
+  local top = given.enable_thinking
+  if not (top is nil) and not (top is boolean) then
+    return nil, "enable_thinking: not a boolean"
+  end
+
+  local box = given.chat_template_kwargs
+  if box is nil then
+    return top == true, nil
+  end
+  if not (box is LooseObject) or box == NULL then
+    return nil, "chat_template_kwargs: not an object"
+  end
+
+  local member = (box as Fields).enable_thinking
+  if member is boolean then
+    return member, nil
+  end
+  if not (member is nil) then
+    return nil, "chat_template_kwargs.enable_thinking: not a boolean"
+  end
+  if #(box as {Loose}) > 0 then
+    return nil, "chat_template_kwargs: not an object"
+  end
+  return top == true, nil
+end
+
 local function request_of(body: string): Request | nil, string | nil
   local decoded = tltp.json_decode(body) as Loose
   -- the decoder gives the same empty table for {} and [], so the first
@@ -546,6 +582,11 @@ local function request_of(body: string): Request | nil, string | nil
     end
   end
 
+  local thinking, thinking_line = thinking_of(fields)
+  if not (thinking is boolean) then
+    return nil, thinking_line
+  end
+
   return {
     messages = messages,
     temperature = temperature,
@@ -560,6 +601,7 @@ local function request_of(body: string): Request | nil, string | nil
     stream = stream,
     session_id = session_id,
     stop = stop,
+    enable_thinking = thinking,
   }, nil
 end
 
@@ -906,7 +948,9 @@ local function prepared(
     return nil, bad_request(request_line as string)
   end
 
-  local prompt, render_line = chat.render(model.tokenizer, request.messages)
+  local prompt, render_line = chat.render(
+    model.tokenizer, request.messages, nil, request.enable_thinking
+  )
   if prompt is nil then
     return nil, internal(render_line as string)
   end

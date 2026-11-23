@@ -34,10 +34,12 @@ no seat at that point.
   `tokenizer.chat_template` and with messages whose `role` and `content` are strings, THE SYSTEM
   SHALL return the prompt that template writes for them as its first value and nil as its second,
   with `messages` bound to the list in order and `add_generation_prompt` bound to true as
-  `17/FR-002` states, and with `add_vision_id`, `enable_thinking`, `preserve_thinking` and
-  `reasoning_content` left unbound. `tools` joins those unbound names only for a call that gives no
-  tool list, `22/FR-002` states; a call that gives one binds it as `22/FR-001` states. Its tests'
-  endpoints set `kv_cache` `f32`, so the prompt and reply they record stand.
+  `17/FR-002` states, and with `add_vision_id`, `preserve_thinking` and `reasoning_content` left
+  unbound. `tools` joins those unbound names only for a call that gives no tool list, `22/FR-002`
+  states; a call that gives one binds it as `22/FR-001` states. `enable_thinking` leaves this list:
+  a call that gives a thinking value binds it as `46/FR-007` states, and the unbound case these
+  tests record is the call that gives none, `46/FR-008` states. Its tests' endpoints set `kv_cache`
+  `f32`, so the prompt and reply they record stand.
 - FR-002 (US-002) WHEN the template is read, THE SYSTEM SHALL accept Python-syntax expressions:
   `and`, `or`, `not`, `in`, `not in`, `is`, `is not`, `~`, `+`, `-`, `*`, `==`, `!=`, `<`, `<=`,
   `>`, `>=`, parentheses, string, number, `true`/`false`/`none` and list literals, attribute
@@ -123,8 +125,8 @@ no seat at that point.
 
 - Tools, tool calls, images and videos, and the `tojson`, `safe`, `string` filters: this spec only
   has to read them without running them, so a conversation that needs them is a follow-up spec.
-- `enable_thinking`, `preserve_thinking` and `reasoning_content` as request inputs: the template's
-  default path, with the names FR-001 leaves unbound, is what this spec produces.
+- `preserve_thinking` and `reasoning_content` as request inputs: the template's default path, with
+  the names FR-001 leaves unbound, is what this spec produces.
 - No stop rule for the closer that ends a thinking block: generation is cut only at the tokenizer's
   end token, as 16 ships it, so trimming that closer out of a reply is a follow-up spec.
 

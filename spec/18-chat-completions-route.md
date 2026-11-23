@@ -111,9 +111,11 @@ end
   prompt's ids the turn did not forward.
 - FR-005 (US-001) WHEN the body holds a member other than `messages`, `temperature`, `top_k`,
   `max_tokens`, `seed` and `session_id`, THE SYSTEM SHALL ignore it, and `stream`,
-  `session_id`, `stop`, `top_p`, `min_p`, `repetition_penalty`, `presence_penalty` and
-  `frequency_penalty` are honoured rather than ignored, those five as `30/FR-007` says and `stop`
-  as `31/FR-005` reads it.
+  `session_id`, `stop`, `top_p`, `min_p`, `repetition_penalty`, `presence_penalty`,
+  `frequency_penalty`, `enable_thinking` and `chat_template_kwargs` are honoured rather than
+  ignored: `top_p`, `min_p`, `repetition_penalty`, `presence_penalty` and `frequency_penalty` as
+  `30/FR-007` says, `stop` as `31/FR-005` reads it, and the two thinking members as `46/FR-001` to
+  `46/FR-006` read them.
 - FR-006 (US-003) WHEN the body holds `temperature`, `top_k` or `seed`, or `top_p`, `min_p`,
   `repetition_penalty`, `presence_penalty`, `frequency_penalty` or `stop`, THE SYSTEM SHALL pass it
   to the generation as given, a `stop` string being the list of that one string as `31/FR-005`

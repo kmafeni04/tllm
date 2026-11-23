@@ -3465,3 +3465,116 @@ test.it(
     end
   end
 )
+
+-- 18's fixture with a template whose prompt gains the id of `c` only when the
+-- name `enable_thinking` reaches it bound to false.
+local THINKING_TEMPLATE = "{% for message in messages %}{{ message.content }}{% endfor %}"
+  .. "{% if enable_thinking is defined and not enable_thinking %}c{% endif %}"
+
+local THINK_BODY = A_BODY:sub(1, #A_BODY - 1)
+
+local function body_both(top: string, box: string): string
+  return THINK_BODY
+    .. ',"enable_thinking":'
+    .. top
+    .. ',"chat_template_kwargs":'
+    .. box
+    .. "}"
+end
+
+local function body_stream(flag: string, top: string): string
+  return THINK_BODY
+    .. ',"stream":'
+    .. flag
+    .. ',"enable_thinking":'
+    .. top
+    .. "}"
+end
+
+test.it(
+  "the body's thinking member decides the prompt, and the nested one wins",
+  function()
+    local server = build(
+      meta_file(
+        replaced(
+          t001_meta(), mtext("tokenizer.chat_template", THINKING_TEMPLATE)
+        ),
+        t001_entries()
+      ),
+      "m"
+    )
+
+    local cases: {{string, integer}} = {
+      {A_BODY, 2},
+      {body_with("enable_thinking", "true"), 1},
+      {body_with("enable_thinking", "false"), 2},
+      {body_with("chat_template_kwargs", '{"enable_thinking":true}'), 1},
+      {body_both("true", '{"enable_thinking":false}'), 2},
+      {body_both("true", "{}"), 1},
+      {body_both("true", "[]"), 1},
+    }
+
+    for _, given in ipairs(cases) do
+      local reply = answered(server, given[1])
+      test.equal(reply.usage.prompt_tokens, given[2], given[1])
+    end
+
+    local plain = build(meta_file(t001_meta(), t001_entries()), "m")
+    local kept = answered(plain, A_BODY)
+    local plain_model = serve.model_of(plain) as serve.Model
+
+    -- 18's fixture keeps the template it has, so no prompt and no usage
+    -- count any earlier spec records moves.
+    test.equal(
+      plain_model.tokenizer.template,
+      "{% for message in messages %}{{ message.content }}{% endfor %}"
+    )
+    test.equal(kept.usage.prompt_tokens, 1)
+    test.equal(kept.usage.total_tokens, 257)
+  end
+)
+
+test.it(
+  "a thinking member of the wrong kind is a bad request",
+  function()
+    local server = build(meta_file(t001_meta(), t001_entries()), "m")
+
+    local cases: {{string, string}} = {
+      {body_with("enable_thinking", '"yes"'), "enable_thinking: "},
+      {body_with("enable_thinking", "1"), "enable_thinking: "},
+      {
+        body_with("chat_template_kwargs", '{"enable_thinking":"yes"}'),
+        "chat_template_kwargs.enable_thinking: ",
+      },
+      {
+        body_both("true", '{"enable_thinking":"yes"}'),
+        "chat_template_kwargs.enable_thinking: ",
+      },
+      {body_with("chat_template_kwargs", "5"), "chat_template_kwargs: "},
+      {body_with("chat_template_kwargs", "true"), "chat_template_kwargs: "},
+      {body_with("chat_template_kwargs", '"x"'), "chat_template_kwargs: "},
+      {body_with("chat_template_kwargs", "null"), "chat_template_kwargs: "},
+      {body_with("chat_template_kwargs", '["a"]'), "chat_template_kwargs: "},
+      {body_both('"yes"', "5"), "enable_thinking: "},
+      {body_with("enable_thinking", "null"), "enable_thinking: "},
+      {
+        body_both('"yes"', '{"enable_thinking":true}'),
+        "enable_thinking: ",
+      },
+      {
+        body_stream("5", '"yes"'),
+        "stream: ",
+      },
+    }
+
+    for _, given in ipairs(cases) do
+      local fault = rejected(server, given[1])
+      test.equal(fault.error.message:sub(1, #given[2]), given[2], given[1])
+
+      -- The same body is the error envelope alone: no choice and no usage.
+      local reply = fault as ChatReply
+      test.equal(reply.choices, nil, given[1])
+      test.equal(reply.usage, nil, given[1])
+    end
+  end
+)
