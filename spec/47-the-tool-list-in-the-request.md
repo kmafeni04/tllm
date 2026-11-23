@@ -1,6 +1,6 @@
 # 47: The tool list and the tool choice in the request
 
-**Status**: pending   **Depends on**: 17, 18, 20, 22, 46
+**Status**: done   **Depends on**: 17, 18, 20, 22, 46
 
 ## Problem & context
 
@@ -163,10 +163,4 @@ end
 
 ## Amendments
 
-- `17/FR-011`: `tool_choice` joins the reachable names, bound from the tool-choice input `47/FR-004`
-  names and left unbound when a call gives none as `47/FR-005` states.
-- `18/FR-005`: `tools` and `tool_choice` join the honoured members, `tools` as `47/FR-001`,
-  `47/FR-002` and `47/FR-006` read it and `tool_choice` as `47/FR-003` reads it.
-- `18/FR-008`: the members whose value is refused gain `tools`, refused as `47/FR-006` states, that
-  check coming last, after every check this requirement names and after both `46/FR-005`'s and
-  `46/FR-006`'s.
+- None.

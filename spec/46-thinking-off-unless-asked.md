@@ -100,8 +100,8 @@ worker, which resolves the member from that body exactly as this spec states.
 - No reasoning channel in the reply: thinking that is asked for still arrives in `content`, with no
   `reasoning_content` member, no stop rule at the closer and no trimming of one, as `16` and `19`
   ship it.
-- No request-side `tools`: the body still carries no tool list, so `chat.render`'s thinking input
-  stays the fourth argument after the tool list `22/FR-001` states.
+- No request-side tools of this spec's own: the tool list the body may now carry is `47`'s, and
+  `chat.render`'s thinking input stays the fourth argument, after that tool list.
 
 ## Tests
 

@@ -101,6 +101,8 @@ local record Request
   session_id: string | nil
   stop: {string} | nil
   enable_thinking: boolean
+  tools: json.Value | nil
+  tool_choice: json.Value | nil
 end
 
 local record Held
@@ -427,6 +429,63 @@ local function thinking_of(given: Fields): boolean | nil, string | nil
   return top == true, nil
 end
 
+-- 47/FR-001 and 47/FR-003: the two members are read from a second decode of
+-- the same text because a tool schema is arbitrary nested JSON, and tltp's
+-- unpack loses an object's member order and gives one table for an empty
+-- object and an empty array.
+local function member_of(
+  container: json.Value, wanted: string
+): json.Value | nil
+  for name, child in container:children() do
+    if name == wanted then
+      return child as json.Value
+    end
+  end
+  return nil
+end
+
+local function tool_fault(position: integer, entry: json.Value): string | nil
+  local at = "tools: entry " .. tostring(position)
+  if not entry:is("object") then
+    return at .. " is not an object"
+  end
+  local member = member_of(entry, "function")
+  if member is nil or not member:is("object") then
+    return at .. " holds no function object"
+  end
+  local name = member_of(member, "name")
+  if name is nil or not name:is("string") or #(name:val() as string) < 1 then
+    return at .. " holds no function.name of one or more bytes"
+  end
+  return nil
+end
+
+-- 47/FR-001, 47/FR-002, 47/FR-003 and 47/FR-006: the tool list and tool choice
+-- this request hands the template, or the one line naming the entry the route
+-- cannot use. A body carrying no such member gives nothing for it.
+local function tools_of(
+  body: string
+): json.Value | nil, json.Value | nil, string | nil
+  local root = json.decode(body)
+  local given = member_of(root, "tools")
+  local choice = member_of(root, "tool_choice")
+  if given is nil then
+    return nil, choice, nil
+  end
+  if not given:is("array") then
+    return nil, nil, "tools: not an array"
+  end
+  local position = 0
+  for _, entry in given:children() do
+    position = position + 1
+    local line = tool_fault(position, entry as json.Value)
+    if line is string then
+      return nil, nil, line
+    end
+  end
+  return given, choice, nil
+end
+
 local function request_of(body: string): Request | nil, string | nil
   local decoded = tltp.json_decode(body) as Loose
   -- the decoder gives the same empty table for {} and [], so the first
@@ -587,6 +646,16 @@ local function request_of(body: string): Request | nil, string | nil
     return nil, thinking_line
   end
 
+  local held_tools: json.Value | nil = nil
+  local tool_choice: json.Value | nil = nil
+  if fields.tools ~= nil or fields.tool_choice ~= nil then
+    local tools_line: string | nil
+    held_tools, tool_choice, tools_line = tools_of(body)
+    if tools_line is string then
+      return nil, tools_line
+    end
+  end
+
   return {
     messages = messages,
     temperature = temperature,
@@ -602,6 +671,8 @@ local function request_of(body: string): Request | nil, string | nil
     session_id = session_id,
     stop = stop,
     enable_thinking = thinking,
+    tools = held_tools,
+    tool_choice = tool_choice,
   }, nil
 end
 
@@ -949,7 +1020,11 @@ local function prepared(
   end
 
   local prompt, render_line = chat.render(
-    model.tokenizer, request.messages, nil, request.enable_thinking
+    model.tokenizer,
+    request.messages,
+    request.tools,
+    request.enable_thinking,
+    request.tool_choice
   )
   if prompt is nil then
     return nil, internal(render_line as string)
@@ -1974,8 +2049,8 @@ end
 local function install(server: tltp.Server, name: string)
   server:get(
     "/health",
-    function(self: tltp.Server): tltp.Response
-      return self:json(
+    function(asked: tltp.Server): tltp.Response
+      return asked:json(
         "OK", tltp.json_encode({status = "ok", model = name}) as string
       )
     end
@@ -1983,24 +2058,24 @@ local function install(server: tltp.Server, name: string)
 
   server:post(
     CHAT_PATH,
-    function(self: tltp.Server): tltp.Response
-      local response = serve.stream(self, self.req.body)
+    function(asked: tltp.Server): tltp.Response
+      local response = serve.stream(asked, asked.req.body)
       return response
     end
   )
 
-  server.handle_404 = function(self: tltp.Server): tltp.Response
-    return self:json("NotFound", error_body("not found", "not_found"))
+  server.handle_404 = function(asked: tltp.Server): tltp.Response
+    return asked:json("NotFound", error_body("not found", "not_found"))
   end
 
-  server.default_route = function(self: tltp.Server): tltp.Response
-    return self:handle_404()
+  server.default_route = function(asked: tltp.Server): tltp.Response
+    return asked:handle_404()
   end
 
   server.on_error = function(
-    self: tltp.Server, _err: string, _trace?: string
+    asked: tltp.Server, _err: string, _trace?: string
   ): tltp.Response
-    return self:json(
+    return asked:json(
       "InternalServerError", error_body("internal error", "internal_error")
     )
   end

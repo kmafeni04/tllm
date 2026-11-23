@@ -113,10 +113,12 @@ tests here use hand-made fixtures, because a 23 GB file cannot be a test input.
   SHALL keep its refusal under that text too when the template cannot be read.
 - FR-011 (US-003) WHEN an expression is evaluated, THE SYSTEM SHALL make reachable only `messages`,
   `add_generation_prompt`, `tools` from the tool list `22/FR-001` binds, `enable_thinking` from the
-  thinking input `46/FR-007` binds, the name a `{% for %}` in scope binds, `loop`, the names
+  thinking input `46/FR-007` binds, `tool_choice` from the tool-choice input `47/FR-004` binds, the
+  name a `{% for %}` in scope binds, `loop`, the names
   `{% set %}` binds, macro names, `namespace(...)`, `raise_exception` and the seven string methods
   spec 20 names, so that a template naming anything else reaches nil and opens no file and starts
-  no process. A call that gives no thinking value leaves it unbound as `46/FR-008` states, so the
+  no process. A call that gives no thinking value leaves it unbound as `46/FR-008` states, and a
+  call that gives no tool-choice input leaves `tool_choice` unbound as `47/FR-005` states, so the
   nil-reach this requirement proves still holds for such a call.
 
 ## Non-goals

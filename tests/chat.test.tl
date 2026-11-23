@@ -901,3 +901,23 @@ test.it(
     test.equal(wrote_plain(ONLY_DEFINED), "")
   end
 )
+
+test.it(
+  "the tool-choice input binds its own name and no other",
+  function()
+    local built = with_template(
+      "{% if tool_choice is defined %}t{% endif %}"
+        .. "{% if preserve_thinking is defined %}p{% endif %}"
+    )
+
+    local written, failure = chat.render(
+      built, ONE, nil, nil, json.decode('"auto"')
+    )
+    test.equal(failure, nil)
+    test.equal(written, "t")
+
+    written, failure = chat.render(built, ONE)
+    test.equal(failure, nil)
+    test.equal(written, "")
+  end
+)

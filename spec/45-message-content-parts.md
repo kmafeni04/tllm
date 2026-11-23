@@ -46,7 +46,7 @@ only a string; that bullet is struck from `22` when this spec ships, because it 
 - No image, audio or video part: every `type` other than `text` is refused, and no branch that
   reads one is built.
 - No other message field: `tool_calls`, `tool_call_id`, `name` and `reasoning_content` stay
-  unread, and the body still carries no `tools`.
+  unread.
 - No change to `chat.render` or to the template: a message's content is still one string.
 
 ## Tests

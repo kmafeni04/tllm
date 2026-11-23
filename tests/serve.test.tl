@@ -3578,3 +3578,157 @@ test.it(
     end
   end
 )
+
+-- 18's fixture with a template whose prompt gains the id of a fixture token
+-- when the template's own tools guard is taken.
+local TOOLS_TEMPLATE = "{% for message in messages %}{{ message.content }}{% endfor %}"
+  .. "{% if tools and tools is iterable and tools is not mapping %}"
+  .. "{% for tool in tools %}{{ tool.function.name }}{% endfor %}{% endif %}"
+
+local TOOLS_BOUND_TEMPLATE = "{% for message in messages %}{{ message.content }}{% endfor %}"
+  .. "{% if tools is defined %}b{% endif %}"
+
+local TOOL_CHOICE_TEMPLATE = "{% for message in messages %}{{ message.content }}{% endfor %}"
+  .. "{% if tool_choice is defined %}"
+  .. "{% if tool_choice == 'none' %}b"
+  .. "{% elif tool_choice is mapping %}{{ tool_choice.function.name }}"
+  .. "{% else %}cc{% endif %}{% endif %}"
+
+local function templated(template: string): tltp.Server
+  return build(
+    meta_file(
+      replaced(t001_meta(), mtext("tokenizer.chat_template", template)),
+      t001_entries()
+    ),
+    "m"
+  )
+end
+
+test.it(
+  "a body's tool list reaches the template's tools block",
+  function()
+    local server = templated(TOOLS_TEMPLATE)
+    local cases: {{string, integer}} = {
+      {body_with("tools", '[{"type":"function","function":{"name":"b"}}]'), 2},
+      {
+        body_with(
+          "tools",
+          '[{"type":"function","function":{"name":"b"}},'
+            .. '{"type":"function","function":{"name":"c"}}]'
+        ),
+        3,
+      },
+      {A_BODY, 1},
+      {body_with("tools", "[]"), 1},
+    }
+    for _, given in ipairs(cases) do
+      test.equal(
+        answered(server, given[1]).usage.prompt_tokens, given[2], given[1]
+      )
+    end
+
+    -- An empty array is bound and no array is not: the guard sees one defined.
+    local bound = templated(TOOLS_BOUND_TEMPLATE)
+    test.equal(answered(bound, body_with("tools", "[]")).usage.prompt_tokens, 2)
+    test.equal(answered(bound, A_BODY).usage.prompt_tokens, 1)
+  end
+)
+
+test.it(
+  "a body's tool_choice reaches the template, and none leaves it unbound",
+  function()
+    local server = templated(TOOL_CHOICE_TEMPLATE)
+    local cases: {{string, integer}} = {
+      {A_BODY, 1},
+      {body_with("tool_choice", '"none"'), 2},
+      {
+        body_with(
+          "tool_choice", '{"type":"function","function":{"name":"c"}}'
+        ),
+        2,
+      },
+      {body_with("tool_choice", '"auto"'), 3},
+      {body_with("tool_choice", "null"), 3},
+      {body_with("tools", '[{"type":"function","function":{"name":"b"}}]'), 1},
+    }
+    for _, given in ipairs(cases) do
+      test.equal(
+        answered(server, given[1]).usage.prompt_tokens, given[2], given[1]
+      )
+    end
+  end
+)
+
+test.it(
+  "a tools member the route cannot use is a bad request",
+  function()
+    local server = build(meta_file(t001_meta(), t001_entries()), "m")
+
+    local shape: {{string, string}} = {
+      {body_with("tools", "5"), "tools: not an array"},
+      {body_with("tools", "null"), "tools: not an array"},
+      {body_with("tools", "{}"), "tools: not an array"},
+      {body_with("tools", '"ab"'), "tools: not an array"},
+    }
+    for _, given in ipairs(shape) do
+      local fault = rejected(server, given[1])
+      local message = fault.error.message
+      test.equal(message:sub(1, #given[2]), given[2], given[1])
+      test.equal(message:find("entry", 1, true), nil, given[1])
+
+      -- The same body is the error envelope alone: no choice and no usage.
+      local reply = fault as ChatReply
+      test.equal(reply.choices, nil, given[1])
+      test.equal(reply.usage, nil, given[1])
+    end
+
+    local entries: {{string, string}} = {
+      {body_with("tools", "[5]"), "tools: entry 1"},
+      {body_with("tools", '[{"type":"function"}]'), "tools: entry 1"},
+      {
+        body_with("tools", '[{"type":"function","function":{}}]'),
+        "tools: entry 1",
+      },
+      {
+        body_with("tools", '[{"type":"function","function":{"name":""}}]'),
+        "tools: entry 1",
+      },
+      {
+        body_with("tools", '[{"type":"function","function":{"name":5}}]'),
+        "tools: entry 1",
+      },
+      {
+        body_with(
+          "tools",
+          '[{"type":"function","function":{"name":"b"}},'
+            .. '{"type":"function","function":{}}]'
+        ),
+        "tools: entry 2",
+      },
+    }
+    for _, given in ipairs(entries) do
+      local fault = rejected(server, given[1]).error.message
+      test.equal(fault:sub(1, #given[2]), given[2], given[1])
+    end
+
+    -- The checks the tools check comes after answer first.
+    local earlier: {{string, string}} = {
+      {
+        THINK_BODY .. ',"stream":5,"tools":5}',
+        "stream: not a boolean",
+      },
+      {
+        THINK_BODY .. ',"chat_template_kwargs":5,"tools":5}',
+        "chat_template_kwargs: not an object",
+      },
+      {
+        THINK_BODY .. ',"enable_thinking":"yes","tools":5}',
+        "enable_thinking: not a boolean",
+      },
+    }
+    for _, given in ipairs(earlier) do
+      local fault = rejected(server, given[1]).error.message
+      test.equal(fault:sub(1, #given[2]), given[2], given[1])
+    end
+  end
+)

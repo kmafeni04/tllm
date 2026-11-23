@@ -12,7 +12,8 @@ local record chat
     tokenizer.Tokenizer,
     {Message},
     tools?: json.Value,
-    enable_thinking?: boolean
+    enable_thinking?: boolean,
+    tool_choice?: json.Value
   ): string | nil, string | nil
 end
 
@@ -2281,7 +2282,8 @@ function chat.render(
   built: tokenizer.Tokenizer,
   messages: {Msg},
   tools?: json.Value,
-  enable_thinking?: boolean
+  enable_thinking?: boolean,
+  tool_choice?: json.Value
 ): string | nil, string | nil
   local template = built.template
   if template is nil then
@@ -2351,6 +2353,9 @@ function chat.render(
   end
   if enable_thinking is boolean then
     names.enable_thinking = as_boolean(enable_thinking)
+  end
+  if tool_choice is json.Value then
+    names.tool_choice = of_json(tool_choice)
   end
   local root: Scope = {names = names, parent = nil}
   local run: Runner = {

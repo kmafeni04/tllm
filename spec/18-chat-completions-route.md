@@ -112,10 +112,11 @@ end
 - FR-005 (US-001) WHEN the body holds a member other than `messages`, `temperature`, `top_k`,
   `max_tokens`, `seed` and `session_id`, THE SYSTEM SHALL ignore it, and `stream`,
   `session_id`, `stop`, `top_p`, `min_p`, `repetition_penalty`, `presence_penalty`,
-  `frequency_penalty`, `enable_thinking` and `chat_template_kwargs` are honoured rather than
-  ignored: `top_p`, `min_p`, `repetition_penalty`, `presence_penalty` and `frequency_penalty` as
-  `30/FR-007` says, `stop` as `31/FR-005` reads it, and the two thinking members as `46/FR-001` to
-  `46/FR-006` read them.
+  `frequency_penalty`, `enable_thinking`, `chat_template_kwargs`, `tools` and `tool_choice` are
+  honoured rather than ignored: `top_p`, `min_p`, `repetition_penalty`, `presence_penalty` and
+  `frequency_penalty` as `30/FR-007` says, `stop` as `31/FR-005` reads it, the two thinking members
+  as `46/FR-001` to `46/FR-006` read them, `tools` as `47/FR-001`, `47/FR-002` and `47/FR-006` read
+  it and `tool_choice` as `47/FR-003` reads it.
 - FR-006 (US-003) WHEN the body holds `temperature`, `top_k` or `seed`, or `top_p`, `min_p`,
   `repetition_penalty`, `presence_penalty`, `frequency_penalty` or `stop`, THE SYSTEM SHALL pass it
   to the generation as given, a `stop` string being the list of that one string as `31/FR-005`
@@ -133,7 +134,9 @@ end
   present and is not a string (that check coming after `stream`), or `30/FR-008` names a member
   whose value it refuses (those checks coming after the `session_id` check, in the order
   `30/FR-008` names them), or `stop` is present and is neither a string of one or more bytes nor an
-  array of one to four such strings (that check coming after `30/FR-008`'s own), THEN THE SYSTEM
+  array of one to four such strings (that check coming after `30/FR-008`'s own), or `tools` is
+  present and is refused as `47/FR-006` states (that check coming last, after every check this
+  requirement names and after both `46/FR-005`'s and `46/FR-006`'s), THEN THE SYSTEM
   SHALL answer `BadRequest` with a body decoding to an object whose single member is
   `error`, an object whose `type` is `invalid_request_error` and whose `message` names the first
   fault in the order this requirement names them: `body`; `messages` and, for an entry, its position

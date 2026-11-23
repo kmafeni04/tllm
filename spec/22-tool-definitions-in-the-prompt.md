@@ -111,9 +111,6 @@ end
 
 ## Non-goals
 
-- No request side: the body still carries no `tools` member, `serve` still passes no tool list and
-  still refuses a message that is not a string `role` and `content`, so no client can reach this
-  over HTTP yet. That is the next spec.
 - No tool calls in a history: an assistant turn carrying `tool_calls`, a `tool` role turn,
   `tool_call_id`, `name` and `reasoning_content` as message fields, and the `safe` and `string`
   filters and the walking of a map in a `{% for %}` that the template's tool-call branch needs, are
