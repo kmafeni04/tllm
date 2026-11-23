@@ -120,11 +120,18 @@ model cannot be a test input.
 - FR-012 (US-003) WHEN `load` reads a file, THE SYSTEM SHALL keep its `tokenizer.ggml.pre` and
   `tokenizer.ggml.merges` entries as read and refuse neither, so that `FR-003` and `FR-004` are
   answered by `encode` alone.
+- FR-014 (US-002) WHEN the text holds the stored text of an entry of `tokenizer.ggml.tokens` whose
+  `tokenizer.ggml.token_type` is CONTROL, THE SYSTEM SHALL return that entry's id in place of the
+  ids the text around it encodes to, the longest such text winning where two start at the same
+  character, and SHALL encode the text before and after it by `FR-001` to `FR-011`, so that the
+  turn markers a chat template writes reach the model as the tokens it was trained to see instead
+  of the characters they are spelled with.
 
 ## Non-goals
 
-- No special-token text: `encode` behaves as llama.cpp's `parse_special` false, so a stored control
-  token's text is encoded as ordinary characters, and no BOS or EOS is inserted.
+- No special-token text beyond `FR-014`: a stored control token's text is the only text that becomes
+  an id of its own, a user-defined token's text still encodes as ordinary characters, and no BOS or
+  EOS is inserted.
 - No scheme other than the two rules above: `qwen2`, `llama3`, `gemma4`, `deepseek`, `spm` and the
   rest are refused as `FR-003` states, and the text is never normalised.
 - No ignore-merges flag: `tokenizer.ggml.ignore_merges` is not read, so a word is always cut into
@@ -162,6 +169,10 @@ model cannot be a test input.
   whose pieces are `e`, `Ì`, `ģ`, `eÌ` and `5`, all type 1, and whose only merge is `e Ì`, that
   `encode("e\204\1295")` returns `{3, 2, 4}` and nil, the mark joining the letter word instead of
   forming one of its own.
+- T-006 (FR-014): `a control token's text becomes its id`, proves on a `gpt2` fixture whose pieces
+  are `a`, `b`, `X` at type 1 and `aXb` at type 3, with no merges, that `encode("aXb")` returns
+  `{3}` rather than the three ids of the characters, that `encode("Xa")` returns `{2, 0}` and
+  `encode("ab")` `{0, 1}`, and that the same file with `aXb` at type 4 encodes `"aXb"` to `{0, 2, 1}`.
 - T-005 (FR-013): `one long word costs its merges, not a scan per merge`, proves on a file whose
   pieces and merges chain `a` and `b` into `ab`, `abab` and so on that a word of 8192 codepoints
   encodes to the one id of its whole text in under four tenths of a second, which a scan of the
@@ -173,4 +184,9 @@ model cannot be a test input.
 
 ## Amendments
 
-- None.
+- A control token's text now encodes to its own id (`FR-014`, and the non-goal this supersedes).
+  This spec was written with `parse_special` false in mind, which read a chat template's
+  `<|im_start|>` and `<|im_end|>` as the characters they are spelled with: the Qwen3.6 file states
+  `tokenizer.ggml.eos_token_id` as 248046, `<|im_end|>`, so a prompt written that way made the model
+  spell the marker out as text and never sample the id `16/FR-007` stops on. A user-defined token's
+  text still encodes as ordinary characters, which `T-006` pins.

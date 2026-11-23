@@ -16,6 +16,11 @@ end
 
 local type Tokenizer = tokenizer.Tokenizer
 
+local record Special
+  text: string
+  id: integer
+end
+
 local record Vocabulary
   pieces: {string}
   types: {integer}
@@ -675,6 +680,32 @@ local function append_word(
   return nil
 end
 
+-- the file's control tokens, longest text first, so text holding a turn marker
+-- becomes that marker's id rather than the characters it is spelled with
+local function specials_of(pieces: {string}, types: {integer}): {Special}
+  local ids: {string: integer} = {}
+  for index, kind in ipairs(types) do
+    local piece = pieces[index]
+    if kind == 3 and piece ~= "" and ids[piece] == nil then
+      ids[piece] = index - 1
+    end
+  end
+  local listed: {Special} = {}
+  for text, id in pairs(ids) do
+    listed[#listed + 1] = {text = text, id = id}
+  end
+  table.sort(
+    listed,
+    function(left: Special, right: Special): boolean
+      if #left.text == #right.text then
+        return left.text < right.text
+      end
+      return #left.text > #right.text
+    end
+  )
+  return listed
+end
+
 local function encode_text(
   vocabulary: Vocabulary, path: string, text: string, ranks: {string: integer}
 ): {integer} | nil, string | nil
@@ -703,6 +734,62 @@ local function encode_text(
     )
     if failure is string then
       return nil, failure
+    end
+  end
+  return ids, nil
+end
+
+-- the text cut at the control tokens it holds, each run encoded as ordinary
+-- text and each control token as its own id
+local function encode_specials(
+  vocabulary: Vocabulary,
+  path: string,
+  text: string,
+  ranks: {string: integer},
+  specials: {Special}
+): {integer} | nil, string | nil
+  local ids: {integer} = {}
+  local plain_from = 1
+  local at = 1
+  while at <= #text do
+    local matched: integer | nil = nil
+    local matched_id = 0
+    for _, special in ipairs(specials) do
+      local edge = at + #special.text - 1
+      if text:sub(at, edge) == special.text then
+        matched = #special.text
+        matched_id = special.id
+        break
+      end
+    end
+    if not (matched is integer) then
+      at = at + 1
+    else
+      if at > plain_from then
+        local before, failure = encode_text(
+          vocabulary, path, text:sub(plain_from, at - 1), ranks
+        )
+        if before is nil then
+          return nil, failure
+        end
+        for _, id in ipairs(before) do
+          ids[#ids + 1] = id
+        end
+      end
+      ids[#ids + 1] = matched_id
+      at = at + matched
+      plain_from = at
+    end
+  end
+  if #text >= plain_from then
+    local rest, failure = encode_text(
+      vocabulary, path, text:sub(plain_from), ranks
+    )
+    if rest is nil then
+      return nil, failure
+    end
+    for _, id in ipairs(rest) do
+      ids[#ids + 1] = id
     end
   end
   return ids, nil
@@ -739,6 +826,7 @@ function tokenizer.load(
     return nil, types_failure
   end
 
+  local specials = specials_of(pieces, types)
   local ranks: {string: integer} | nil = nil
   local ranks_failure: string | nil = nil
   local vocabulary: Vocabulary = {
@@ -769,6 +857,17 @@ function tokenizer.load(
       end
       if built is nil then
         return nil, ranks_failure
+      end
+      if #specials > 0 then
+        -- the checks encode_text makes, for the text a special cut leaves out
+        local scheme, scheme_failure = scheme_of(path, vocabulary.pre)
+        if scheme is nil then
+          return nil, scheme_failure
+        end
+        if not utf8lib.valid(text) then
+          return nil, path .. ": the text is not valid UTF-8"
+        end
+        return encode_specials(vocabulary, path, text, built, specials)
       end
       return encode_text(vocabulary, path, text, built)
     end,

@@ -388,7 +388,6 @@ local function model_plan(
   positions: integer | nil,
   cache_type: compute.CacheType | nil,
   sequences: integer,
-  rows: integer,
   vram: integer | nil,
   profile: string | nil,
   forced: boolean | nil,
@@ -717,14 +716,6 @@ local function model_plan(
     cache_type = cached,
   }
 
-  -- the widest pass the model may be handed: ubatch rows, and no more than
-  -- every sequence at every position it holds
-  local widest = rows
-  local most_rows = sequences * taken
-  if widest > most_rows then
-    widest = most_rows
-  end
-
   -- the machine's free bytes for the page cache, read once at the build: the
   -- room read-ahead opens on and the one the page-cache path is gated by
   local free_bytes = prefetch.memory()
@@ -873,7 +864,13 @@ local function model_plan(
     end
 
     local total_bytes = mapped_total()
-    placement = tier.place(handle, budget, 0)
+    -- the tensors alone are planned first, so the first buffer the card is
+    -- asked for cannot hold every byte it has free, which no card gives: the
+    -- reservation that the expert bytes compete with is only known once a
+    -- copy of the tensors is on the card to measure the graphs over
+    placement = tier.place(
+      handle, tier.place(handle, budget, 0).resident_bytes, 0
+    )
     local stable = false
     local no_experts = false
     for _ = 1, 24 do
@@ -913,16 +910,25 @@ local function model_plan(
         mapped.lib,
         copy,
         model_builds(
-          mapped, geometry, kinds, count, math.floor(width), widest
+          mapped, geometry, kinds, count, math.floor(width), sequences
         ),
-        widest,
+        sequences,
         nil,
         nil
       )
       if probe is nil then
+        -- the graphs cannot be measured, so no budget can be trusted: the
+        -- model takes the CPU path rather than the process dying
         free_copy(copy)
+        copy = nil
         mapped.close()
-        return give_up("model: no arena for its graphs")
+        mapped = nil
+        local line = on_the_cpu(budget, planned.reserve)
+        if line is string then
+          return give_up(line)
+        end
+        stable = true
+        break
       end
       local reserve = tier.reserve_of(probe, kinds, count)
       local following = tier.place(handle, budget, reserve)
@@ -937,22 +943,7 @@ local function model_plan(
       end
       if tier.same_placement(placement, following) then
         placement = following
-        pool_free(probe)
-        arena = sized_pool(
-          mapped.lib,
-          copy,
-          model_builds(
-            mapped, geometry, kinds, count, math.floor(width), sequences
-          ),
-          sequences,
-          nil,
-          nil
-        )
-        if arena is nil then
-          free_copy(copy)
-          mapped.close()
-          return give_up("model: no arena for its graphs")
-        end
+        arena = probe
         stable = true
         break
       end
@@ -1495,7 +1486,6 @@ local function build(
     positions,
     cache_type,
     limit,
-    rows,
     vram,
     profile,
     prefetch_value,

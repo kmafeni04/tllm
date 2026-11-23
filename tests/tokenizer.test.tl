@@ -196,12 +196,12 @@ local function unit_kinds(count: integer): {integer}
 end
 
 local function encoding_file(
-  pre: string | nil, pieces: {string}, extra: {string}
+  pre: string | nil, pieces: {string}, extra: {string}, kinds?: {integer}
 ): string
   local parts: {string} = {
     pair("tokenizer.ggml.model", 8, text("gpt2")),
     pair("tokenizer.ggml.tokens", 9, strings(pieces)),
-    pair("tokenizer.ggml.token_type", 9, ints(unit_kinds(#pieces))),
+    pair("tokenizer.ggml.token_type", 9, ints(kinds or unit_kinds(#pieces))),
   }
   if pre is string then
     parts[#parts + 1] = pair("tokenizer.ggml.pre", 8, text(pre))
@@ -336,6 +336,20 @@ test.it(
     ids, failure = valid:encode("\255")
     test.equal(ids, nil)
     test.includes(failure as string, "not valid UTF-8")
+
+    local control = loaded(
+      encoding_file("llama3", {"a", "aXb"}, {merges_entry({})}, {1, 3})
+    )
+    ids, failure = control:encode("aXb")
+    test.equal(ids, nil)
+    test.includes(failure as string, "llama3")
+
+    local marked = loaded(
+      encoding_file("gpt2", {"a", "\255"}, {merges_entry({})}, {1, 3})
+    )
+    ids, failure = marked:encode("\255")
+    test.equal(ids, nil)
+    test.includes(failure as string, "not valid UTF-8")
   end
 )
 
@@ -362,6 +376,42 @@ test.it(
     test.equal(failure, nil)
     test.deepEqual(ids, {#pieces - 1})
     test.less(spent, 0.4)
+  end
+)
+
+test.it(
+  "a control token's text becomes its id",
+  function()
+    local pieces = {"a", "b", "X", "aXb"}
+    local control = loaded(
+      encoding_file("gpt2", pieces, {merges_entry({})}, {1, 1, 1, 3})
+    )
+    local marked, marked_line = control:encode("aXb")
+    test.deepEqual(marked, {3})
+    test.equal(marked_line, nil)
+
+    local beside, beside_line = control:encode("Xa")
+    test.deepEqual(beside, {2, 0})
+    test.equal(beside_line, nil)
+
+    local plain, plain_line = control:encode("ab")
+    test.deepEqual(plain, {0, 1})
+    test.equal(plain_line, nil)
+
+    local defined = loaded(
+      encoding_file("gpt2", pieces, {merges_entry({})}, {1, 1, 1, 4})
+    )
+    local spelled, spelled_line = defined:encode("aXb")
+    test.deepEqual(spelled, {0, 2, 1})
+    test.equal(spelled_line, nil)
+
+    -- two control texts starting at the same character: the longer one wins
+    local nested = loaded(
+      encoding_file("gpt2", {"<|im", "<|im_end|>"}, {merges_entry({})}, {3, 3})
+    )
+    local longest, longest_line = nested:encode("<|im_end|>")
+    test.deepEqual(longest, {1})
+    test.equal(longest_line, nil)
   end
 )
 

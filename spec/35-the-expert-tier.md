@@ -154,10 +154,10 @@ a pool, whose models are the workers' own, writes no line at all.
   not asked to stay on the CPU, THE SYSTEM SHALL take the tier's budget as the free bytes `memory`
   reports at that moment, or as the `vram` it is given when one is given and is the smaller, SHALL
   set the model's reservation to the bytes the tensors of the graph buffers `32/FR-008` gives a
-  block or the pass hold at the geometry's positions, measured for the widest pass the model's
-  `ubatch` allows and no more rows than its sessions at its positions hold, one sum for each of
-  those buffers, each sum rounded up to 16 rather than charged with the padded allocation each
-  tensor lands in, SHALL copy the tensors its `place` marks and each resident
+  block or the pass hold at the geometry's positions, measured for a pass of one row per sequence,
+  the rows `33/FR-003` sizes the model's arena at, one sum for each of those buffers, each sum
+  rounded up to 16 rather than charged with the padded allocation each tensor lands in, SHALL copy
+  the tensors its `place` marks and each resident
   expert's three matrices into device memory in one buffer of the model's own sized to
   `resident_bytes` plus `slot_bytes`, the experts it copies into a block's slots being those that
   block's profile seeded, or the lowest-numbered ones when `compute.model` is given no profile,
@@ -318,4 +318,10 @@ its three tokens, so its tensors hold about 44 MiB, which is what T-002 measures
 
 ## Amendments
 
-- None.
+- The reservation is measured for a pass of one row per sequence rather than the widest pass
+  `ubatch` allows. Measured at the widest pass, a file whose window is 262,144 positions reserves
+  what one row's copy of that whole window costs it, on every block that reads attention: on the
+  Qwen3.6 MoE file on this machine that is 566,900,457,984 bytes, more than the card holds, so
+  `FR-001` marked no tensor and the tier never placed anything. The rows a reservation is measured
+  over are now the rows the arena is sized at, so it grows only when a wide pass grows the arena,
+  as `33/FR-003` states.
