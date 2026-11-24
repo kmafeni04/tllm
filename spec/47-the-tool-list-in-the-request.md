@@ -89,9 +89,9 @@ end
   `tools` member that is not an array is refused for.
 - FR-007 (US-004) IF the body carries both a member a check of `18/FR-008` or of `46/FR-005` and
   `46/FR-006` refuses and one `FR-006` refuses, THEN THE SYSTEM SHALL answer the message the
-  earlier member's fault gives, `FR-006`'s check coming after every check `18/FR-008` names and
-  after `46/FR-005`'s and `46/FR-006`'s, so that no fault `FR-006` names displaces one an earlier
-  member gives.
+  earlier member's fault gives, `FR-006`'s check coming after every check `18/FR-008` names,
+  after the message checks `48/FR-009` to `48/FR-012` name, and after `46/FR-005`'s and
+  `46/FR-006`'s, so that no fault `FR-006` names displaces one an earlier member gives.
 
 ## Non-goals
 
@@ -101,9 +101,8 @@ end
 - No check on a tool definition beyond its name: `type`, `description`, `parameters` and every other
   member pass through as written, and a definition holding a member this engine does not know is
   not refused.
-- No tool calls in a history or out of a reply: `tool_calls`, a `tool` role, `tool_call_id`, `name`
-  and `reasoning_content` stay unread message fields, and parsing a call from the reply text,
-  `tool_calls` in the response, a `finish_reason` naming a call and streaming those stay later.
+- No tool calls out of a reply: parsing a call from the reply text, `tool_calls` in the response,
+  a `finish_reason` naming a call and streaming those stay later.
 
 ## Tests
 

@@ -317,6 +317,128 @@ local function part_fault(index: integer, part: integer): string
     .. " is not an object with string type and text"
 end
 
+-- the one kind a body member of the wrong type never becomes: the sentinel
+-- json_decode hands back for JSON null, which is a table like an object is
+local NULL = json.null as LooseObject
+
+-- a member read from the json package's own tree, which keeps an object's
+-- member order: tltp's unpack loses it and gives one table for an empty object
+-- and an empty array, which is why 47/FR-001, 47/FR-003 and 48/FR-008 read the
+-- text a second time with json.decode instead of trusting the decoded body.
+-- The last member of a repeated name wins, the way tltp's unpack assigns them
+-- in document order, so the two trees of one body hold the same value for every
+-- name and a position or a member read here is the one the checks read there.
+local function member_of(
+  container: json.Value, wanted: string
+): json.Value | nil
+  local found: json.Value | nil = nil
+  for name, child in container:children() do
+    if name == wanted then
+      found = child as json.Value
+    end
+  end
+  return found
+end
+
+-- the roles this engine can render
+local ROLES: {string: boolean} = {
+  system = true,
+  user = true,
+  assistant = true,
+  tool = true,
+}
+
+-- the fault helpers name the position the message holds in `messages`,
+-- counting from one, and the member at fault
+local function role_fault(index: integer, role: string): string
+  return "messages: entry " .. tostring(index) .. " has role " .. role
+end
+
+local function id_fault(index: integer): string
+  return "messages: entry "
+    .. tostring(index)
+    .. " holds no usable tool_call_id"
+end
+
+local function name_fault(index: integer): string
+  return "messages: entry " .. tostring(index) .. " holds no usable name"
+end
+
+-- 48/FR-008 and 48/FR-011: the call list one message entry holds, or the one
+-- line naming the fault. The member is read with the json package, so a
+-- decoded arguments value keeps the order its text gives its members.
+local function calls_of(
+  entry: json.Value, index: integer
+): {chat.ToolCall} | nil, string | nil
+  local place = "messages: entry " .. tostring(index) .. " tool_calls"
+  local list = member_of(entry, "tool_calls")
+  if list is nil or not list:is("array") then
+    return nil, place .. ": not an array"
+  end
+  local calls: {chat.ToolCall} = {}
+  local at = 0
+  for _, item in (list as json.Value):children() do
+    at = at + 1
+    local fault = place .. ", entry " .. tostring(at)
+    local call = item as json.Value
+    if not call:is("object") then
+      return nil, fault .. " is not an object"
+    end
+    local wrapper = member_of(call, "function")
+    if wrapper is nil or not wrapper:is("object") then
+      return nil, fault .. " holds no function object"
+    end
+    local given = member_of(wrapper as json.Value, "name")
+    if
+      given is nil or not given:is("string") or #(given:val() as string) < 1
+    then
+      return nil, fault .. " holds no function.name of one or more bytes"
+    end
+    local text = member_of(wrapper as json.Value, "arguments")
+    if text is nil or not text:is("string") then
+      return nil, fault .. " holds no function.arguments text"
+    end
+    local decoded, value = pcall(json.decode, text:val() as string)
+    if not decoded then
+      return nil, fault .. " holds function.arguments that is not JSON"
+    end
+    calls[at] = {
+      name = given:val() as string,
+      arguments = value as json.Value,
+    }
+  end
+  return calls, nil
+end
+
+-- the json package's own messages array, entry by entry, read only for a body
+-- that carries a tool_calls member: the array the body names last, which is the
+-- one every check of this body reads, so a position joins the same message here
+-- and there. Empty when the body holds no such array
+local function wire_entries(root: json.Value): {json.Value}
+  local items: {json.Value} = {}
+  local list = member_of(root, "messages")
+  if list is nil then
+    return items
+  end
+  for _, item in (list as json.Value):children() do
+    items[#items + 1] = item as json.Value
+  end
+  return items
+end
+
+-- a message member this route reads as text: the text it holds, then whether
+-- the member is present and unusable
+local function text_of(fields: Fields, wanted: string): string | nil, boolean
+  local value = fields[wanted]
+  if value is nil then
+    return nil, false
+  end
+  if value == NULL or not (value is string) or #(value as string) < 1 then
+    return nil, true
+  end
+  return value as string, false
+end
+
 local function content_of(
   value: Loose, index: integer
 ): string | nil, string | nil
@@ -357,7 +479,13 @@ local function content_of(
   return table.concat(texts)
 end
 
-local function messages_of(value: Loose): {chat.Message} | nil, string | nil
+-- 48/FR-008 to 48/FR-012: the messages this request hands the template, or the
+-- one line naming the first fault. Within one message the checks answer in the
+-- order role, content, tool_calls, tool_call_id, name, and the messages answer
+-- in the order the body holds them.
+local function messages_of(
+  value: Loose, body: string
+): {chat.Message} | nil, string | nil
   if value is nil then
     return nil, "messages: the body holds none"
   end
@@ -368,22 +496,59 @@ local function messages_of(value: Loose): {chat.Message} | nil, string | nil
   if #entries == 0 then
     return nil, "messages: the list is empty"
   end
+
+  local wire: {json.Value} | nil = nil
   local messages: {chat.Message} = {}
   for index = 1, #entries do
     local entry = entries[index]
     if not (entry is LooseObject) then
       return nil, entry_fault(index)
     end
-    local fields = entry as Fields
-    local role = fields.role
+    local named = entry as Fields
+    local role = named.role
     if not (role is string) then
       return nil, entry_fault(index)
     end
-    local content, content_line = content_of(fields.content, index)
+    if ROLES[role as string] == nil then
+      return nil, role_fault(index, role as string)
+    end
+    local content, content_line = content_of(named.content, index)
     if content is nil then
       return nil, content_line
     end
-    messages[index] = {role = role as string, content = content}
+
+    local calls: {chat.ToolCall} | nil = nil
+    local carried = named.tool_calls
+    if not (carried is nil) then
+      if wire is nil then
+        wire = wire_entries(json.decode(body))
+      end
+      local read, calls_line = calls_of((wire as {json.Value})[index], index)
+      if read is nil then
+        return nil, calls_line
+      end
+      calls = read
+    end
+
+    local call_id, call_id_bad = text_of(named, "tool_call_id")
+    if call_id_bad then
+      return nil, id_fault(index)
+    end
+    if (role as string) == "tool" and not (call_id is string) then
+      return nil, id_fault(index)
+    end
+    local sender, sender_bad = text_of(named, "name")
+    if sender_bad then
+      return nil, name_fault(index)
+    end
+
+    messages[index] = {
+      role = role as string,
+      content = content,
+      tool_calls = calls,
+      tool_call_id = call_id,
+      name = sender,
+    }
   end
   return messages, nil
 end
@@ -394,10 +559,6 @@ local function whole(value: Loose): integer | nil
   end
   return value as integer
 end
-
--- the one kind a body member of the wrong type never becomes: the sentinel
--- json_decode hands back for JSON null, which is a table like an object is
-local NULL = json.null as LooseObject
 
 -- 46/FR-001 to 46/FR-006: the thinking value this request binds, or the one
 -- line naming the member the route cannot read. A member of either name is
@@ -427,21 +588,6 @@ local function thinking_of(given: Fields): boolean | nil, string | nil
     return nil, "chat_template_kwargs: not an object"
   end
   return top == true, nil
-end
-
--- 47/FR-001 and 47/FR-003: the two members are read from a second decode of
--- the same text because a tool schema is arbitrary nested JSON, and tltp's
--- unpack loses an object's member order and gives one table for an empty
--- object and an empty array.
-local function member_of(
-  container: json.Value, wanted: string
-): json.Value | nil
-  for name, child in container:children() do
-    if name == wanted then
-      return child as json.Value
-    end
-  end
-  return nil
 end
 
 local function tool_fault(position: integer, entry: json.Value): string | nil
@@ -502,7 +648,7 @@ local function request_of(body: string): Request | nil, string | nil
 
   local fields = decoded as Fields
 
-  local messages, messages_line = messages_of(fields.messages)
+  local messages, messages_line = messages_of(fields.messages, body)
   if messages is nil then
     return nil, messages_line
   end

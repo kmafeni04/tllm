@@ -1,6 +1,6 @@
 # 48: A history that carries tool calls
 
-**Status**: pending   **Depends on**: 18, 20, 22, 45, 47
+**Status**: done   **Depends on**: 18, 20, 22, 45, 47
 
 ## Problem & context
 
@@ -25,7 +25,7 @@ text's member order, and never re-encodes.
 `18/FR-008` accepts any string `role`, so a role the engine cannot render passes
 the route today, and `20/FR-019` and `20/FR-012` between them refuse the `for`
 over a map and the `safe` and `string` filters that the file's own template needs for a
-call. Four shipped requirements are amended, the four entries below: the two just named,
+call. Four shipped requirements are amended: the two just named,
 `18/FR-008` for the four roles, and `47/FR-007`, whose message-check list now
 holds this spec's four. Four non-goal bullets are touched when this spec ships: the
 first goes whole, and the three after it lose only the clause named, the rest of the bullet
@@ -201,8 +201,11 @@ end
   fixture, whose `tokenizer.chat_template` is replaced by
   `{% for message in messages %}{% if message.tool_calls %}b{% else %}a{% endif %}{% endfor %}`, that the body
   `{"messages":[{"role":"user","content":"a"},{"role":"assistant","content":"","tool_calls":[{"type":"function","function":{"name":"x","arguments":"{}"}}]}]}` answers `OK` with `usage` whose
-  `prompt_tokens` is 2, the `b` proving that accepted list reached the template, and that the same
-  body with no `tool_calls` member answers 1.
+  `prompt_tokens` is 2, the `b` proving that accepted list reached the template, and that the body
+  holding that one user message alone, no `tool_calls` member anywhere in it, answers 1; and that a
+  body naming `messages` twice, the first array's call `ab` and the second's `c`, answers `OK` with
+  `prompt_tokens` 1 on a template writing each bound call name, so the call that reaches the model
+  is the one in the array the shape checks read, the same member every other read of the body takes.
 - T-004 (FR-010, FR-011, FR-012): `a message field the engine cannot use is a bad request`, proves on
   `18`'s fixture that each of these bodies answers `BadRequest` with a body decoding to an object
   whose only member is `error`, of type `invalid_request_error`:
@@ -262,13 +265,4 @@ end
 
 ## Amendments
 
-- `18/FR-008`: a message's `role` must be one of `system`, `user`, `assistant` or `tool`; any other
-  string is a `BadRequest` whose message names the message's position and that `role` value.
-- `47/FR-007`: the message checks `18/FR-008` names now include this spec's `FR-009` to `FR-012`, so
-  a body carrying both a message field this spec refuses and a `tools` member `47/FR-006` refuses
-  answers the message field, `T-005` pinning that pair.
-- `20/FR-012`: `safe` and `string` join `trim`, `length` and `tojson` as filters the reader
-  runs, so the parenthetical naming the two as refused goes, and a filter the reader runs may still
-  refuse a value it has no form for, which is `48/FR-007`.
-- `20/FR-019`: a `{% for %}` over a map is no longer refused, the walk yielding each member's key as
-  `48/FR-004` states, so the values it refuses are an unbound name and every other kind.
+- None.

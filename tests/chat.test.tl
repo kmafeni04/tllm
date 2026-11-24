@@ -301,8 +301,8 @@ local function wrote(template: string, messages: {chat.Message}): string
   return prompt as string
 end
 
-local function refused(template: string): string
-  local prompt, failure = chat.render(with_template(template), ONE)
+local function refused(template: string, items?: {chat.Message}): string
+  local prompt, failure = chat.render(with_template(template), items or ONE)
   test.equal(prompt, nil, template)
   local line = failure as string
   test.truthy(line:find("tokenizer.chat_template: ", 1, true) == 1, line)
@@ -392,9 +392,9 @@ test.it(
     local _, stray_endif = chat.render(with_template("{% endif %}"), ONE)
     test.includes(stray_endif as string, "tokenizer.chat_template")
 
-    local _, refused_filter = chat.render(with_template("{{ 'x'|safe }}"), ONE)
+    local _, refused_filter = chat.render(with_template("{{ 'x'|upper }}"), ONE)
     test.includes(refused_filter as string, "tokenizer.chat_template")
-    test.includes(refused_filter as string, "safe")
+    test.includes(refused_filter as string, "upper")
     local filter_line = refused_filter as string
     test.equal(filter_line:find("tojson", 1, true), nil, filter_line)
 
@@ -506,9 +506,9 @@ test.it(
     refused("{{ raise_exception() }}")
     refused("{{ raise_exception(3) }}")
     refused("{% include 'other' %}")
-    local safe_line = refused("{{ 'x'|safe }}")
-    test.includes(safe_line, "safe")
-    test.equal(safe_line:find("tojson", 1, true), nil, safe_line)
+    local refused_line = refused("{{ 'x'|upper }}")
+    test.includes(refused_line, "upper")
+    test.equal(refused_line:find("tojson", 1, true), nil, refused_line)
     refused("{{ missing.field }}")
     refused("{{ io.open('x') }}")
     refused("{{ 'a' + 5 }}")
@@ -538,7 +538,9 @@ test.it(
       "abtrueaxc"
     )
     refused("{{ 'abc'.upper() }}")
-    refused("{% for x in namespace(a=1) %}{{ x }}{% endfor %}")
+    test.equal(
+      wrote("{% for x in namespace(a=1) %}{{ x }}{% endfor %}", ONE), "a"
+    )
     test.equal(
       wrote("{{ 'abc'[0] }}{{ 'abc'[-1] }}{{ 'abc'[::-1] }}", ONE), "accba"
     )
@@ -860,16 +862,16 @@ test.it(
 )
 
 test.it(
-  "tojson is run and safe is not",
+  "tojson is run and upper is not",
   function()
     local held = with_template("{{ 'x'|tojson }}")
     local written, failure = chat.render(held, ONE)
     test.equal(failure, nil)
     test.equal(written, '"x"')
 
-    local line = refused("{{ 'x'|safe }}")
+    local line = refused("{{ 'x'|upper }}")
     test.includes(line, "tokenizer.chat_template")
-    test.includes(line, "safe")
+    test.includes(line, "upper")
     test.equal(line:find("tojson", 1, true), nil, line)
   end
 )
@@ -919,5 +921,170 @@ test.it(
     written, failure = chat.render(built, ONE)
     test.equal(failure, nil)
     test.equal(written, "")
+  end
+)
+
+-- 48/T-001: the call's arguments as the wire text holds them, the three turns
+-- a harness replays after it, and the text the file's own template writes.
+
+local CALL = '{"city": "Paris", "days": 2, "extra": {"unit": "c"}}'
+local WANT_CALL = table.concat(
+  {
+    "<|im_start|>user\n",
+    "hi<|im_end|>\n",
+    "<|im_start|>assistant\n",
+    "<think>\n",
+    "\n",
+    "</think>\n\n",
+    "<tool_call>\n",
+    "<function=get_weather>\n",
+    "<parameter=city>\n",
+    "Paris\n",
+    "</parameter>\n",
+    "<parameter=days>\n",
+    "2\n",
+    "</parameter>\n",
+    "<parameter=extra>\n",
+    "{\"unit\": \"c\"}\n",
+    "</parameter>\n",
+    "</function>\n",
+    "</tool_call><|im_end|>\n",
+    "<|im_start|>user\n",
+    "<tool_response>\n",
+    "sunny\n",
+    "</tool_response><|im_end|>\n",
+    "<|im_start|>assistant\n",
+    "<think>\n",
+  },
+  ""
+)
+
+local CALL_TURNS: {chat.Message} = {
+  {role = "user", content = "hi"},
+  {
+    role = "assistant",
+    content = "",
+    tool_calls = {{name = "get_weather", arguments = json.decode(CALL)}},
+  },
+  {role = "tool", content = "sunny", tool_call_id = "call_1"},
+}
+
+test.it(
+  "a tool call and its result render the turn the template writes",
+  function()
+    local built = with_template(fixture.chat)
+    local prompt, failure = chat.render(built, CALL_TURNS)
+    test.equal(failure, nil)
+    test.equal(prompt, WANT_CALL)
+
+    local named, named_failure = chat.render(
+      with_template(
+        "{% for message in messages %}"
+          .. "{% if message.tool_call_id is defined %}{{ message.tool_call_id }}{% endif %}"
+          .. "{% if message.name is defined %}{{ message.name }}{% endif %}"
+          .. "{% endfor %}"
+      ),
+      {
+        CALL_TURNS[1],
+        CALL_TURNS[2],
+        {
+          role = "tool",
+          content = "sunny",
+          tool_call_id = "call_1",
+          name = "get_weather",
+        },
+      }
+    )
+    test.equal(named_failure, nil)
+    test.equal(named, "call_1get_weather")
+  end
+)
+
+-- 48/T-002 and 48/T-006: the one assistant message whose call holds two keys.
+local LOOKUP: {chat.Message} = {
+  {
+    role = "assistant",
+    content = "",
+    tool_calls = {
+      {name = "lookup", arguments = json.decode('{"unit":"c","days":2}')},
+    },
+  },
+}
+
+test.it(
+  "each call writes its name and every argument name",
+  function()
+    test.equal(
+      wrote(
+        "{% for message in messages %}"
+          .. "{% for entry in message.tool_calls %}{{ entry.name }}"
+          .. "{% for key in entry.arguments %}{{ key }},{% endfor %}"
+          .. "{% endfor %}{% endfor %}",
+        LOOKUP
+      ),
+      "lookupunit,days,"
+    )
+  end
+)
+
+-- 48/T-006: the two templates that hand the string filter a value it has no
+-- text form for, over an argument map and over a list read off that map.
+local WALK_ARGS = "{% for message in messages %}{% for entry in message.tool_calls %}"
+  .. "{{ entry.arguments | string }}{% endfor %}{% endfor %}"
+
+local WALK_LIST = "{% for message in messages %}{% for entry in message.tool_calls %}"
+  .. "{{ entry.arguments.k | string }}{% endfor %}{% endfor %}"
+
+local LIST_CALLS: {chat.Message} = {
+  {
+    role = "assistant",
+    content = "",
+    tool_calls = {
+      {name = "lookup", arguments = json.decode('{"k":["a"]}')},
+    },
+  },
+}
+
+test.it(
+  "the string filter refuses a map and a list",
+  function()
+    local map_line = refused(WALK_ARGS, LOOKUP)
+    test.includes(map_line, "string")
+    test.equal(refused(WALK_LIST, LIST_CALLS), map_line)
+  end
+)
+
+-- 48/T-007: every kind the reader holds reaches a text form.
+local KIND_CALLS: {chat.Message} = {
+  {
+    role = "assistant",
+    content = "",
+    tool_calls = {
+      {
+        name = "x",
+        arguments = json.decode(
+          '{"n": 1.0, "b": true, "f": false, "z": null}'
+        ),
+      },
+    },
+  },
+}
+
+test.it(
+  "the string filter writes every kind the reader holds",
+  function()
+    test.equal(
+      wrote(
+        "{% for message in messages %}{% for entry in message.tool_calls %}"
+          .. "{{ entry.arguments.n | string }}"
+          .. "{{ entry.arguments.b | string }}"
+          .. "{{ entry.arguments.f | string }}"
+          .. "{{ entry.arguments.z | string }}"
+          .. "{{ entry.arguments.absent | string }}"
+          .. "{% endfor %}{% endfor %}",
+        KIND_CALLS
+      ),
+      "1truefalsenullnull"
+    )
   end
 )

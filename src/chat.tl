@@ -3,9 +3,17 @@ local tokenizer = require("tllm.tokenizer")
 local utf8lib = require("utf8lib")
 
 local record chat
+  record ToolCall
+    name: string
+    arguments: json.Value
+  end
+
   record Message
     role: string
     content: string
+    tool_calls: {ToolCall} | nil
+    tool_call_id: string | nil
+    name: string | nil
   end
 
   render: function(
@@ -229,14 +237,41 @@ local function map_put(held: Val, name: string, value: Val): nil
   held.truth = true
 end
 
+local of_json: function(held: json.Value): Val
+
+local function as_call(call: chat.ToolCall): Val
+  local held = as_map()
+  map_put(held, "name", as_text(call.name))
+  map_put(held, "arguments", of_json(call.arguments))
+  return held
+end
+
+local function as_calls(calls: {chat.ToolCall}): Val
+  local items: {Val} = {}
+  for _, call in ipairs(calls) do
+    items[#items + 1] = as_call(call)
+  end
+  return as_list(items)
+end
+
 local function as_message(message: Msg): Val
   local held = as_map()
   map_put(held, "role", as_text(message.role))
   map_put(held, "content", as_text(message.content))
+  local calls = message.tool_calls
+  if not (calls is nil) then
+    map_put(held, "tool_calls", as_calls(calls))
+  end
+  local call_id = message.tool_call_id
+  if call_id is string then
+    map_put(held, "tool_call_id", as_text(call_id))
+  end
+  local given = message.name
+  if given is string then
+    map_put(held, "name", as_text(given))
+  end
   return held
 end
-
-local of_json: function(held: json.Value): Val
 
 of_json = function(held: json.Value): Val
   if held:is("array") then
@@ -1667,12 +1702,39 @@ local function test_of(run: Runner, name: string, held: Val): Val
   return fail(run, "a test named " .. name .. " is not run")
 end
 
+local function string_form(held: Val): string | nil
+  local kind = held.kind
+  if kind == "text" then
+    return held.text
+  end
+  if kind == "number" then
+    return tostring(held.num)
+  end
+  if kind == "boolean" then
+    return held.truth and "true" or "false"
+  end
+  if kind == "none" or kind == "unbound" then
+    return "null"
+  end
+  return nil
+end
+
 local function filter_of(run: Runner, name: string, held: Val): Val
   if name == "trim" then
     return as_text(bare(written(held)))
   end
   if name == "tojson" then
     return as_text(json_written(held))
+  end
+  if name == "safe" then
+    return held
+  end
+  if name == "string" then
+    local form = string_form(held)
+    if form is nil then
+      return fail(run, "filter 'string' has no text form")
+    end
+    return as_text(form as string)
   end
   if name == "length" then
     if held.kind == "text" then
@@ -2175,6 +2237,13 @@ end
 local function walk_over(run: Runner, held: Val): {Val} | nil
   if held.kind == "list" then
     return held.items
+  end
+  if held.kind == "map" then
+    local keys: {Val} = {}
+    for _, name in ipairs(held.order) do
+      keys[#keys + 1] = as_text(name)
+    end
+    return keys
   end
   if held.kind == "text" then
     local items: {Val} = {}

@@ -165,8 +165,8 @@ tests here use hand-made fixtures, because a 23 GB file cannot be a test input.
   on a copy whose template is `{% for message in messages %}` `render` returns nil and a line
   naming that key; that on a copy whose template is `{% if %}` `render` returns nil and a line
   naming that key; that on a copy whose template is `{% endif %}` `render` returns nil and a line
-  naming that key; that on a copy whose template is `{{ 'x'|safe }}` `render` returns nil and a
-  line naming that key and `safe`; that on a copy whose template is `{{ missing.field }}`
+  naming that key; that on a copy whose template is `{{ 'x'|upper }}` `render` returns nil and a
+  line naming that key and `upper`; that on a copy whose template is `{{ missing.field }}`
   `render` returns nil and a line naming that key; that on a copy whose template is
   `{{ io.open('x') }}` `render` of one valid message returns nil and a line naming that key, `io`
   reaching nothing; that on T-001's fixture `render` of the empty list returns nil and a line

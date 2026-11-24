@@ -78,11 +78,12 @@ no seat at that point.
   and evaluate nothing in that branch, so that a name reached only there may stay unbound.
 - FR-011 (US-003) IF the template reaches `raise_exception` with a text, THEN THE SYSTEM SHALL
   return nil and the one line `tokenizer.chat_template: <text>` with newlines collapsed.
-- FR-012 (US-003) IF the reader evaluates a tag, a filter other than `trim`, `length` and `tojson`
-  (`tojson` being a filter `22/FR-008` runs, while `safe` and `string` stay refused), or an
-  expression it cannot evaluate, THEN THE SYSTEM SHALL return nil and one line naming
-  `tokenizer.chat_template`; a construct that sits in a branch FR-010 keeps from running, or in a
-  macro that is never called, is read and never refused.
+- FR-012 (US-003) IF the reader evaluates a tag, a filter other than `trim`, `length`, `tojson`,
+  `safe` and `string` (`tojson` being a filter `22/FR-008` runs, `safe` and `string` being filters
+  `48/FR-005` and `48/FR-006` run, and a filter the reader runs still refusing a value it has no
+  form for as `48/FR-007` states), or an expression it cannot evaluate, THEN THE SYSTEM SHALL
+  return nil and one line naming `tokenizer.chat_template`; a construct that sits in a branch
+  FR-010 keeps from running, or in a macro that is never called, is read and never refused.
 - FR-013 (US-003) IF an expression reads an attribute of, indexes, or calls a method on a value that
   is undefined, THEN THE SYSTEM SHALL return nil and the one line FR-012 describes, so that
   `{{ missing.field }}` and `{{ io.open('x') }}` are both refused and a name that is only written is
@@ -108,9 +109,10 @@ no seat at that point.
 - FR-018 (US-003) IF `+`, `-` or `*` is applied to a pair of values it cannot operate on, THEN THE
   SYSTEM SHALL return nil and the one line FR-012 describes, so `'a' + 5` is refused rather than
   concatenated.
-- FR-019 (US-003) IF a `{% for %}` iterates a value that is not a list, a string or a reversed
-  slice, THEN THE SYSTEM SHALL return nil and the one line FR-012 describes, so a `{% for %}` over
-  an unbound name is refused rather than writing nothing.
+- FR-019 (US-003) IF a `{% for %}` iterates a value that is not a list, a map, a string or a
+  reversed slice, THEN THE SYSTEM SHALL return nil and the one line FR-012 describes, so a
+  `{% for %}` over an unbound name is refused rather than writing nothing. A map is walked as
+  `48/FR-004` states, yielding each member's key.
 - FR-020 (US-002) WHEN an expression uses `in` or `not in`, THE SYSTEM SHALL answer about the right
   operand: whether a value is one of a list's items, whether a string occurs inside a string, and
   whether a key is present in a table, and SHALL refuse an operand it cannot test, such as an
@@ -123,8 +125,8 @@ no seat at that point.
 
 ## Non-goals
 
-- Tools, tool calls, images and videos, and the `tojson`, `safe`, `string` filters: this spec only
-  has to read them without running them, so a conversation that needs them is a follow-up spec.
+- Tools, tool calls, images and videos: this spec only has to read them without running them, so
+  a conversation that needs them is a follow-up spec.
 - `preserve_thinking` and `reasoning_content` as request inputs: the template's default path, with
   the names FR-001 leaves unbound, is what this spec produces.
 - No stop rule for the closer that ends a thinking block: generation is cut only at the tokenizer's

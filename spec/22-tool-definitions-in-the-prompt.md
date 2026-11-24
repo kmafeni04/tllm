@@ -111,10 +111,6 @@ end
 
 ## Non-goals
 
-- No tool calls in a history: an assistant turn carrying `tool_calls`, a `tool` role turn,
-  `tool_call_id`, `name` and `reasoning_content` as message fields, and the `safe` and `string`
-  filters and the walking of a map in a `{% for %}` that the template's tool-call branch needs, are
-  later.
 - No reading a call out of a reply: parsing a function call from the reply text, `tool_calls` in the
   response, a `finish_reason` naming a tool call and streaming those are a later spec, so generation
   still ends only at an end id or at the budget, the way `16` and `19` ship it.
@@ -234,12 +230,13 @@ end
   member `a` of `2`, writes `null` for `absent`, the member that map does not
   hold.
 
-- T-005 (FR-008): `tojson is run and safe is not`, proves that the template `{{
+- T-005 (FR-008): `tojson is run and upper is not`, proves that the template `{{
   'x'|tojson }}` renders the text `"x"` and nil rather than a refusal, and that
   the two refused-filter cases this spec displaces, the one in `17/T-003` and
-  the one in `20/T-004`, keep refusing once the filter they name is `safe`: each
-  answers nil and a line naming `tokenizer.chat_template` and `safe`, the word
-  `tojson` in neither line.
+  the one in `20/T-004`, keep refusing once the filter they name is `upper`: each
+  answers nil and a line naming `tokenizer.chat_template` and `upper`, the word
+  `tojson` in neither line. `48/FR-005` and `48/FR-006` later made `safe` and
+  `string` filters the reader runs, which is why this case names `upper`.
 
 ## Open questions
 
