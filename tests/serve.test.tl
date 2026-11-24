@@ -66,6 +66,22 @@ local function without_prefix(meta: {Meta}, prefix: string): {Meta}
 end
 
 local A_BODY = '{"messages":[{"role":"user","content":"a"}]}'
+local CALL_BODY = '{"messages":[{"role":"user","content":"c"}],"max_tokens":1}'
+local CALL = "Hi<tool_call>\196\138<function=get_weather>\196\138<parameter=city>\196\138Paris\196\138</parameter>\196\138</function>\196\138</tool_call>done"
+local TWO_CALLS = '<tool_call><function=get_weather><parameter=city>Paris</parameter></function></tool_call><tool_call><function=add><parameter=a>1</parameter></function></tool_call><tool_call><function=extra><parameter=opts>{"unit":"c"}</parameter></function></tool_call><tool_call><function=empty><parameter=opts>{}</parameter></function></tool_call>'
+
+-- 49/T-001: a copy of 18's fixture whose token zero is the given text
+local function first_token(reply: string): tltp.Server
+  return build(
+    meta_file(
+      replaced(
+        t001_meta(), mstrings("tokenizer.ggml.tokens", {reply, "b", "c"})
+      ),
+      t001_entries()
+    ),
+    "m"
+  )
+end
 
 local function body_with(name: string, value: string): string
   return '{"messages":[{"role":"user","content":"a"}],"'
@@ -359,6 +375,164 @@ test.it(
     test.equal(empty.choices[1].message.content, "")
     test.equal(empty.usage.completion_tokens, 0)
     test.equal(empty.usage.total_tokens, 1)
+  end
+)
+
+test.it(
+  "a reply holding a call answers the call it names",
+  function()
+    local one = answered(first_token(CALL), CALL_BODY)
+    test.equal(#one.choices, 1)
+    test.equal(one.choices[1].index, 0)
+    test.equal(one.choices[1].finish_reason, "tool_calls")
+    test.deepEqual(
+      one.choices[1].message,
+      {
+        role = "assistant",
+        content = "",
+        tool_calls = {
+          {
+            id = "call_1",
+            type = "function",
+            ["function"] = {
+              name = "get_weather",
+              arguments = '{"city":"Paris"}',
+            },
+          },
+        },
+      }
+    )
+    test.deepEqual(
+      one.usage,
+      {
+        prompt_tokens = 1,
+        completion_tokens = 1,
+        total_tokens = 2,
+        prompt_tokens_details = {cached_tokens = 0},
+      }
+    )
+
+    local two = answered(first_token(TWO_CALLS), CALL_BODY)
+    test.deepEqual(
+      two.choices[1].message.tool_calls,
+      {
+        {
+          id = "call_1",
+          type = "function",
+          ["function"] = {
+            name = "get_weather",
+            arguments = '{"city":"Paris"}',
+          },
+        },
+        {
+          id = "call_2",
+          type = "function",
+          ["function"] = {name = "add", arguments = '{"a":1}'},
+        },
+        {
+          id = "call_3",
+          type = "function",
+          ["function"] = {name = "extra", arguments = '{"opts":{"unit":"c"}}'},
+        },
+        {
+          id = "call_4",
+          type = "function",
+          ["function"] = {name = "empty", arguments = '{"opts":{}}'},
+        },
+      }
+    )
+
+    local ping = answered(
+      first_token("<tool_call><function=ping></function></tool_call>"),
+      CALL_BODY
+    )
+    test.deepEqual(
+      ping.choices[1].message.tool_calls,
+      {
+        {
+          id = "call_1",
+          type = "function",
+          ["function"] = {name = "ping", arguments = "{}"},
+        },
+      }
+    )
+  end
+)
+
+test.it(
+  "a reply with no complete call keeps the plain body",
+  function()
+    local plain = answered(
+      build(meta_file(t001_meta(), t001_entries()), "m"), A_BODY
+    )
+    test.equal(#plain.choices, 1)
+    test.equal(plain.choices[1].index, 0)
+    test.equal(plain.choices[1].finish_reason, nil)
+    test.deepEqual(
+      plain.choices[1].message,
+      {role = "assistant", content = string.rep("a", 256)}
+    )
+    test.equal(plain.choices[1].message.tool_calls, nil)
+    test.deepEqual(
+      plain.usage,
+      {
+        prompt_tokens = 1,
+        completion_tokens = 256,
+        total_tokens = 257,
+        prompt_tokens_details = {cached_tokens = 0},
+      }
+    )
+
+    local unfinished = "<tool_call><function=get_weather><parameter=city>Paris</parameter></function>"
+    local open = answered(first_token(unfinished), CALL_BODY)
+    test.deepEqual(
+      open.choices[1].message, {role = "assistant", content = unfinished}
+    )
+    test.equal(open.choices[1].finish_reason, nil)
+
+    local json_block = '<tool_call>{"name":"get_weather","arguments":{}}</tool_call>'
+    local quoted = answered(first_token(json_block), CALL_BODY)
+    test.deepEqual(
+      quoted.choices[1].message, {role = "assistant", content = json_block}
+    )
+    test.equal(quoted.choices[1].finish_reason, nil)
+  end
+)
+
+test.it(
+  "a broken call block is refused",
+  function()
+    local cases: {{string, string}} = {
+      {
+        "<tool_call><function=></function></tool_call>",
+        "reply: block 1: not a call",
+      },
+      {
+        "<tool_call><function=get_weather><parameter=city>Paris</parameter></tool_call>",
+        "reply: block 1: not a call",
+      },
+      {
+        "<tool_call><function=get_weather><parameter=>Paris</parameter></function></tool_call>",
+        "reply: block 1: not a call",
+      },
+      {
+        "<tool_call><function=get_weather>oops</function></tool_call>",
+        "reply: block 1: not a call",
+      },
+      {
+        "<tool_call><function=get_weather><parameter=city>Paris</parameter></function></tool_call><tool_call><function=></function></tool_call>",
+        "reply: block 2: not a call",
+      },
+    }
+    for _, given in ipairs(cases) do
+      local reply = serve.answer(first_token(given[1]), CALL_BODY)
+      test.equal(reply.status, "InternalServerError", given[1])
+      test.deepEqual(
+        tltp.json_decode(reply.body),
+        {error = {message = given[2], type = "internal_error"}},
+        given[1]
+      )
+    end
   end
 )
 

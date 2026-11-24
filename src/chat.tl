@@ -16,6 +16,12 @@ local record chat
     name: string | nil
   end
 
+  record ReplyCall
+    name: string
+    arguments: string
+  end
+
+  read_calls: function(string): {ReplyCall} | nil, string | nil
   render: function(
     tokenizer.Tokenizer,
     {Message},
@@ -29,6 +35,12 @@ local type Msg = chat.Message
 
 local KEY = "tokenizer.chat_template"
 local WS = "[ \t\r\n]"
+local CALL_OPEN = "<tool_call>"
+local CALL_CLOSE = "</tool_call>"
+local FUNCTION_OPEN = "<function="
+local FUNCTION_CLOSE = "</function>"
+local PARAMETER_OPEN = "<parameter="
+local PARAMETER_CLOSE = "</parameter>"
 
 local record Expr
   form: string
@@ -387,6 +399,109 @@ end
 local function bare(text: string): string
   local head: string = text:gsub("^" .. WS .. "+", "")
   return (head:gsub(WS .. "+$", ""))
+end
+
+local function representable(held: json.Value): boolean
+  if held:is("number") then
+    local amount = held:val() as number
+    return amount == amount and amount ~= math.huge and amount ~= -math.huge
+  end
+  if held:is("array") or held:is("object") then
+    for _, child in held:children() do
+      if not representable(child) then
+        return false
+      end
+    end
+  end
+  return true
+end
+
+-- 49/FR-002: a value keeps its JSON type when its text decodes as JSON and is
+-- representable, and is text otherwise
+local function encoded(text: string): string
+  local decoded, value = pcall(json.decode, text, {json5 = false})
+  if decoded and representable(value as json.Value) then
+    return json.encode(value as json.Value)
+  end
+  return json.encode(text)
+end
+
+local function unspaced(text: string, at: integer): integer
+  return text:find("[^ \t\r\n]", at) or #text + 1
+end
+
+-- 49/FR-002: one call out of a block that begins with `<function=`
+local function read_call(text: string): chat.ReplyCall | nil
+  local name_end = text:find(">", #FUNCTION_OPEN + 1, true)
+  if name_end is nil then
+    return nil
+  end
+  local name = text:sub(#FUNCTION_OPEN + 1, name_end - 1)
+  if #name == 0 then
+    return nil
+  end
+
+  local arguments: {string} = {}
+  local at = name_end + 1
+  while true do
+    at = unspaced(text, at)
+    if text:sub(at, at + #FUNCTION_CLOSE - 1) == FUNCTION_CLOSE then
+      if unspaced(text, at + #FUNCTION_CLOSE) <= #text then
+        return nil
+      end
+      return {
+        name = name,
+        arguments = "{" .. table.concat(arguments, ",") .. "}",
+      }
+    end
+    if text:sub(at, at + #PARAMETER_OPEN - 1) ~= PARAMETER_OPEN then
+      return nil
+    end
+    local key_end = text:find(">", at + #PARAMETER_OPEN, true)
+    if key_end is nil then
+      return nil
+    end
+    local key = text:sub(at + #PARAMETER_OPEN, key_end - 1)
+    if #key == 0 then
+      return nil
+    end
+    local value_end = text:find(PARAMETER_CLOSE, key_end + 1, true)
+    if value_end is nil then
+      return nil
+    end
+    local value = bare(text:sub(key_end + 1, value_end - 1))
+    arguments[#arguments + 1] = json.encode(key) .. ":" .. encoded(value)
+    at = value_end + #PARAMETER_CLOSE
+  end
+end
+
+-- 49/FR-001 and 49/FR-005: every call block in the reply, or the line naming
+-- the first block that does not hold the shape a call has
+function chat.read_calls(text: string): {chat.ReplyCall} | nil, string | nil
+  local calls: {chat.ReplyCall} = {}
+  local at = 1
+  local position = 0
+  while true do
+    local open_at = text:find(CALL_OPEN, at, true)
+    if open_at is nil then
+      break
+    end
+    local close_at = text:find(CALL_CLOSE, open_at + #CALL_OPEN, true)
+    if close_at is nil then
+      break
+    end
+    position = position + 1
+    local block = bare(text:sub(open_at + #CALL_OPEN, close_at - 1))
+    if block:sub(1, #FUNCTION_OPEN) == FUNCTION_OPEN then
+      local call = read_call(block)
+      if call is nil then
+        return nil, "reply: block " .. tostring(position) .. ": not a call"
+      end
+      calls[#calls + 1] = call
+    end
+    at = close_at + #CALL_CLOSE
+  end
+  return calls, nil
 end
 
 local function letters(text: string): {string}

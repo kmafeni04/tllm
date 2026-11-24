@@ -103,7 +103,9 @@ end
   reserve one sized by `23/FR-004`, generate from that prompt and budget, and answer `OK` with a
   body that decodes to an object whose `choices` is an array holding one object whose `index` is 0
   and whose `message` is an object whose `role` is `assistant` and whose `content` is the generated
-  text.
+  text, except that when the reply text holds a call, that object's `finish_reason` is `tool_calls`
+  and its `message`'s `content` is empty and its `tool_calls` is the list `49/FR-003` describes; a
+  reply holding no call keeps the body as written.
 - FR-004 (US-002) WHEN a successful reply is answered, THE SYSTEM SHALL hold in it a `usage` object
   whose `prompt_tokens` is the number of ids the rendered prompt encodes to, whose
   `completion_tokens` is the number of ids the generation sampled, whose `total_tokens` is their
@@ -162,7 +164,8 @@ end
   Not testable: `build` calls `compute.load` with no argument, so whether it refuses depends on the
   host's libraries; the field it fills is proven by every case that generates.
 - FR-012 (US-005) IF `tokenizer:encode` for the rendered prompt, `chat.render`, a reservation
-  `reserve` refuses or `generate.text` returns a failure, THEN THE SYSTEM SHALL answer
+  `reserve` refuses, `generate.text` returns a failure or a call block the reply scan reads is
+  refused as `49/FR-005` states, THEN THE SYSTEM SHALL answer
   `InternalServerError` with a body decoding to an object whose single member is `error`, an object
   whose `message` is that line and whose `type` is `internal_error`. `compute.model` leaves the
   per-request faults: a model the server cannot build is `build`'s refusal, as `26/T-007` has it,
@@ -172,8 +175,8 @@ end
 
 - No streamed reply of its own: the route answers whatever `serve.stream` gives, and the events of
   a streamed reply, their names and their order, are spec 19's.
-- No reply member beyond `choices` and `usage`: no `id`, `object`, `created`, `model` or
-  `finish_reason`, and one choice only.
+- No reply member beyond `choices` and `usage`: no `id`, `object`, `created` or `model`, and one
+  choice only.
 - No trimming or reloading: a request without a `session_id` reserves its own sequence over the
   positions it needs, starting from position zero; `23` keeps a conversation's sequence between
   requests, so a cache does outlive a request.

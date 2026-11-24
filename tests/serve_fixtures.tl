@@ -37,14 +37,27 @@ local record serve_fixtures
     error: ErrorDetail
   end
 
+  record ReplyFunction
+    name: string
+    arguments: string
+  end
+
+  record ReplyCall
+    id: string
+    type: string
+    ["function"]: ReplyFunction
+  end
+
   record ReplyMessage
     role: string
     content: string
+    tool_calls: {ReplyCall} | nil
   end
 
   record Choice
     index: integer
     message: ReplyMessage
+    finish_reason: string | nil
   end
 
   record PromptDetails

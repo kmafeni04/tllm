@@ -1,6 +1,6 @@
 # 49: A tool call out of the answered reply
 
-**Status**: pending   **Depends on**: 16, 18
+**Status**: done   **Depends on**: 16, 18
 
 ## Problem & context
 
@@ -183,8 +183,4 @@ The reply a call block produces, the `usage` object being the one the generation
 
 ## Amendments
 
-- `18/FR-003`: the answered body's one choice gains `finish_reason` `tool_calls` and a `message`
-  whose `content` is empty and whose `tool_calls` is `49/FR-003`'s list when the reply holds a call;
-  a reply with no call keeps the body as written.
-- `18/FR-012`: the list of failures gains the reply scan's refusal: a call block that `49/FR-005`
-  refuses answers that body, its line the message.
+- None.

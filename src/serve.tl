@@ -146,6 +146,17 @@ local record Event
   choices: {EventChoice}
 end
 
+local record AnsweredFunction
+  name: string
+  arguments: string
+end
+
+local record AnsweredCall
+  id: string
+  type: string
+  ["function"]: AnsweredFunction
+end
+
 local record Turn
   ready: Prepared
   run: generate.Run | nil
@@ -1397,6 +1408,46 @@ local function finished(ready: Prepared): serve.Reply
   local sampled = answer.sampled
   local completion = #sampled
   kept(ready, sampled, answer.cut)
+
+  local usage = {
+    prompt_tokens = #ready.ids,
+    completion_tokens = completion,
+    total_tokens = #ready.ids + completion,
+    prompt_tokens_details = {cached_tokens = ready.cached},
+  }
+  local calls, call_line = chat.read_calls(answer.text)
+  if calls is nil then
+    return as_reply(internal(call_line as string))
+  end
+  if #calls > 0 then
+    local answered: {AnsweredCall} = {}
+    for index, call in ipairs(calls) do
+      answered[index] = {
+        id = "call_" .. tostring(index),
+        type = "function",
+        ["function"] = {name = call.name, arguments = call.arguments},
+      }
+    end
+    return {
+      status = "OK",
+      body = tltp.json_encode(
+        {
+          choices = {
+            {
+              index = 0,
+              finish_reason = "tool_calls",
+              message = {
+                role = "assistant",
+                content = "",
+                tool_calls = answered,
+              },
+            },
+          },
+          usage = usage,
+        }
+      ) as string,
+    }
+  end
   return {
     status = "OK",
     body = tltp.json_encode(
@@ -1404,12 +1455,7 @@ local function finished(ready: Prepared): serve.Reply
         choices = {
           {index = 0, message = {role = "assistant", content = answer.text}},
         },
-        usage = {
-          prompt_tokens = #ready.ids,
-          completion_tokens = completion,
-          total_tokens = #ready.ids + completion,
-          prompt_tokens_details = {cached_tokens = ready.cached},
-        },
+        usage = usage,
       }
     ) as string,
   }

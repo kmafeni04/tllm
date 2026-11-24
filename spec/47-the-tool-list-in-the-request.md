@@ -101,8 +101,7 @@ end
 - No check on a tool definition beyond its name: `type`, `description`, `parameters` and every other
   member pass through as written, and a definition holding a member this engine does not know is
   not refused.
-- No tool calls out of a reply: parsing a call from the reply text, `tool_calls` in the response,
-  a `finish_reason` naming a call and streaming those stay later.
+- No streamed tool calls: streaming a call from the reply text stays later.
 
 ## Tests
 
