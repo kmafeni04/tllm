@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 216 74" width="216" height="74" role="img" aria-labelledby="ttl">
+  <title id="ttl">tllm</title>
+  <g transform="translate(26 38.5)">
+    <path d="M-21 7.56L0 15.12L0 19.12L-21 11.56Z" fill="#1a1a1a" fill-opacity="0.85"/><path d="M21 7.56L0 15.12L0 19.12L21 11.56Z" fill="#1a1a1a" fill-opacity="0.85"/><path d="M0 0L21 7.56L0 15.12L-21 7.56Z" fill="#1a1a1a" stroke="#1a1a1a" stroke-width="3.2" stroke-linejoin="round"/><path d="M-12 7.56L0 11.88L0 23.88L-12 19.56Z" fill="#1a1a1a" fill-opacity="0.85"/><path d="M12 7.56L0 11.88L0 23.88L12 19.56Z" fill="#1a1a1a" fill-opacity="0.85"/><path d="M0 3.24L12 7.56L0 11.88L-12 7.56Z" fill="#1a1a1a" stroke="#1a1a1a" stroke-width="3.2" stroke-linejoin="round"/><path d="M-19 -4.44L0 2.4L0 5.4L-19 -1.44Z" fill="#1a1a1a" fill-opacity="0.6"/><path d="M19 -4.44L0 2.4L0 5.4L19 -1.44Z" fill="#1a1a1a" fill-opacity="0.6"/><path d="M0 -11.28L19 -4.44L0 2.4L-19 -4.44Z" fill="#1a1a1a" stroke="#1a1a1a" stroke-width="3.2" stroke-linejoin="round"/><path d="M-9 -7.44L0 -4.2L0 4.8L-9 1.56Z" fill="#1a1a1a" fill-opacity="0.85"/><path d="M9 -7.44L0 -4.2L0 4.8L9 1.56Z" fill="#1a1a1a" fill-opacity="0.85"/><path d="M0 -10.68L9 -7.44L0 -4.2L-9 -7.44Z" fill="#1a1a1a" stroke="#1a1a1a" stroke-width="3.2" stroke-linejoin="round"/><path d="M-14 -16.44L0 -11.4L0 -8.9L-14 -13.94Z" fill="#0f766e" fill-opacity="1"/><path d="M14 -16.44L0 -11.4L0 -8.9L14 -13.94Z" fill="#0f766e" fill-opacity="1"/><path d="M0 -21.48L14 -16.44L0 -11.4L-14 -16.44Z" fill="#0f766e" stroke="#0f766e" stroke-width="3.2" stroke-linejoin="round"/><path d="M0 -26.96L-8.4 -18.94L0 -15.92Z" fill="#0f766e"/><path d="M0 -26.96L8.4 -18.94L0 -15.92Z" fill="#0f766e" fill-opacity="0.8"/><path d="M-1.6 -23.94L0 -23.36L0 -16.36L-1.6 -16.94Z" fill="#0f766e" fill-opacity="1"/><path d="M1.6 -23.94L0 -23.36L0 -16.36L1.6 -16.94Z" fill="#0f766e" fill-opacity="1"/><path d="M0 -24.52L1.6 -23.94L0 -23.36L-1.6 -23.94Z" fill="#0f766e" stroke="#0f766e" stroke-width="3.2" stroke-linejoin="round"/>
+  </g>
+  <g fill="none" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" transform="translate(62 0)">
+    <path stroke="#1a1a1a" d="M22 16V58M10 30H34"/>
+    <path stroke="#0f766e" d="M56 16V58M80 16V58"/>
+    <path stroke="#1a1a1a" d="M104 58V41a11 11 0 0 1 22 0v17v-17a11 11 0 0 1 22 0v17"/>
+  </g>
+</svg>

@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
+  <img src="assets/logo-light.svg" width="220" alt="tllm">
+</picture>
+
 # tllm
 
 An LLM inference engine written in Teal and run on LuaJIT through
