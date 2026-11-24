@@ -76,9 +76,22 @@ local record serve_fixtures
     usage: Usage
   end
 
+  record StreamFunction
+    name: string | nil
+    arguments: string | nil
+  end
+
+  record StreamCall
+    index: integer
+    id: string | nil
+    type: string | nil
+    ["function"]: StreamFunction
+  end
+
   record StreamDelta
     role: string | nil
     content: string | nil
+    tool_calls: {StreamCall} | nil
   end
 
   record StreamChoice

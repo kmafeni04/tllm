@@ -71,15 +71,19 @@ non-goals that nothing is streamed. The record `serve` builds from the body is u
   `delta` is an object whose `role` is `assistant`.
 - FR-004 (US-001) WHEN a step of a turn releases text, THE SYSTEM SHALL write, through that turn's
   own emit, an event whose data is a JSON object whose `choices` is an array holding one object
-  whose `index` is 0 and whose `delta` is an object whose `content` is that text, one event per
-  release and none for a token the run holds back, the event for a run's last release coming before
-  the event FR-005 writes; the producer writes no token event of its own.
+  whose `index` is 0 and whose `delta` is an object whose `content` is that text outside a call
+  block, one event per release and none for a token the run holds back, the event for a run's last
+  release coming before the event FR-005 writes; the producing turn may hold that text past the
+  step that released it and send it before the turn's ending event, its events carry the
+  `delta.tool_calls` events a call is sent as `50/FR-002` and `50/FR-003` give them, and the
+  producer writes no token event of its own.
 - FR-005 (US-002) WHEN the reply ends, THE SYSTEM SHALL have `serve.step` write, in this order, an
   event whose data is a JSON object whose `choices` is an array holding one object whose `index` is
-  0, holding no `delta` member, whose `finish_reason` is `length` when as many tokens were appended
-  as the budget allows and `stop` otherwise, then an event whose data is the text `[DONE]`. The
-  producer writes nothing after its opening event, so it returns on a later resume and the
-  connection closes up to a second after the last event.
+  0, holding no `delta` member, whose `finish_reason` is `error` when a block `50/FR-009` names
+  ended the turn, `tool_calls` when the turn has sent a call, `length` when as many tokens were
+  appended as the budget allows, and `stop` otherwise, then an event whose data is the text
+  `[DONE]`. The producer writes nothing after its opening event, so it returns on a later resume and
+  the connection closes up to a second after the last event.
 - FR-006 (US-003) WHEN the body's `stream` member is absent or `false`, THE SYSTEM SHALL answer the
   status and the body `serve.answer` gives for that body, as `application/json`.
 - FR-007 (US-004) IF the body is one `18/FR-008` refuses, or the prompt's ids plus the budget minus

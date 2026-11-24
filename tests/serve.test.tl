@@ -22,6 +22,7 @@ local u32, u64, mint, mtext, mstrings, without_meta =
   support.mtext,
   support.mstrings,
   support.without_meta
+local f32 = support.f32
 local defs = require("tllm.compute.types")
 local type Loaded = defs.Loaded
 local type Meta = support.Meta
@@ -833,6 +834,68 @@ local function driven(server: tltp.Server, stream_fn: tltp.StreamFn): {string}
   return watcher.payloads
 end
 
+-- 50/T-001 and 50/T-002: 18's fixture with the three tokens `one`, `two` and
+-- `c`, where the prompt picks id 0 and id 0 picks id 1
+local function two_pieces(one: string, two: string): tltp.Server
+  local meta = replaced(
+    replaced(t001_meta(), mstrings("tokenizer.ggml.tokens", {one, two, "c"})),
+    mint("tokenizer.ggml.eos_token_id", 2)
+  )
+  local entries = support.replaced(
+    support.replaced(
+      t001_entries(),
+      "token_embd.weight",
+      f32("token_embd.weight", {2, 3}, {1, 0, 0, 1, 0, 1})
+    ),
+    "output.weight",
+    f32("output.weight", {2, 3}, {0, 1, 1, 0, -1, -1})
+  )
+  return build(meta_file(meta, entries), "m")
+end
+
+local function call_body(content: string, budget: integer): string
+  return '{"messages":[{"role":"user","content":"'
+    .. content
+    .. '"}],"max_tokens":'
+    .. tostring(budget)
+    .. ',"stream":true}'
+end
+
+local function call_named(index: integer, id: string, name: string): StreamEvent
+  return {
+    choices = {
+      {
+        index = 0,
+        delta = {
+          tool_calls = {
+            {
+              index = index,
+              id = id,
+              type = "function",
+              ["function"] = {name = name},
+            },
+          },
+        },
+      },
+    },
+  }
+end
+
+local function call_given(index: integer, arguments: string): StreamEvent
+  return {
+    choices = {
+      {
+        index = 0,
+        delta = {
+          tool_calls = {
+            {index = index, ["function"] = {arguments = arguments}},
+          },
+        },
+      },
+    },
+  }
+end
+
 local function stream_refused(
   server: tltp.Server, body: string
 ): tltp.Response, ErrorBody
@@ -1017,6 +1080,223 @@ test.it(
     local broken_payloads = driven(broken, broken_run as tltp.StreamFn)
     test.equal(#broken_payloads, 1)
     test.deepEqual(events_of(broken_payloads)[1], ROLE_EVENT)
+  end
+)
+
+test.it(
+  "a streamed call arrives as tool_calls deltas",
+  function()
+    local blocked = two_pieces(
+      "<tool_call><function=get_weather><parameter=city>Paris</parameter></function>",
+      "</tool_call>"
+    )
+    local response, block_run = serve.stream(blocked, call_body("c", 2))
+    test.equal(response.status, "OK")
+    test.equal(response.content_type, "text/event-stream")
+    local block_payloads = driven(blocked, block_run as tltp.StreamFn)
+    test.equal(#block_payloads, 5)
+    test.deepEqual(tltp.json_decode(block_payloads[1]), ROLE_EVENT)
+    test.deepEqual(
+      tltp.json_decode(block_payloads[2]),
+      call_named(0, "call_1", "get_weather")
+    )
+    test.deepEqual(
+      tltp.json_decode(block_payloads[3]), call_given(0, '{"city":"Paris"}')
+    )
+    test.deepEqual(
+      tltp.json_decode(block_payloads[4]), finish_event("tool_calls")
+    )
+    test.equal(block_payloads[5], "[DONE]")
+
+    local called = first_token(CALL)
+    local _, call_run = serve.stream(called, call_body("c", 1))
+    local call_payloads = driven(called, call_run as tltp.StreamFn)
+    test.equal(#call_payloads, 7)
+    test.deepEqual(tltp.json_decode(call_payloads[1]), ROLE_EVENT)
+    test.deepEqual(tltp.json_decode(call_payloads[2]), token_event("Hi"))
+    test.deepEqual(
+      tltp.json_decode(call_payloads[3]), call_named(0, "call_1", "get_weather")
+    )
+    test.deepEqual(
+      tltp.json_decode(call_payloads[4]), call_given(0, '{"city":"Paris"}')
+    )
+    test.deepEqual(tltp.json_decode(call_payloads[5]), token_event("done"))
+    test.deepEqual(
+      tltp.json_decode(call_payloads[6]), finish_event("tool_calls")
+    )
+    test.equal(call_payloads[7], "[DONE]")
+
+    local mixed = first_token(
+      "Hi<tool_call><function=get_weather><parameter=city>Paris</parameter></function></tool_call>mid<tool_call><function=add><parameter=a>1</parameter></function></tool_call>done"
+    )
+    local _, mixed_run = serve.stream(mixed, call_body("c", 1))
+    local mixed_payloads = driven(mixed, mixed_run as tltp.StreamFn)
+    test.equal(#mixed_payloads, 10)
+    test.deepEqual(tltp.json_decode(mixed_payloads[1]), ROLE_EVENT)
+    test.deepEqual(tltp.json_decode(mixed_payloads[2]), token_event("Hi"))
+    test.deepEqual(
+      tltp.json_decode(mixed_payloads[3]),
+      call_named(0, "call_1", "get_weather")
+    )
+    test.deepEqual(
+      tltp.json_decode(mixed_payloads[4]), call_given(0, '{"city":"Paris"}')
+    )
+    test.deepEqual(tltp.json_decode(mixed_payloads[5]), token_event("mid"))
+    test.deepEqual(
+      tltp.json_decode(mixed_payloads[6]), call_named(1, "call_2", "add")
+    )
+    test.deepEqual(
+      tltp.json_decode(mixed_payloads[7]), call_given(1, '{"a":1}')
+    )
+    test.deepEqual(tltp.json_decode(mixed_payloads[8]), token_event("done"))
+    test.deepEqual(
+      tltp.json_decode(mixed_payloads[9]), finish_event("tool_calls")
+    )
+    test.equal(mixed_payloads[10], "[DONE]")
+
+    local twice = first_token(TWO_CALLS)
+    local _, twice_run = serve.stream(twice, call_body("c", 1))
+    local twice_payloads = driven(twice, twice_run as tltp.StreamFn)
+    test.equal(#twice_payloads, 11)
+    test.deepEqual(tltp.json_decode(twice_payloads[1]), ROLE_EVENT)
+    test.deepEqual(
+      tltp.json_decode(twice_payloads[2]),
+      call_named(0, "call_1", "get_weather")
+    )
+    test.deepEqual(
+      tltp.json_decode(twice_payloads[3]), call_given(0, '{"city":"Paris"}')
+    )
+    test.deepEqual(
+      tltp.json_decode(twice_payloads[4]), call_named(1, "call_2", "add")
+    )
+    test.deepEqual(
+      tltp.json_decode(twice_payloads[5]), call_given(1, '{"a":1}')
+    )
+    test.deepEqual(
+      tltp.json_decode(twice_payloads[6]), call_named(2, "call_3", "extra")
+    )
+    test.deepEqual(
+      tltp.json_decode(twice_payloads[7]),
+      call_given(2, '{"opts":{"unit":"c"}}')
+    )
+    test.deepEqual(
+      tltp.json_decode(twice_payloads[8]), call_named(3, "call_4", "empty")
+    )
+    test.deepEqual(
+      tltp.json_decode(twice_payloads[9]), call_given(3, '{"opts":{}}')
+    )
+    test.deepEqual(
+      tltp.json_decode(twice_payloads[10]), finish_event("tool_calls")
+    )
+    test.equal(twice_payloads[11], "[DONE]")
+  end
+)
+
+test.it(
+  "a reply that is not a call releases its text as content",
+  function()
+    local half = two_pieces("<tool_ca", "ll")
+    local _, half_run = serve.stream(half, call_body("c", 2))
+    local half_payloads = driven(half, half_run as tltp.StreamFn)
+    test.equal(#half_payloads, 4)
+    test.deepEqual(tltp.json_decode(half_payloads[1]), ROLE_EVENT)
+    test.deepEqual(
+      tltp.json_decode(half_payloads[2]), token_event("<tool_call")
+    )
+    test.deepEqual(tltp.json_decode(half_payloads[3]), finish_event("length"))
+    test.equal(half_payloads[4], "[DONE]")
+
+    local unfinished = "<tool_call><function=get_weather><parameter=city>Paris</parameter></function>"
+    local open = first_token(unfinished)
+    local _, open_run = serve.stream(open, call_body("c", 1))
+    local open_payloads = driven(open, open_run as tltp.StreamFn)
+    test.equal(#open_payloads, 4)
+    test.deepEqual(tltp.json_decode(open_payloads[1]), ROLE_EVENT)
+    test.deepEqual(tltp.json_decode(open_payloads[2]), token_event(unfinished))
+    test.deepEqual(tltp.json_decode(open_payloads[3]), finish_event("length"))
+    test.equal(open_payloads[4], "[DONE]")
+
+    local before = first_token('x<tool_call>{"a":1')
+    local _, before_run = serve.stream(before, call_body("c", 1))
+    local before_payloads = driven(before, before_run as tltp.StreamFn)
+    test.equal(#before_payloads, 4)
+    test.deepEqual(tltp.json_decode(before_payloads[1]), ROLE_EVENT)
+    test.deepEqual(
+      tltp.json_decode(before_payloads[2]), token_event('x<tool_call>{"a":1')
+    )
+    test.deepEqual(tltp.json_decode(before_payloads[3]), finish_event("length"))
+    test.equal(before_payloads[4], "[DONE]")
+
+    local quoted = '<tool_call>{"name":"get_weather","arguments":{}}</tool_call>'
+    local block = first_token(quoted)
+    local _, quoted_run = serve.stream(block, call_body("c", 1))
+    local quoted_payloads = driven(block, quoted_run as tltp.StreamFn)
+    test.equal(#quoted_payloads, 4)
+    test.deepEqual(tltp.json_decode(quoted_payloads[1]), ROLE_EVENT)
+    test.deepEqual(tltp.json_decode(quoted_payloads[2]), token_event(quoted))
+    test.deepEqual(tltp.json_decode(quoted_payloads[3]), finish_event("length"))
+    test.equal(quoted_payloads[4], "[DONE]")
+  end
+)
+
+test.it(
+  "a streamed broken call block ends with an error ending",
+  function()
+    local server = first_token(
+      "Hi<tool_call><function=></function></tool_call>"
+    )
+    local body = '{"messages":[{"role":"user","content":"c"}],'
+      .. '"max_tokens":1,"session_id":"s","stream":true}'
+    local _, broken_run = serve.stream(server, body)
+    local payloads = driven(server, broken_run as tltp.StreamFn)
+    test.equal(#payloads, 4)
+    test.deepEqual(tltp.json_decode(payloads[1]), ROLE_EVENT)
+    test.deepEqual(tltp.json_decode(payloads[2]), token_event("Hi"))
+    test.deepEqual(tltp.json_decode(payloads[3]), finish_event("error"))
+    test.equal(payloads[4], "[DONE]")
+    for _, payload in ipairs(payloads) do
+      test.equal(payload:find("<function=", 1, true), nil, payload)
+      test.equal(payload:find("tool_calls", 1, true), nil, payload)
+    end
+    test.equal(serve.session_of(server, "s"), nil)
+  end
+)
+
+test.it(
+  "a body carrying tools and stop is a bad request",
+  function()
+    local server = build(meta_file(t001_meta(), t001_entries()), "m")
+    local tools = '[{"type":"function","function":{"name":"b"}}]'
+
+    local function together(tool_text: string, stop_text: string): string
+      return '{"messages":[{"role":"user","content":"a"}],"tools":'
+        .. tool_text
+        .. ',"stop":'
+        .. stop_text
+        .. "}"
+    end
+
+    for _, stop_text in ipairs({'"a"', '["a","b"]'}) do
+      local body = together(tools, stop_text)
+      local fault = rejected(server, body)
+      test.includes(fault.error.message, "stop", body)
+      local envelope = fault as ChatReply
+      test.equal(envelope.choices, nil, body)
+      test.equal(envelope.usage, nil, body)
+
+      local response, streamed_fault = stream_refused(server, streaming(body))
+      test.equal(response.status, "BadRequest", body)
+      test.includes(streamed_fault.error.message, "stop", body)
+    end
+
+    local content = '{"messages":[{"role":"user","content":"a"}]'
+    answered(server, content .. ',"tools":' .. tools .. "}")
+    answered(server, content .. ',"stop":"a"}')
+    answered(server, content .. ',"tools":[],"stop":"a"}')
+
+    local both = rejected(server, together("5", '"a"'))
+    test.includes(both.error.message, "tools")
+    test.equal(both.error.message:find("stop", 1, true), nil)
   end
 )
 

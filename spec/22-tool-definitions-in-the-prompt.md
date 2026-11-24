@@ -111,8 +111,7 @@ end
 
 ## Non-goals
 
-- No streaming a call out of a reply: streaming one is a later spec, so generation still ends only
-  at an end id or at the budget, the way `16` and `19` ship it.
+- None.
 
 ## Tests
 

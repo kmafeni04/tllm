@@ -101,7 +101,6 @@ end
 - No check on a tool definition beyond its name: `type`, `description`, `parameters` and every other
   member pass through as written, and a definition holding a member this engine does not know is
   not refused.
-- No streamed tool calls: streaming a call from the reply text stays later.
 
 ## Tests
 

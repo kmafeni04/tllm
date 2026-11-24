@@ -21,6 +21,16 @@ local record chat
     arguments: string
   end
 
+  record ReplyBlock
+    is_call: boolean
+    call: ReplyCall | nil
+  end
+
+  -- the marker pair a scanned block is found by, so a stream holds and sends
+  -- the same bytes the scan reads
+  call_open: string
+  call_close: string
+  read_block: function(string): ReplyBlock
   read_calls: function(string): {ReplyCall} | nil, string | nil
   render: function(
     tokenizer.Tokenizer,
@@ -41,6 +51,9 @@ local FUNCTION_OPEN = "<function="
 local FUNCTION_CLOSE = "</function>"
 local PARAMETER_OPEN = "<parameter="
 local PARAMETER_CLOSE = "</parameter>"
+
+chat.call_open = CALL_OPEN
+chat.call_close = CALL_CLOSE
 
 local record Expr
   form: string
@@ -475,6 +488,16 @@ local function read_call(text: string): chat.ReplyCall | nil
   end
 end
 
+-- 49/FR-001: one block's inner text read as the call it holds, a block that
+-- does not begin with `<function=` being no call block at all
+function chat.read_block(text: string): chat.ReplyBlock
+  local block = bare(text)
+  if block:sub(1, #FUNCTION_OPEN) ~= FUNCTION_OPEN then
+    return {is_call = false, call = nil}
+  end
+  return {is_call = true, call = read_call(block)}
+end
+
 -- 49/FR-001 and 49/FR-005: every call block in the reply, or the line naming
 -- the first block that does not hold the shape a call has
 function chat.read_calls(text: string): {chat.ReplyCall} | nil, string | nil
@@ -491,12 +514,12 @@ function chat.read_calls(text: string): {chat.ReplyCall} | nil, string | nil
       break
     end
     position = position + 1
-    local block = bare(text:sub(open_at + #CALL_OPEN, close_at - 1))
-    if block:sub(1, #FUNCTION_OPEN) == FUNCTION_OPEN then
-      local call = read_call(block)
-      if call is nil then
-        return nil, "reply: block " .. tostring(position) .. ": not a call"
-      end
+    local block = chat.read_block(text:sub(open_at + #CALL_OPEN, close_at - 1))
+    local call = block.call
+    if block.is_call and call is nil then
+      return nil, "reply: block " .. tostring(position) .. ": not a call"
+    end
+    if call is chat.ReplyCall then
       calls[#calls + 1] = call
     end
     at = close_at + #CALL_CLOSE

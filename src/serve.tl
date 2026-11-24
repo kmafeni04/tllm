@@ -136,9 +136,27 @@ local record Fault
   message: string
 end
 
+local record EventFunction
+  name: string | nil
+  arguments: string | nil
+end
+
+local record EventCall
+  index: integer
+  id: string | nil
+  type: string | nil
+  ["function"]: EventFunction
+end
+
+local record EventDelta
+  role: string | nil
+  content: string | nil
+  tool_calls: {EventCall} | nil
+end
+
 local record EventChoice
   index: integer
-  delta: {string: string} | nil
+  delta: EventDelta | nil
   finish_reason: string | nil
 end
 
@@ -163,6 +181,8 @@ local record Turn
   emit: tltp.EmitFn
   live: boolean
   waiting: boolean
+  held: string
+  calls: integer
 end
 
 local record PoolTurn
@@ -811,6 +831,13 @@ local function request_of(body: string): Request | nil, string | nil
     if tools_line is string then
       return nil, tools_line
     end
+  end
+
+  -- 50/FR-010: a stop string could cut a call block before its closing marker
+  if
+    held_tools is json.Value and held_tools:size() > 0 and stop is {string}
+  then
+    return nil, "stop: refused when one or more tools are given"
   end
 
   return {
@@ -1488,6 +1515,115 @@ local function dropped(server: tltp.Server, turn: Turn)
   end
 end
 
+-- 50/FR-005: the text ends in a proper prefix of the marker, so a block may
+-- still open there
+local function ends_in_prefix(text: string, marker: string): boolean
+  local longest = #marker - 1
+  if #text < longest then
+    longest = #text
+  end
+  for length = longest, 1, -1 do
+    if text:sub(#text - length + 1) == marker:sub(1, length) then
+      return true
+    end
+  end
+  return false
+end
+
+local function event_of(turn: Turn, choice: EventChoice): boolean
+  local data = event_data(choice)
+  if data is nil then
+    return false
+  end
+  turn.emit(data)
+  return true
+end
+
+local function content_event(turn: Turn, text: string): boolean
+  return event_of(turn, {index = 0, delta = {content = text}})
+end
+
+-- 50/FR-002 and 50/FR-003: one call as the two deltas a client reassembles
+local function call_events(turn: Turn, call: chat.ReplyCall): boolean
+  turn.calls = turn.calls + 1
+  local position = turn.calls - 1
+  local name_delta: EventCall = {
+    index = position,
+    id = "call_" .. tostring(turn.calls),
+    type = "function",
+    ["function"] = {name = call.name},
+  }
+  if not event_of(turn, {index = 0, delta = {tool_calls = {name_delta}}}) then
+    return false
+  end
+  local arguments_delta: EventCall = {
+    index = position,
+    ["function"] = {arguments = call.arguments},
+  }
+  return event_of(turn, {index = 0, delta = {tool_calls = {arguments_delta}}})
+end
+
+-- 50/FR-001 to 50/FR-009: send what the turn has not yet sent, keeping back
+-- only the text a call block could still turn out to be
+local function flushed(turn: Turn, ending: boolean): boolean
+  local unsent = turn.held
+  while #unsent > 0 do
+    local open_at = unsent:find(chat.call_open, 1, true)
+    if open_at is nil then
+      if not ending and ends_in_prefix(unsent, chat.call_open) then
+        break
+      end
+      turn.held = ""
+      return content_event(turn, unsent)
+    end
+    -- the closing marker is looked for before the bytes before the opening
+    -- marker go out, so 50/FR-008 can send a marker nothing closes with the
+    -- bytes before it as the run's one event
+    local from_open = unsent:sub(open_at)
+    local close_at = from_open:find(chat.call_close, #chat.call_open + 1, true)
+    if close_at is nil then
+      if ending then
+        turn.held = ""
+        return content_event(turn, unsent)
+      end
+      if
+        open_at > 1 and not content_event(turn, unsent:sub(1, open_at - 1))
+      then
+        return false
+      end
+      turn.held = from_open
+      return true
+    end
+    if open_at > 1 and not content_event(turn, unsent:sub(1, open_at - 1)) then
+      return false
+    end
+    local block = chat.read_block(
+      from_open:sub(#chat.call_open + 1, close_at - 1)
+    )
+    local call = block.call
+    if block.is_call and call is nil then
+      turn.held = ""
+      if event_of(turn, {index = 0, finish_reason = "error"}) then
+        turn.emit("[DONE]")
+      end
+      return false
+    end
+    local tail = from_open:sub(close_at + #chat.call_close)
+    if call is chat.ReplyCall then
+      if not call_events(turn, call) then
+        return false
+      end
+    elseif not content_event(
+      turn, from_open:sub(1, close_at + #chat.call_close - 1)
+    ) then
+      return false
+    end
+    unsent = tail
+  end
+  turn.held = unsent
+  return true
+end
+
 local function producer(
   server: tltp.Server, ready: Prepared, run: generate.Run | nil
 ): tltp.StreamFn
@@ -1505,6 +1641,8 @@ local function producer(
       emit = emit,
       live = true,
       waiting = ready.waiting,
+      held = "",
+      calls = 0,
     }
     local list = registered(server)
     list[#list + 1] = turn
@@ -2124,17 +2262,16 @@ function serve.step(server: tltp.Server): integer
           dropped(server, turn)
         else
           if piece is string then
-            local data = event_data({index = 0, delta = {content = piece}})
-            if data is nil then
-              lost(turn.ready)
-              dropped(server, turn)
-            else
-              turn.emit(data)
-            end
+            turn.held = turn.held .. piece
           end
-          if turn.live and run.done then
+          if turn.live and not flushed(turn, run.done) then
+            lost(turn.ready)
+            dropped(server, turn)
+          elseif turn.live and run.done then
             local reason = "stop"
-            if #run.produced >= turn.ready.request.max_tokens then
+            if turn.calls > 0 then
+              reason = "tool_calls"
+            elseif #run.produced >= turn.ready.request.max_tokens then
               reason = "length"
             end
             local ending = event_data({index = 0, finish_reason = reason})

@@ -128,8 +128,7 @@ end
 
 ## Non-goals
 
-- No streamed tool call out of a reply: streaming those stays later, and `reasoning_content` stays
-  unread.
+- No streamed tool call out of a reply: `reasoning_content` stays unread.
 - No meaning read out of a call beyond its name and its arguments text: a call's `id`,
   `type` and other members pass unread, and an `arguments` member of another kind is refused rather
   than converted, which is `FR-011`'s own words and not a further check.

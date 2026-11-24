@@ -120,8 +120,6 @@ The reply a call block produces, the `usage` object being the one the generation
 
 ## Non-goals
 
-- No streamed call: a streamed reply still sends the reply text as `delta.content` pieces, markers
-  included, and `delta.tool_calls`, a streamed id and a call-ending stream event stay later.
 - No meaning read out of a call beyond its name and arguments: only the function tag's name and the
   parameter pairs are read, `reasoning_content` stays unread, and a message field of the request is
   unchanged.

@@ -138,9 +138,11 @@ end
   whose value it refuses (those checks coming after the `session_id` check, in the order
   `30/FR-008` names them), or `stop` is present and is neither a string of one or more bytes nor an
   array of one to four such strings (that check coming after `30/FR-008`'s own), or `tools` is
-  present and is refused as `47/FR-006` states (that check coming last, after every check this
-  requirement names and after both `46/FR-005`'s and `46/FR-006`'s), THEN THE SYSTEM
-  SHALL answer `BadRequest` with a body decoding to an object whose single member is
+  present and is refused as `47/FR-006` states (that check coming after every check this requirement
+  names and after both `46/FR-005`'s and `46/FR-006`'s), or the body carries a `tools` member
+  `47/FR-006` accepts that holds one or more entries and a `stop` member `31/FR-007` accepts (that
+  check coming last, after the `tools` check, its message naming `stop` as `50/FR-010` states), THEN
+  THE SYSTEM SHALL answer `BadRequest` with a body decoding to an object whose single member is
   `error`, an object whose `type` is `invalid_request_error` and whose `message` names the first
   fault in the order this requirement names them: `body`; `messages` and, for an entry, its position
   counting from one, its `role` when that is the member at fault, and for a part, its message's

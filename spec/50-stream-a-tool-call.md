@@ -1,6 +1,6 @@
 # 50: Stream a tool call
 
-**Status**: pending   **Depends on**: 19, 31, 49
+**Status**: done   **Depends on**: 19, 31, 49
 
 ## Problem & context
 
@@ -181,7 +181,10 @@ tests build. A payload is read with `tltp.json_decode` unless it is `[DONE]`.
   `first_token` of `<tool_call><function=get_weather><parameter=city>Paris</parameter></function>`
   with `max_tokens` 1, that the payloads are the `role` object, one whose `delta` is `{content =
   that text}`, the `length` ending and `[DONE]`, an opening marker with no closing marker after it
-  never being withheld from the run's ending; and on `first_token` of
+  never being withheld from the run's ending; and on `first_token` of `x<tool_call>{"a":1` with
+  `max_tokens` 1, that the payloads are the `role` object, one whose `delta` is `{content = that
+  text}`, the `length` ending and `[DONE]`, the bytes before an unfinishable marker going out in
+  that one event rather than alone; and on `first_token` of
   `<tool_call>{"name":"get_weather","arguments":{}}</tool_call>` with `max_tokens` 1, that the
   payloads are the `role` object, one whose `delta` is `{content = that text}`, the `length` ending
   and `[DONE]`, a complete block that is not a call block being content.
@@ -211,13 +214,4 @@ tests build. A payload is read with `tltp.json_decode` unless it is `[DONE]`.
 
 ## Amendments
 
-- `18/FR-008`: one more check follows the ones it names, its last, after `47/FR-006`'s: a body
-  carrying a `tools` member `47/FR-006` accepts that holds one or more entries and a `stop` member
-  `31/FR-007` accepts answers `BadRequest` with a message naming `stop`, as `50/FR-010` states, so
-  a body the checks of `18/FR-008` accept is never one `18/FR-003` generates from.
-- `19/FR-004`: a turn's events carry the `delta.tool_calls` events a call is sent as, and the text
-  a run releases outside a call block as `delta.content`, which the producing turn may hold past
-  the step that released it and send before the turn's ending event.
-- `19/FR-005`: the ending's `finish_reason` is `error` when a block `50/FR-009` names ended the
-  turn, `tool_calls` when the turn has sent a call, `length` when as many tokens were appended as
-  the budget allows, and `stop` otherwise.
+- None.
