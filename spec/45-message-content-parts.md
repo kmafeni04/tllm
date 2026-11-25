@@ -45,7 +45,8 @@ only a string; that bullet is struck from `22` when this spec ships, because it 
 
 - No image, audio or video part: every `type` other than `text` is refused, and no branch that
   reads one is built.
-- No other message field: `reasoning_content` stays unread.
+- No other message field: `reasoning_content` is accepted and reaches no template name and no
+  prompt.
 - No change to `chat.render` or to the template: a message's content is still one string.
 
 ## Tests

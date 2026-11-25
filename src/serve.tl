@@ -151,6 +151,7 @@ end
 local record EventDelta
   role: string | nil
   content: string | nil
+  reasoning_content: string | nil
   tool_calls: {EventCall} | nil
 end
 
@@ -175,6 +176,13 @@ local record AnsweredCall
   ["function"]: AnsweredFunction
 end
 
+local record AnsweredMessage
+  role: string
+  content: string
+  reasoning_content: string | nil
+  tool_calls: {AnsweredCall} | nil
+end
+
 local record Turn
   ready: Prepared
   run: generate.Run | nil
@@ -183,6 +191,7 @@ local record Turn
   waiting: boolean
   held: string
   calls: integer
+  settled: boolean
 end
 
 local record PoolTurn
@@ -1442,9 +1451,23 @@ local function finished(ready: Prepared): serve.Reply
     total_tokens = #ready.ids + completion,
     prompt_tokens_details = {cached_tokens = ready.cached},
   }
-  local calls, call_line = chat.read_calls(answer.text)
+  -- 49/FR-001 as 51/FR-005 runs it: the call scan reaches only the text the
+  -- head block left, and a block that ran to the reply's end leaves none
+  local head = chat.read_head(answer.text, ready.prompt)
+  local scanned = answer.text
+  if head.open then
+    scanned = head.closed and head.rest or ""
+  end
+  local calls, call_line = chat.read_calls(scanned)
   if calls is nil then
     return as_reply(internal(call_line as string))
+  end
+  local message: AnsweredMessage = {
+    role = "assistant",
+    content = head.open and head.rest or answer.text,
+  }
+  if head.open then
+    message.reasoning_content = head.reasoning
   end
   if #calls > 0 then
     local answered: {AnsweredCall} = {}
@@ -1455,6 +1478,8 @@ local function finished(ready: Prepared): serve.Reply
         ["function"] = {name = call.name, arguments = call.arguments},
       }
     end
+    message.content = ""
+    message.tool_calls = answered
     return {
       status = "OK",
       body = tltp.json_encode(
@@ -1463,11 +1488,7 @@ local function finished(ready: Prepared): serve.Reply
             {
               index = 0,
               finish_reason = "tool_calls",
-              message = {
-                role = "assistant",
-                content = "",
-                tool_calls = answered,
-              },
+              message = message,
             },
           },
           usage = usage,
@@ -1479,9 +1500,7 @@ local function finished(ready: Prepared): serve.Reply
     status = "OK",
     body = tltp.json_encode(
       {
-        choices = {
-          {index = 0, message = {role = "assistant", content = answer.text}},
-        },
+        choices = {{index = 0, message = message}},
         usage = usage,
       }
     ) as string,
@@ -1563,9 +1582,32 @@ local function call_events(turn: Turn, call: chat.ReplyCall): boolean
   return event_of(turn, {index = 0, delta = {tool_calls = {arguments_delta}}})
 end
 
--- 50/FR-001 to 50/FR-009: send what the turn has not yet sent, keeping back
--- only the text a call block could still turn out to be
+-- 50/FR-001 to 50/FR-009 and 51/FR-006 to 51/FR-010: send what the turn has
+-- not yet sent, keeping back only the text a call block or a reasoning block
+-- could still turn out to be
 local function flushed(turn: Turn, ending: boolean): boolean
+  if not turn.settled then
+    local head = chat.read_head(turn.held, turn.ready.prompt)
+    if head.open then
+      if not head.closed and not ending then
+        return true
+      end
+      turn.settled = true
+      turn.held = head.closed and head.rest or ""
+      if not event_of(
+        turn, {index = 0, delta = {reasoning_content = head.reasoning}}
+      ) then
+        return false
+      end
+      if not ending then
+        return true
+      end
+    elseif head.pending and not ending then
+      return true
+    else
+      turn.settled = true
+    end
+  end
   local unsent = turn.held
   while #unsent > 0 do
     local open_at = unsent:find(chat.call_open, 1, true)
@@ -1643,6 +1685,7 @@ local function producer(
       waiting = ready.waiting,
       held = "",
       calls = 0,
+      settled = false,
     }
     local list = registered(server)
     list[#list + 1] = turn

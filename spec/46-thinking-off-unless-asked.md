@@ -97,9 +97,6 @@ worker, which resolves the member from that body exactly as this spec states.
 - No other template input: `preserve_thinking`, `reasoning_content` and `add_vision_id` stay
   unbound, every other member of `chat_template_kwargs` is unread, and no config key or CLI flag
   sets a thinking default.
-- No reasoning channel in the reply: thinking that is asked for still arrives in `content`, with no
-  `reasoning_content` member, no stop rule at the closer and no trimming of one, as `16` and `19`
-  ship it.
 - No request-side tools of this spec's own: the tool list the body may now carry is `47`'s, and
   `chat.render`'s thinking input stays the fourth argument, after that tool list.
 

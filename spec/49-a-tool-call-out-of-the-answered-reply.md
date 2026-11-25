@@ -87,11 +87,13 @@ The reply a call block produces, the `usage` object being the one the generation
 
 ## Functional requirements
 
-- FR-001 (US-001) THE SYSTEM SHALL scan the text of the reply an answered request returns for the
+- FR-001 (US-001) THE SYSTEM SHALL scan the text of the reply an answered request returns, once
+  `51/FR-001` has cut that reply's head reasoning block out of it and in that order, for the
   call markers `<tool_call>` and `</tool_call>`, a block being the text between an opening marker
   and the next closing marker after it, in the order the blocks appear, and a call block being a
   block that, after its leading spaces, tabs, newlines and carriage returns, begins with
-  `<function=`.
+  `<function=`, so a call block standing inside a head reasoning block answers reasoning and not a
+  call.
 - FR-002 (US-001) WHEN a call block, apart from its leading and trailing spaces, tabs, newlines and
   carriage returns, holds a `<function=NAME>` tag, zero or more `<parameter=KEY>VALUE</parameter>`
   pairs and then a `</function>` tag, with only spaces, tabs, newlines and carriage returns between
@@ -100,7 +102,9 @@ The reply a call block produces, the `usage` object being the one the generation
   the `json` package when VALUE trimmed of spaces, tabs, newlines and carriage returns decodes as
   JSON, and that trimmed text as a string otherwise, NAME and KEY each being one or more bytes with
   no `>`.
-- FR-003 (US-001) WHEN that reply holds one or more calls and no call block is refused by `FR-005`,
+- FR-003 (US-001) WHEN the text `FR-001` scans holds one or more calls and no call block is refused
+  by `FR-005`, that text being only what `51`'s cut leaves, so a complete call block standing inside
+  a head block that ran to the end of the reply answers no call and that reply answers `51/FR-003`,
   THE SYSTEM SHALL answer `OK` with a body whose `choices` holds one object whose `index` is 0,
   whose `finish_reason` is `tool_calls` and whose `message` is an object whose `role` is `assistant`,
   whose `content` is empty, and whose `tool_calls` is a list holding, in the order `FR-002` reads
@@ -109,10 +113,12 @@ The reply a call block produces, the `usage` object being the one the generation
   and whose `arguments` is that call's arguments encoded with `json.encode` as JSON text, an object
   with no members being `{}` and never `[]`, the body's `usage` being the object `18/FR-004`
   describes.
-- FR-004 (US-002) WHEN that reply holds no call block, THE SYSTEM SHALL answer `OK` with the body
-  it answers today, whose `choices` holds one object whose `index` is 0 whose `message` is an object
-  whose `role` is `assistant` and whose `content` is the reply text unchanged, and which holds no
-  `finish_reason` and no `tool_calls`.
+- FR-004 (US-002) WHEN the text `FR-001` scans holds no call block, THE SYSTEM SHALL answer `OK`
+  with the body it answers today, whose `choices` holds one object whose `index` is 0 whose
+  `message` is an object whose `role` is `assistant` and whose `content` is that text unchanged, and
+  which holds no `finish_reason` and no `tool_calls`. That reading and this body reach only the text
+  `51`'s cut left, so a reply whose head holds an open thinking pair is answered by `51/FR-002` or
+  `51/FR-003` and never by this body, whatever that reply's text holds.
 - FR-005 (US-003) IF a call block does not hold the shape `FR-002` reads, THEN THE SYSTEM SHALL
   answer `InternalServerError` with a body whose single member is `error`, an object whose `type` is
   `internal_error` and whose `message` is `reply: block `, the first such block's position among the
@@ -121,7 +127,8 @@ The reply a call block produces, the `usage` object being the one the generation
 ## Non-goals
 
 - No meaning read out of a call beyond its name and arguments: only the function tag's name and the
-  parameter pairs are read, `reasoning_content` stays unread, and a message field of the request is
+  parameter pairs are read, `reasoning_content` is accepted and reaches no template name and no
+  prompt, and a message field of the request is
   unchanged.
 - No JSON block form: a block whose first text other than spaces, tabs, newlines and carriage
   returns is `{` is a form this spec does not read, answered as today's plain body, and a reader per

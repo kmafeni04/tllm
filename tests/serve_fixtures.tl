@@ -8,6 +8,7 @@ local support = require("tests.support")
 local compute = require("tllm.compute")
 local serve = require("tllm.serve")
 local tltp = require("tltp")
+local utf8lib = require("utf8lib")
 
 local type Entry = support.Entry
 local type Meta = support.Meta
@@ -111,6 +112,13 @@ local record serve_fixtures
   replaced: function(meta: {Meta}, entry: Meta): {Meta}
   t001_meta: function(): {Meta}
   t001_entries: function(): {Entry}
+  spelled: function(string): string
+  A_BODY: string
+  CALL_BODY: string
+  CALL: string
+  first_token: function(string): tltp.Server
+  two_pieces: function(string, string): tltp.Server
+  driven: function(tltp.Server, tltp.StreamFn): {string}
   DEVICE_LINE: string
   answered: function(server: tltp.Server, body: string): ChatReply
   build: function(
@@ -275,6 +283,38 @@ end
 
 local DEVICE_LINE = "^device: (.+), (%d+) bytes budget, (%d+) bytes held, (%d+) expert slots in (%d+) bytes, (%d+) bytes from the mapping$"
 
+-- a reply text is stored in the vocabulary as the file's own byte symbols:
+-- GPT-2 gives every byte it cannot print a codepoint of its own, and its
+-- decoder turns that codepoint back into the byte
+local SYMBOL: {string} = {}
+do
+  local displaced = 0
+  for byte = 0, 255 do
+    if
+      (byte >= 0x21 and byte <= 0x7E)
+      or (byte >= 0xA1 and byte <= 0xAC)
+      or (byte >= 0xAE and byte <= 0xFF)
+    then
+      SYMBOL[byte + 1] = string.char(byte)
+    else
+      SYMBOL[byte + 1] = utf8lib.char(256 + displaced)
+      displaced = displaced + 1
+    end
+  end
+end
+
+local function spelled(piece: string): string
+  local parts: {string} = {}
+  for index = 1, #piece do
+    parts[index] = SYMBOL[(piece:byte(index) as integer) + 1]
+  end
+  return table.concat(parts)
+end
+
+local A_BODY = '{"messages":[{"role":"user","content":"a"}]}'
+local CALL_BODY = '{"messages":[{"role":"user","content":"c"}],"max_tokens":1}'
+local CALL = "Hi<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call>done"
+
 local function answered(server: tltp.Server, body: string): ChatReply
   local reply = serve.answer(server, body)
   test.equal(reply.status, "OK", body)
@@ -309,6 +349,42 @@ local function build(
   )
   test.equal(failure, nil, file_path)
   return server as tltp.Server
+end
+
+-- 49/T-001: a copy of 18's fixture whose token zero is the given text
+local function first_token(reply: string): tltp.Server
+  return build(
+    meta_file(
+      replaced(
+        t001_meta(),
+        mstrings("tokenizer.ggml.tokens", {spelled(reply), "b", "c"})
+      ),
+      t001_entries()
+    ),
+    "m"
+  )
+end
+
+-- 50/T-001 and 50/T-002: 18's fixture with the three tokens `one`, `two` and
+-- `c`, where the prompt picks id 0 and id 0 picks id 1
+local function two_pieces(one: string, two: string): tltp.Server
+  local meta = replaced(
+    replaced(
+      t001_meta(),
+      mstrings("tokenizer.ggml.tokens", {spelled(one), spelled(two), "c"})
+    ),
+    mint("tokenizer.ggml.eos_token_id", 2)
+  )
+  local entries = support.replaced(
+    support.replaced(
+      t001_entries(),
+      "token_embd.weight",
+      f32("token_embd.weight", {2, 3}, {1, 0, 0, 1, 0, 1})
+    ),
+    "output.weight",
+    f32("output.weight", {2, 3}, {0, 1, 1, 0, -1, -1})
+  )
+  return build(meta_file(meta, entries), "m")
 end
 
 local function temp_dir(): string
@@ -348,6 +424,13 @@ local function events_of(payloads: {string}): {StreamEvent}
     end
   end
   return events
+end
+
+local function driven(server: tltp.Server, stream_fn: tltp.StreamFn): {string}
+  local watcher = begun(stream_fn, nil, "A")
+  while serve.step(server) > 0 do
+  end
+  return watcher.payloads
 end
 
 local ROLE_EVENT: StreamEvent = {
@@ -410,6 +493,13 @@ serve_fixtures.meta_file = meta_file
 serve_fixtures.replaced = replaced
 serve_fixtures.t001_meta = t001_meta
 serve_fixtures.t001_entries = t001_entries
+serve_fixtures.spelled = spelled
+serve_fixtures.A_BODY = A_BODY
+serve_fixtures.CALL_BODY = CALL_BODY
+serve_fixtures.CALL = CALL
+serve_fixtures.first_token = first_token
+serve_fixtures.two_pieces = two_pieces
+serve_fixtures.driven = driven
 serve_fixtures.DEVICE_LINE = DEVICE_LINE
 serve_fixtures.answered = answered
 serve_fixtures.build = build

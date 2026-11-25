@@ -63,11 +63,13 @@ call gives.
 
 - FR-001 (US-001) WHEN a streamed reply's unsent text holds a complete block that, after its
   leading spaces, tabs, newlines and carriage returns, begins with `<function=` and holds the shape
-  `49/FR-002` reads, THE SYSTEM SHALL send no event whose `delta.content` holds any byte of that
+  `49/FR-002` reads, that text being what `51/FR-006`'s hold leaves and read after that hold runs,
+  THE SYSTEM SHALL send no event whose `delta.content` holds any byte of that
   block, and SHALL, for each such block in the order the blocks appear, send the bytes before it as
   FR-007 gives them, then read one call from it as `49/FR-002` reads it and cut it, its markers
   included, out of its unsent text, so a block's own bytes are never sent and the bytes after it
-  are the text the turn has not yet sent.
+  are the text the turn has not yet sent, and while a reply's head has not settled no complete call
+  block standing inside that held text answers a call event.
 - FR-002 (US-001) WHEN a call has been read as FR-001 says, THE SYSTEM SHALL send one event whose
   `choices` is an array holding one object whose `index` is 0 and whose `delta` is an object whose
   `tool_calls` is a list holding one object whose `index` is the call's position among the reply's
@@ -83,13 +85,16 @@ call gives.
   for the text its last release holds and in this order, one event whose `choices` is an array
   holding one object whose `index` is 0, holding no `delta`, whose `finish_reason` is
   `tool_calls`, then one event whose data is the text `[DONE]`.
-- FR-005 (US-002) WHILE a streamed turn's run is live and the text that turn has not yet sent ends
+- FR-005 (US-002) WHILE a streamed turn's run is live and the text that turn has not yet sent, as
+  `51/FR-006`'s hold leaves it, ends
   in a proper prefix of `<tool_call>`, THE SYSTEM SHALL send no event whose `delta.content` holds
   any of that suffix.
-- FR-006 (US-002) WHILE a streamed turn's run is live and the text that turn has not yet sent holds
+- FR-006 (US-002) WHILE a streamed turn's run is live and the text that turn has not yet sent, as
+  `51/FR-006`'s hold leaves it, holds
   `<tool_call>` with no `</tool_call>` after it, THE SYSTEM SHALL send no event whose
   `delta.content` holds any of the bytes from that marker on.
-- FR-007 (US-002) WHEN the text a streamed turn has not yet sent holds no suffix FR-005 names,
+- FR-007 (US-002) WHEN the text a streamed turn has not yet sent, as `51/FR-006`'s hold leaves it,
+  holds no suffix FR-005 names,
   no marker FR-006 names, no block FR-009 names and no block FR-001 names, THE SYSTEM SHALL send
   the whole of it as one event whose `delta.content` is that text when it holds one or more bytes.
   When that text holds a block FR-001 names, the bytes it holds from the start of its buffer up to
@@ -98,19 +103,25 @@ call gives.
   block, and the bytes after the block's closing marker are the text the turn has not yet sent, so
   the bytes before a block, the bytes between two blocks and the bytes after the last block each go
   out as their own event or as the text FR-008 releases, and no event holds bytes from two sides
-  of a block.
+  of a block. That text is the text left once a head block `51/FR-007` has sent, so a reply holding
+  both sends one reasoning event ahead of its first content event.
 - FR-008 (US-002) WHEN a streamed turn's run ends and FR-001 to FR-007 have run for the text its
   last release left, THE SYSTEM SHALL send the text it still holds as one event whose
   `delta.content` is that text before the turn's ending event, when that text holds one or more
-  bytes and holds no block FR-009 names.
-- FR-009 (US-003) IF the text a streamed turn has not yet sent holds a complete block that begins,
+  bytes and holds no block FR-009 names. That release reaches the text `51/FR-006` held behind a
+  partial opening marker as well as the text FR-005 held behind a call marker's prefix, so a turn
+  whose head prefix nothing completed sends that text as content and loses no byte.
+- FR-009 (US-003) IF the text a streamed turn has not yet sent, as `51/FR-006`'s hold leaves it,
+  holds a complete block that begins,
   after its leading spaces, tabs, newlines and carriage returns, with `<function=` and does not
   hold the shape `49/FR-002` reads, THEN THE SYSTEM SHALL send no event holding any of that block's
   bytes, SHALL send the bytes before that block as one event whose `delta.content` is those bytes
   when they hold one or more bytes, SHALL send one event whose `choices` is an array holding one
   object whose `index` is 0, holding no `delta`, whose `finish_reason` is `error`, then one event
   whose data is the text `[DONE]`, that ending standing in place of the one FR-004 gives, and SHALL
-  drop the turn as `19/FR-009` drops a failed one, so a session the turn names is not stored by it.
+  drop the turn as `19/FR-009` drops a failed one, so a session the turn names is not stored by it,
+  and while a reply's head has not settled no unreadable call block standing inside that held text
+  answers that ending and dropped turn.
 - FR-010 (US-004) IF the body carries a `tools` member that `47/FR-006` accepts and that holds one
   or more entries, and a `stop` member that `31/FR-007` accepts, THEN THE SYSTEM SHALL answer
   `BadRequest` as `18/FR-008` describes it with a message naming `stop`, as `application/json`,

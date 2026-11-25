@@ -1,6 +1,6 @@
 # 51: The reasoning text the model wrote
 
-**Status**: pending   **Depends on**: 10, 19, 46, 49, 50
+**Status**: done   **Depends on**: 10, 19, 46, 49, 50
 
 ## Problem & context
 
@@ -180,35 +180,44 @@ such clause.
 ## Tests
 
 `OPEN` and `CLOSE` are the `<think>` and `</think>` literals each new case declares, the pair
-`tests/chat.test.tl:227-228` exports as `think_open` and `think_close` and `20/T-001` embeds. `NL` is the
+`tests/chat.test.tl:227-228` exports as `think_open` and `think_close` and `20/T-001` embeds. The six
+cases run in `tests/serve_reasoning.test.tl`, beside the fixture layer `tests/serve_fixtures.tl` they
+and `tests/serve.test.tl` both build on. `NL` is the
 two newlines that the closer of `20/T-001`'s replayed assistant turn leaves behind it in the prompt that
 test records, that closer standing inside that message's own text there. `NL` is a literal a case passes
 behind its own closer in the reply text: no builder below adds bytes of its own, and `first_ws_open`'s
 template is the one place that writes those two newlines, behind its opening marker. `HALF` is the first
 four bytes of `OPEN`, `REST` the bytes `HALF` does not hold, and `SHORT` the first three. `PING` is the
 call block text `<tool_call><function=ping></function></tool_call>` from `49/T-003`, which
-`tests/serve.test.tl` writes inline, and `BROKEN` is that text with an empty function tag,
+`tests/serve_reasoning.test.tl` writes inline, and `BROKEN` is that text with an empty function tag,
 `<tool_call><function=></function></tool_call>`, a block beginning with
 `<function=` and so one that `49/FR-002` refuses.
 
-`first_token(reply)` at `tests/serve.test.tl:75` and `two_pieces(one, two)` at `:839` are that file's
-own builders: token zero is the text it is given, and `two_pieces` samples its two texts as ids 0 and
+`first_token(reply)` at `tests/serve_fixtures.tl:356` and `two_pieces(one, two)` at `:371` are that
+module's own builders: token zero is the text it is given, and `two_pieces` samples its two texts as
+ids 0 and
 1 with the end id moved to 2.
 
 `first_open(reply)` and `open_pieces(one, two)` are those two turned into a turn whose prompt leaves the
-pair open, on `tests/serve_fixtures.tl`'s `t001_meta` at `:214` and `t001_entries` at `:265`, with five
+pair open, on `tests/serve_fixtures.tl`'s `t001_meta` at `:222` and `t001_entries` at `:273`, with five
 changes. `tokenizer.ggml.tokens` gains a fourth entry whose text is `OPEN`, and
-`tokenizer.ggml.token_type` at `:229` marks that entry the control kind that `10/FR-014` encodes as one
+`tokenizer.ggml.token_type` at `:237` marks that entry the control kind that `10/FR-014` encodes as one
 id for its own text. `tokenizer.chat_template` replaces the message loop that entry carries at
-`tests/serve_fixtures.tl:233-235` with a template whose whole text is the `OPEN` literal, holding no loop
+`tests/serve_fixtures.tl:240-242` with a template whose whole text is the `OPEN` literal, holding no loop
 over `messages` unlike the entry it replaces, so the prompt that turn renders is that one id, ends inside
-the block and encodes to one id whatever the body's messages are. `token_embd.weight` at `:269` and
-`output.weight` at `:271` gain a fourth column as `two_pieces` replaces its own, that column copying id
+the block and encodes to one id whatever the body's messages are. `token_embd.weight` at `:277` and
+`output.weight` at `:279` gain a fourth column as `two_pieces` replaces its own, that column copying id
 2's, so the ids those cases name are the ones sampled and no end id is sampled inside the budget.
-`first_closed(reply)` is `first_open` with that template the `CLOSE` literal alone instead, a prompt that
-closed its pair. `first_ws_open(reply)` is `first_open` with that fourth entry's text and that template
+`first_closed(reply)` is `first_open` with that fourth entry's text and that template the `CLOSE`
+literal alone instead, a prompt that closed its pair: the closer has to be a token of its own, since
+the prompt is that one text and the encoder finds no token for the characters it is spelled with.
+`first_ws_open(reply)` is `first_open` with that fourth entry's text and that template
 the `OPEN` literal followed by the two `NL` newlines instead, that text still encoding as that one id, so
-the prompt ends with whitespace after the marker the way the file's own generation opener does.
+the prompt ends with whitespace after the marker the way the file's own generation opener does. That
+fourth entry is never sampled, so only the reply pieces a case names are stored spelled: the file's
+decoder turns a token's text back into bytes and refuses a codepoint GPT-2 gives no byte of its own,
+so `first_token` and `two_pieces` now spell the text they are given the way `CALL` already spelled its
+newlines inline, and `CALL` is written with the newlines it means.
 
 `OPEN_BODY` is `{"messages":[{"role":"user","content":"a"}],"max_tokens":1}`, the shape that file's
 `CALL_BODY` at `:70` carries with a budget of one, and `OPEN_STREAM(budget)` the same with
@@ -371,34 +380,4 @@ and `50`'s cases read `tool_calls`.
 
 ## Amendments
 
-- `18/FR-003`: the answered message's members become `role`, `content` and, for a turn whose reply
-  head holds an open thinking pair, `reasoning_content`, that `content` being the reply's text after
-  that block, or the empty text when its closing marker never arrived; and that answer turns on two
-  texts rather than one, the generated reply text and the prompt the request rendered, which decides
-  whether a pair stands open at that reply's head.
-- `19/FR-004`: a turn's events carry, before their first `delta.content`, the one
-  `delta.reasoning_content` event FR-007 or FR-008 gives, and the turn may hold a reply's head back
-  past the step that released it, as `50/FR-005` already lets it hold a call marker's; that turn is
-  shaped by the prompt it rendered as much as by the text it sampled, since FR-006, FR-007 and FR-008
-  read whether that prompt left a pair open; and a turn whose pair stands open nowhere still writes one
-  content event per release.
-- `49/FR-001`: the scan runs on the reply text after this spec's head block is cut, in that order, so
-  a call block standing inside a head reasoning block answers reasoning and not a call.
-- `49/FR-003`: its `that reply holds one or more calls` reading reaches only the text this spec's cut
-  left, so a complete call block standing inside a head block that ran to the end of the reply answers
-  no call and that reply answers this spec's FR-003.
-- `49/FR-004`: its `holds no call block` reading and the plain body it gives reach only the text this
-  spec's cut left, so a reply whose head holds an open pair is answered by this spec's FR-002 or FR-003
-  and never by this body, whatever that reply's text holds.
-- `50/FR-001`, `50/FR-005`, `50/FR-006`, `50/FR-007` and `50/FR-009`: each read of the text a streamed
-  turn has not yet sent runs after this spec's FR-006 hold, in that order, so while a head has not
-  settled no call marker, call marker's prefix, complete call block or unreadable call block standing
-  inside that held text answers a call event, a call hold of its own or the `error` ending and dropped
-  turn those requirements give, and no `delta.content` event carries a byte of that held text, and that
-  text goes out as this spec's FR-007, FR-008 or FR-010 gives it, so a call block inside an unsettled
-  head reaches the same reading the finished body gives it.
-- `50/FR-007`: the text it releases is the text left once a head block this spec's FR-007 has sent,
-  so a reply holding both sends one reasoning event ahead of its first content event.
-- `50/FR-008`: its run's-end release reaches the text this spec's FR-006 held behind a partial
-  opening marker as well as the text `50/FR-005` held behind a call marker's prefix, so a turn whose
-  head prefix nothing completed sends that text as content and loses no byte.
+- None.

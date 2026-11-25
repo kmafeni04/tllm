@@ -102,10 +102,15 @@ end
   `chat.render`, reserve a sequence where `23/FR-001` reuses a stored conversation's and otherwise
   reserve one sized by `23/FR-004`, generate from that prompt and budget, and answer `OK` with a
   body that decodes to an object whose `choices` is an array holding one object whose `index` is 0
-  and whose `message` is an object whose `role` is `assistant` and whose `content` is the generated
-  text, except that when the reply text holds a call, that object's `finish_reason` is `tool_calls`
-  and its `message`'s `content` is empty and its `tool_calls` is the list `49/FR-003` describes; a
-  reply holding no call keeps the body as written.
+  and whose `message` is an object whose `role` is `assistant`, whose `content` is the generated
+  text, and, for a turn whose reply head holds an open thinking pair as `51/FR-001` reads one,
+  whose `reasoning_content` is that block's reasoning and whose `content` is that reply's text
+  after that block, or the empty text when its closing marker never arrived. That answer turns on
+  two texts rather than one, the generated reply text and the prompt the request rendered, which
+  decides whether a pair stands open at that reply's head. Except that when the reply text holds a
+  call, that object's `finish_reason` is `tool_calls` and its `message`'s `content` is empty and
+  its `tool_calls` is the list `49/FR-003` describes; a reply holding no call keeps the body as
+  written.
 - FR-004 (US-002) WHEN a successful reply is answered, THE SYSTEM SHALL hold in it a `usage` object
   whose `prompt_tokens` is the number of ids the rendered prompt encodes to, whose
   `completion_tokens` is the number of ids the generation sampled, whose `total_tokens` is their

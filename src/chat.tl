@@ -26,12 +26,28 @@ local record chat
     call: ReplyCall | nil
   end
 
+  -- 51/FR-001: what one reply's head holds. `pending` says the head has not
+  -- settled yet, so it could still open a pair; `open` says one stands there;
+  -- `closed` says that pair's closing marker stands in the reply, and then
+  -- `reasoning` and `rest` are the block's text and what that marker left.
+  record ReplyHead
+    pending: boolean
+    open: boolean
+    closed: boolean
+    reasoning: string
+    rest: string
+  end
+
   -- the marker pair a scanned block is found by, so a stream holds and sends
   -- the same bytes the scan reads
   call_open: string
   call_close: string
+  -- the marker pair a reply's reasoning block is found by
+  think_open: string
+  think_close: string
   read_block: function(string): ReplyBlock
   read_calls: function(string): {ReplyCall} | nil, string | nil
+  read_head: function(reply: string, prompt: string): ReplyHead
   render: function(
     tokenizer.Tokenizer,
     {Message},
@@ -47,6 +63,8 @@ local KEY = "tokenizer.chat_template"
 local WS = "[ \t\r\n]"
 local CALL_OPEN = "<tool_call>"
 local CALL_CLOSE = "</tool_call>"
+local THINK_OPEN = "<think>"
+local THINK_CLOSE = "</think>"
 local FUNCTION_OPEN = "<function="
 local FUNCTION_CLOSE = "</function>"
 local PARAMETER_OPEN = "<parameter="
@@ -54,6 +72,8 @@ local PARAMETER_CLOSE = "</parameter>"
 
 chat.call_open = CALL_OPEN
 chat.call_close = CALL_CLOSE
+chat.think_open = THINK_OPEN
+chat.think_close = THINK_CLOSE
 
 local record Expr
   form: string
@@ -525,6 +545,42 @@ function chat.read_calls(text: string): {chat.ReplyCall} | nil, string | nil
     at = close_at + #CALL_CLOSE
   end
   return calls, nil
+end
+
+-- 51/FR-001: the reasoning block at a reply's head, read from that reply and
+-- from the prompt the request rendered, which may be the half of the pair that
+-- stands open
+function chat.read_head(reply: string, prompt: string): chat.ReplyHead
+  local after = 1
+  local open = (prompt:gsub(WS .. "+$", "")):sub(-#THINK_OPEN) == THINK_OPEN
+  local pending = false
+  local head = reply:find("[^ \t\r\n]")
+  if not (head is nil) then
+    if reply:sub(head, head + #THINK_OPEN - 1) == THINK_OPEN then
+      open = true
+      after = head + #THINK_OPEN
+    elseif not open then
+      local front = reply:sub(head)
+      pending = #front < #THINK_OPEN and THINK_OPEN:sub(1, #front) == front
+    end
+  else
+    pending = not open
+  end
+
+  local close_at = reply:find(THINK_CLOSE, after, true)
+  local end_at = #reply
+  local rest = ""
+  if not (close_at is nil) then
+    end_at = close_at - 1
+    rest = reply:sub(close_at + #THINK_CLOSE)
+  end
+  return {
+    pending = pending,
+    open = open,
+    closed = not (close_at is nil),
+    reasoning = bare(reply:sub(after, end_at)),
+    rest = rest,
+  }
 end
 
 local function letters(text: string): {string}

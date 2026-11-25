@@ -22,7 +22,6 @@ local u32, u64, mint, mtext, mstrings, without_meta =
   support.mtext,
   support.mstrings,
   support.without_meta
-local f32 = support.f32
 local defs = require("tllm.compute.types")
 local type Loaded = defs.Loaded
 local type Meta = support.Meta
@@ -54,6 +53,10 @@ local FIRST_TURN, SECOND_TURN, unreadable_fixture, streaming =
   fixtures.unreadable_fixture,
   fixtures.streaming
 local held, named, streamed = fixtures.held, fixtures.named, fixtures.streamed
+local A_BODY, CALL_BODY, CALL =
+  fixtures.A_BODY, fixtures.CALL_BODY, fixtures.CALL
+local first_token, two_pieces, driven =
+  fixtures.first_token, fixtures.two_pieces, fixtures.driven
 local POOL_BUDGET, workers_of = fixtures.POOL_BUDGET, fixtures.workers_of
 
 local function without_prefix(meta: {Meta}, prefix: string): {Meta}
@@ -66,23 +69,7 @@ local function without_prefix(meta: {Meta}, prefix: string): {Meta}
   return result
 end
 
-local A_BODY = '{"messages":[{"role":"user","content":"a"}]}'
-local CALL_BODY = '{"messages":[{"role":"user","content":"c"}],"max_tokens":1}'
-local CALL = "Hi<tool_call>\196\138<function=get_weather>\196\138<parameter=city>\196\138Paris\196\138</parameter>\196\138</function>\196\138</tool_call>done"
 local TWO_CALLS = '<tool_call><function=get_weather><parameter=city>Paris</parameter></function></tool_call><tool_call><function=add><parameter=a>1</parameter></function></tool_call><tool_call><function=extra><parameter=opts>{"unit":"c"}</parameter></function></tool_call><tool_call><function=empty><parameter=opts>{}</parameter></function></tool_call>'
-
--- 49/T-001: a copy of 18's fixture whose token zero is the given text
-local function first_token(reply: string): tltp.Server
-  return build(
-    meta_file(
-      replaced(
-        t001_meta(), mstrings("tokenizer.ggml.tokens", {reply, "b", "c"})
-      ),
-      t001_entries()
-    ),
-    "m"
-  )
-end
 
 local function body_with(name: string, value: string): string
   return '{"messages":[{"role":"user","content":"a"}],"'
@@ -825,32 +812,6 @@ local function resumed(watcher: Watcher): boolean
   local ok, result = coroutine.resume(watcher.co)
   test.equal(ok, true)
   return result as boolean
-end
-
-local function driven(server: tltp.Server, stream_fn: tltp.StreamFn): {string}
-  local watcher = begun(stream_fn, nil, "A")
-  while serve.step(server) > 0 do
-  end
-  return watcher.payloads
-end
-
--- 50/T-001 and 50/T-002: 18's fixture with the three tokens `one`, `two` and
--- `c`, where the prompt picks id 0 and id 0 picks id 1
-local function two_pieces(one: string, two: string): tltp.Server
-  local meta = replaced(
-    replaced(t001_meta(), mstrings("tokenizer.ggml.tokens", {one, two, "c"})),
-    mint("tokenizer.ggml.eos_token_id", 2)
-  )
-  local entries = support.replaced(
-    support.replaced(
-      t001_entries(),
-      "token_embd.weight",
-      f32("token_embd.weight", {2, 3}, {1, 0, 0, 1, 0, 1})
-    ),
-    "output.weight",
-    f32("output.weight", {2, 3}, {0, 1, 1, 0, -1, -1})
-  )
-  return build(meta_file(meta, entries), "m")
 end
 
 local function call_body(content: string, budget: integer): string

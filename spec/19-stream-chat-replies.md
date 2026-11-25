@@ -74,9 +74,14 @@ non-goals that nothing is streamed. The record `serve` builds from the body is u
   whose `index` is 0 and whose `delta` is an object whose `content` is that text outside a call
   block, one event per release and none for a token the run holds back, the event for a run's last
   release coming before the event FR-005 writes; the producing turn may hold that text past the
-  step that released it and send it before the turn's ending event, its events carry the
-  `delta.tool_calls` events a call is sent as `50/FR-002` and `50/FR-003` give them, and the
-  producer writes no token event of its own.
+  step that released it and send it before the turn's ending event, as `50/FR-005` already lets it
+  hold a call marker's and as `51/FR-006` lets it hold a reply's unsettled head, and that turn is
+  shaped by the prompt it rendered as much as by the text it sampled, since `51/FR-006`,
+  `51/FR-007` and `51/FR-008` read whether that prompt left a thinking pair open; the turn's events
+  carry, before their first `delta.content`, the one `delta.reasoning_content` event `51/FR-007` or
+  `51/FR-008` gives, and the `delta.tool_calls` events a call is sent as `50/FR-002` and `50/FR-003`
+  give them; a turn whose pair stands open nowhere still writes one content event per release, and
+  the producer writes no token event of its own.
 - FR-005 (US-002) WHEN the reply ends, THE SYSTEM SHALL have `serve.step` write, in this order, an
   event whose data is a JSON object whose `choices` is an array holding one object whose `index` is
   0, holding no `delta` member, whose `finish_reason` is `error` when a block `50/FR-009` names
