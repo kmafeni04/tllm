@@ -906,6 +906,171 @@ test.it(
   end
 )
 
+local USAGE_ASKED = '{"messages":[{"role":"user","content":"a"}],"max_tokens":2,"stream":true,"stream_options":{"include_usage":true}}'
+
+local function no_usage(payloads: {string})
+  for _, payload in ipairs(payloads) do
+    test.equal(payload:find("usage", 1, true), nil, payload)
+  end
+end
+
+test.it(
+  "a streamed reply asked for usage ends with a usage event",
+  function()
+    local server = build(meta_file(t001_meta(), t001_entries()), "m")
+
+    local response, stream_fn = serve.stream(server, USAGE_ASKED)
+    test.equal(response.status, "OK")
+    test.equal(response.content_type, "text/event-stream")
+    test.truthy(stream_fn)
+
+    local watcher = begun(stream_fn as tltp.StreamFn, nil, "A")
+    test.deepEqual(events_of(watcher.payloads), {ROLE_EVENT})
+    while serve.step(server) > 0 do
+    end
+    local payloads = watcher.payloads
+    test.equal(#payloads, 6)
+    local events = events_of(payloads)
+    test.deepEqual(events[1], ROLE_EVENT)
+    test.deepEqual(events[2], token_event("a"))
+    test.deepEqual(events[3], token_event("a"))
+    test.deepEqual(events[4], finish_event("length"))
+    test.equal(payloads[6], "[DONE]")
+
+    local plain = answered(
+      server, '{"messages":[{"role":"user","content":"a"}],"max_tokens":2}'
+    )
+    test.equal(plain.usage.prompt_tokens, 1)
+    test.equal(plain.usage.completion_tokens, 2)
+    test.equal(plain.usage.total_tokens, 3)
+    test.equal(plain.usage.prompt_tokens_details.cached_tokens, 0)
+    local counts = tltp.json_decode(payloads[5]) as ChatReply
+    test.includes(payloads[5], '"choices":[]', payloads[5])
+    test.deepEqual(counts.usage, plain.usage)
+
+    local off = '{"messages":[{"role":"user","content":"a"}],"max_tokens":2,"stream":true,"stream_options":{"include_usage":false}}'
+    local unasked = '{"messages":[{"role":"user","content":"a"}],"max_tokens":2,"stream":true}'
+    for _, body in ipairs({off, unasked}) do
+      local _, off_run = serve.stream(server, body)
+      local off_payloads = driven(server, off_run as tltp.StreamFn)
+      test.equal(#off_payloads, 5, body)
+      local off_events = events_of(off_payloads)
+      test.deepEqual(off_events[1], ROLE_EVENT)
+      test.deepEqual(off_events[2], token_event("a"))
+      test.deepEqual(off_events[3], token_event("a"))
+      test.deepEqual(off_events[4], finish_event("length"))
+      test.equal(off_payloads[5], "[DONE]", body)
+      no_usage(off_payloads)
+    end
+
+    local unreadable = build(unreadable_fixture(), "m")
+    local unreadable_body = '{"messages":[{"role":"user","content":"a"}],"max_tokens":2,"stream":true,"stream_options":{"include_usage":true},"temperature":1,"top_k":2,"seed":1000}'
+    local _, unreadable_run = serve.stream(unreadable, unreadable_body)
+    local unreadable_payloads = driven(
+      unreadable, unreadable_run as tltp.StreamFn
+    )
+    test.equal(#unreadable_payloads, 1)
+    test.deepEqual(events_of(unreadable_payloads)[1], ROLE_EVENT)
+
+    local broken = first_token(
+      "Hi<tool_call><function=></function></tool_call>"
+    )
+    local broken_body = '{"messages":[{"role":"user","content":"c"}],"max_tokens":1,"session_id":"s","stream":true,"stream_options":{"include_usage":true}}'
+    local _, broken_run = serve.stream(broken, broken_body)
+    local broken_payloads = driven(broken, broken_run as tltp.StreamFn)
+    test.equal(#broken_payloads, 4)
+    test.deepEqual(tltp.json_decode(broken_payloads[1]), ROLE_EVENT)
+    test.deepEqual(tltp.json_decode(broken_payloads[2]), token_event("Hi"))
+    test.deepEqual(tltp.json_decode(broken_payloads[3]), finish_event("error"))
+    test.equal(broken_payloads[4], "[DONE]")
+    no_usage(broken_payloads)
+  end
+)
+
+test.it(
+  "max_completion_tokens sets the budget",
+  function()
+    local server = build(meta_file(t001_meta(), t001_entries()), "m")
+
+    local eight = answered(
+      server,
+      '{"messages":[{"role":"user","content":"a"}],"max_completion_tokens":8}'
+    )
+    test.equal(eight.choices[1].message.content, "aaaaaaaa")
+    test.equal(eight.usage.completion_tokens, 8)
+    test.equal(eight.usage.total_tokens, 9)
+
+    for _, value in ipairs({"2.5", "0"}) do
+      local body = body_with("max_completion_tokens", value)
+      local line = rejected(server, body).error.message
+      test.includes(line, "max_completion_tokens", body)
+    end
+
+    local together = '{"messages":[{"role":"user","content":"a"}],"max_tokens":4,"max_completion_tokens":8}'
+    local together_line = rejected(server, together).error.message
+    test.includes(together_line, "max_tokens", together)
+    test.includes(together_line, "max_completion_tokens", together)
+
+    local zero = '{"messages":[{"role":"user","content":"a"}],"max_tokens":0,"max_completion_tokens":8}'
+    local zero_line = rejected(server, zero).error.message
+    test.includes(zero_line, "max_tokens", zero)
+    test.equal(zero_line:find("max_completion_tokens", 1, true), nil, zero)
+
+    local long = rejected(
+      server,
+      '{"messages":[{"role":"user","content":"a"}],"max_completion_tokens":300}'
+    )
+    for _, word in ipairs(
+      {"messages", "max_completion_tokens", "1", "300", "260"}
+    ) do
+      test.includes(long.error.message, word, word)
+    end
+  end
+)
+
+test.it(
+  "stream_options is checked and the unread members stay ignored",
+  function()
+    local server = build(meta_file(t001_meta(), t001_entries()), "m")
+
+    for _, value in ipairs(
+      {"true", '"yes"', '{"include_usage":"yes"}', "null", "[]"}
+    ) do
+      local body = body_with("stream_options", value)
+      test.includes(
+        rejected(server, body).error.message, "stream_options", body
+      )
+    end
+
+    local plain = '{"messages":[{"role":"user","content":"a"}],"max_tokens":2}'
+    local finished = '{"messages":[{"role":"user","content":"a"}],"max_tokens":2,"stream_options":{"include_usage":true}}'
+    test.equal(
+      serve.answer(server, finished).body, serve.answer(server, plain).body
+    )
+
+    local extra = '{"messages":[{"role":"user","content":"a"}],"max_tokens":2,"stream":true,"stream_options":{"include_usage":true,"include_obfuscation":true}}'
+    local response, stream_fn = serve.stream(server, extra)
+    test.equal(response.status, "OK")
+    test.equal(response.content_type, "text/event-stream")
+    local payloads = driven(server, stream_fn as tltp.StreamFn)
+    test.equal(#payloads, 6)
+    local events = events_of(payloads)
+    test.deepEqual(events[1], ROLE_EVENT)
+    test.deepEqual(events[2], token_event("a"))
+    test.deepEqual(events[3], token_event("a"))
+    test.deepEqual(events[4], finish_event("length"))
+    test.equal(payloads[6], "[DONE]")
+    local counts = tltp.json_decode(payloads[5]) as ChatReply
+    test.includes(payloads[5], '"choices":[]', payloads[5])
+    test.equal(counts.usage.total_tokens, 3)
+
+    local unread = '{"messages":[{"role":"user","content":"a"}],"max_tokens":2,"store":false,"prompt_cache_key":"k","service_tier":"auto","parallel_tool_calls":false,"metadata":{"x":"y"}}'
+    local reply = serve.answer(server, unread)
+    test.equal(reply.status, "OK")
+    test.equal(reply.body, serve.answer(server, plain).body)
+  end
+)
+
 test.it(
   "a body that does not ask for a stream answers json",
   function()

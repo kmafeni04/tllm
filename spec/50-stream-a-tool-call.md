@@ -139,9 +139,9 @@ call gives.
 - No change to sampling: no id is stopped, steered or forced by a call, no `tool_choice` makes a
   call, and the holdback changes only when text is sent, never what the model produces or what a
   session keeps.
-- No other delay: a token that is half a character is still sent as it is, no `stream_options` or
-  `usage` joins an event, and a JSON block form stays the text `49` does not read, streamed as
-  content.
+- No other delay: a token that is half a character is still sent as it is, no `usage` joins an event
+  that is not the usage event `52/FR-001` gives, and a JSON block form stays the text `49` does not
+  read, streamed as content.
 
 ## Tests
 

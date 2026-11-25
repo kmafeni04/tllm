@@ -86,7 +86,10 @@ non-goals that nothing is streamed. The record `serve` builds from the body is u
   event whose data is a JSON object whose `choices` is an array holding one object whose `index` is
   0, holding no `delta` member, whose `finish_reason` is `error` when a block `50/FR-009` names
   ended the turn, `tool_calls` when the turn has sent a call, `length` when as many tokens were
-  appended as the budget allows, and `stop` otherwise, then an event whose data is the text
+  appended as the budget allows, and `stop` otherwise, then, when the body asked for its counts as
+  `52/FR-001` says, an event whose data is a JSON object whose `choices` is an empty array and whose
+  `usage` holds the counts of that turn as `52/FR-001` gives them, then an event whose data is the
+  text
   `[DONE]`. The producer writes nothing after its opening event, so it returns on a later resume and
   the connection closes up to a second after the last event.
 - FR-006 (US-003) WHEN the body's `stream` member is absent or `false`, THE SYSTEM SHALL answer the
@@ -111,8 +114,8 @@ non-goals that nothing is streamed. The record `serve` builds from the body is u
 
 ## Non-goals
 
-- No other member in a streamed event: no `usage`, `id`, `object`, `created` or `model`. No request
-  member beyond `stream` either: no `stream_options`.
+- No other member in a streamed event beyond the usage event `52/FR-001` and `52/FR-002` give: no
+  `id`, `object`, `created` or `model`, and no `usage` in any other event.
 - No handling of a client that goes away, of a failed write, of chunked framing, keep-alive
   comments or sleeps, and no holding back of a token that is half a character.
 - No change to the finished reply or to the sampling: temperature, top-k, seed, the 256-token

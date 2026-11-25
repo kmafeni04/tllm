@@ -96,8 +96,10 @@ local record Request
   presence_penalty: number | nil
   frequency_penalty: number | nil
   max_tokens: integer
+  budget_name: string
   seed: integer
   stream: boolean
+  include_usage: boolean
   session_id: string | nil
   stop: {string} | nil
   enable_thinking: boolean
@@ -163,6 +165,23 @@ end
 
 local record Event
   choices: {EventChoice}
+end
+
+local record CachedTokens
+  cached_tokens: integer
+end
+
+local record Usage
+  prompt_tokens: integer
+  completion_tokens: integer
+  total_tokens: integer
+  prompt_tokens_details: CachedTokens
+end
+
+-- 52/FR-001: the closing event of a stream that asked for its counts
+local record UsageEvent
+  choices: {EventChoice}
+  usage: Usage
 end
 
 local record AnsweredFunction
@@ -714,6 +733,7 @@ local function request_of(body: string): Request | nil, string | nil
   end
 
   local budget = DEFAULT_BUDGET
+  local budget_name = "max_tokens"
   local max_tokens_value = fields.max_tokens
   if not (max_tokens_value is nil) then
     local held_budget = whole(max_tokens_value)
@@ -721,6 +741,21 @@ local function request_of(body: string): Request | nil, string | nil
       return nil, "max_tokens: not a whole number of one or more"
     end
     budget = held_budget
+  end
+
+  local completion_value = fields.max_completion_tokens
+  if not (completion_value is nil) then
+    local held_completion = whole(completion_value)
+    if held_completion is nil or held_completion < 1 then
+      return nil, "max_completion_tokens: not a whole number of one or more"
+    end
+    budget = held_completion
+    budget_name = "max_completion_tokens"
+  end
+
+  if not (max_tokens_value is nil) and not (completion_value is nil) then
+    return nil,
+      "max_tokens and max_completion_tokens: a body carries both names"
   end
 
   local seed = 0
@@ -739,6 +774,24 @@ local function request_of(body: string): Request | nil, string | nil
     stream = stream_value
   elseif not (stream_value is nil) then
     return nil, "stream: not a boolean"
+  end
+
+  local include_usage = false
+  local options_value = fields.stream_options
+  if not (options_value is nil) then
+    -- the unpacked tree gives one table for null, an object and an array, so
+    -- the shape is read from the json package's own tree as 47 and 48 read it
+    local given = member_of(json.decode(body), "stream_options")
+    if given is nil or not given:is("object") then
+      return nil, "stream_options: not a JSON object"
+    end
+    local asked = member_of(given, "include_usage")
+    if not (asked is nil) then
+      if not asked:is("boolean") then
+        return nil, "stream_options: include_usage is not a boolean"
+      end
+      include_usage = asked:val() as boolean
+    end
   end
 
   local session_id: string | nil = nil
@@ -859,8 +912,10 @@ local function request_of(body: string): Request | nil, string | nil
     presence_penalty = presence_penalty,
     frequency_penalty = frequency_penalty,
     max_tokens = budget,
+    budget_name = budget_name,
     seed = seed,
     stream = stream,
+    include_usage = include_usage,
     session_id = session_id,
     stop = stop,
     enable_thinking = thinking,
@@ -870,12 +925,14 @@ local function request_of(body: string): Request | nil, string | nil
 end
 
 local function budget_fault(
-  ids: integer, budget: integer, positions: integer
+  ids: integer, budget: integer, positions: integer, name: string
 ): Fault
   return bad_request(
     "messages: the prompt's "
       .. tostring(ids)
-      .. " ids plus the max_tokens budget "
+      .. " ids plus the "
+      .. name
+      .. " budget "
       .. tostring(budget)
       .. " minus one is past the "
       .. tostring(positions)
@@ -1233,7 +1290,7 @@ local function prepared(
   local budget = request.max_tokens
   local needed = #ids + budget - 1
   if needed > window then
-    return nil, budget_fault(#ids, budget, window)
+    return nil, budget_fault(#ids, budget, window, request.budget_name)
   end
 
   local id = request.session_id
@@ -1428,6 +1485,15 @@ local function lost(ready: Prepared)
   released(ready)
 end
 
+local function usage_of(ready: Prepared, completion: integer): Usage
+  return {
+    prompt_tokens = #ready.ids,
+    completion_tokens = completion,
+    total_tokens = #ready.ids + completion,
+    prompt_tokens_details = {cached_tokens = ready.cached},
+  }
+end
+
 local function finished(ready: Prepared): serve.Reply
   local answer, text_line = generate.text_ids(
     ready.model.generation,
@@ -1445,12 +1511,7 @@ local function finished(ready: Prepared): serve.Reply
   local completion = #sampled
   kept(ready, sampled, answer.cut)
 
-  local usage = {
-    prompt_tokens = #ready.ids,
-    completion_tokens = completion,
-    total_tokens = #ready.ids + completion,
-    prompt_tokens_details = {cached_tokens = ready.cached},
-  }
+  local usage = usage_of(ready, completion)
   -- 49/FR-001 as 51/FR-005 runs it: the call scan reaches only the text the
   -- head block left, and a block that ran to the reply's end leaves none
   local head = chat.read_head(answer.text, ready.prompt)
@@ -2323,6 +2384,17 @@ function serve.step(server: tltp.Server): integer
               dropped(server, turn)
             else
               turn.emit(ending)
+              if turn.ready.request.include_usage then
+                local counts = tltp.json_encode(
+                  {
+                    choices = {},
+                    usage = usage_of(turn.ready, #run.produced),
+                  } as UsageEvent
+                )
+                if counts is string then
+                  turn.emit(counts)
+                end
+              end
               turn.emit("[DONE]")
               kept(turn.ready, run.produced, run.cut)
               dropped(server, turn)

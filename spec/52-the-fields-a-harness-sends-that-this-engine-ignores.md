@@ -1,6 +1,6 @@
 # 52: The fields a harness sends that this engine ignores
 
-**Status**: pending   **Depends on**: 18, 19, 50
+**Status**: done   **Depends on**: 18, 19, 50
 
 ## Problem & context
 
@@ -120,7 +120,8 @@ producer's payloads as frames and the parent relays them, so the usage event tra
 - T-003 (FR-003, FR-004, FR-009): `stream_options is checked and the unread members stay ignored`,
   proves on `18/T-001`'s fixture that each of these bodies, none of which carries a `stream` member,
   answers `BadRequest` with a message naming `stream_options`: `"stream_options":true`,
-  `"stream_options":"yes"` and `"stream_options":{"include_usage":"yes"}`; that a body holding
+  `"stream_options":"yes"`, `"stream_options":{"include_usage":"yes"}`, `"stream_options":null` and
+  `"stream_options":[]`; that a body holding
   `"stream_options":{"include_usage":true}` and no `stream` member answers the same status and body
   as the same body without it; that a body holding
   `"stream_options":{"include_usage":true,"include_obfuscation":true}` streams as T-001's body does;
@@ -134,14 +135,4 @@ producer's payloads as frames and the parent relays them, so the usage event tra
 
 ## Amendments
 
-- `18/FR-005`: `stream_options` and `max_completion_tokens` join the members the route honours, so
-  the list it ignores no longer covers them.
-- `18/FR-007`: the budget comes from `max_completion_tokens` when the body carries that name and no
-  `max_tokens`, and a body carrying both is refused.
-- `18/FR-008`: the refused shapes gain `max_completion_tokens` (not a whole number of one or more,
-  checked after `max_tokens`'s own), both names carried together, and `stream_options` (not a JSON
-  object, or an `include_usage` that is not a boolean, checked after `stream`'s own).
-- `18/FR-009`: the message names the member the body carried as the budget, not always `max_tokens`.
-- `19/FR-005`: the ending sequence gains a usage event between the `finish_reason` event and
-  `[DONE]` when the body asked for one, so the non-goal bullets of `19`, `31` and `50` that named no
-  `usage` in a streamed event and no `stream_options` as a request member no longer hold.
+- None.

@@ -114,7 +114,7 @@ it.
   cannot name an id to stop at.
 - No matching beyond the bytes a stop string holds: no case-insensitive match, no regular
   expression, no word or character boundary to respect, a string inside one of a token's
-  multi-byte characters matching as any other bytes do, and no `stream_options` member.
+  multi-byte characters matching as any other bytes do.
 - No cut applied to a resumed conversation's stored ids or to any text of the prompt: a run holds
   back and cuts only the text it produced itself.
 

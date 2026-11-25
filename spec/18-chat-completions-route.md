@@ -119,17 +119,21 @@ end
 - FR-005 (US-001) WHEN the body holds a member other than `messages`, `temperature`, `top_k`,
   `max_tokens`, `seed` and `session_id`, THE SYSTEM SHALL ignore it, and `stream`,
   `session_id`, `stop`, `top_p`, `min_p`, `repetition_penalty`, `presence_penalty`,
-  `frequency_penalty`, `enable_thinking`, `chat_template_kwargs`, `tools` and `tool_choice` are
-  honoured rather than ignored: `top_p`, `min_p`, `repetition_penalty`, `presence_penalty` and
-  `frequency_penalty` as `30/FR-007` says, `stop` as `31/FR-005` reads it, the two thinking members
-  as `46/FR-001` to `46/FR-006` read them, `tools` as `47/FR-001`, `47/FR-002` and `47/FR-006` read
-  it and `tool_choice` as `47/FR-003` reads it.
+  `frequency_penalty`, `enable_thinking`, `chat_template_kwargs`, `tools`, `tool_choice`,
+  `max_completion_tokens` and `stream_options` are honoured rather than ignored: `top_p`, `min_p`,
+  `repetition_penalty`, `presence_penalty` and `frequency_penalty` as `30/FR-007` says, `stop` as
+  `31/FR-005` reads it, the two thinking members as `46/FR-001` to `46/FR-006` read them, `tools` as
+  `47/FR-001`, `47/FR-002` and `47/FR-006` read it, `tool_choice` as `47/FR-003` reads it,
+  `max_completion_tokens` as `52/FR-005` to `52/FR-008` read it and `stream_options` as `52/FR-001`
+  to `52/FR-004` read it.
 - FR-006 (US-003) WHEN the body holds `temperature`, `top_k` or `seed`, or `top_p`, `min_p`,
   `repetition_penalty`, `presence_penalty`, `frequency_penalty` or `stop`, THE SYSTEM SHALL pass it
   to the generation as given, a `stop` string being the list of that one string as `31/FR-005`
   reads it, an absent `temperature` leaving the sampler greedy and an absent `seed` being 0.
 - FR-007 (US-003) WHEN the body holds `max_tokens`, THE SYSTEM SHALL take it as the token budget,
-  and 256 when it holds none, and the generation SHALL stop at that budget.
+  and 256 when it holds neither `max_tokens` nor `max_completion_tokens`, and the generation SHALL
+  stop at that budget. `52/FR-005` takes `max_completion_tokens` as that budget when the body holds
+  that name and not `max_tokens`, and `52/FR-007` refuses a body holding both.
 - FR-008 (US-004) IF the body is empty, is not JSON, or decodes to anything but a JSON object, or
   `messages` is absent, is not an array, holds no entry, or holds an entry that is not an object
   whose `role` is a string and whose `content` is a string or an array of one or more parts as
@@ -137,9 +141,14 @@ end
   `45`/FR-005 says, or an entry's `role` is a string other than `system`, `user`, `assistant` or
   `tool` as `48/FR-009` states, or `temperature` is present and is not a number or is
   below zero, or `top_k` is present and is not a whole number or is below one, or `max_tokens` is
-  present and is not a whole number or is below one, or `seed` is present and is not a whole number,
-  or `stream` is present and is not a boolean (that check coming after `seed`), or `session_id` is
-  present and is not a string (that check coming after `stream`), or `30/FR-008` names a member
+  present and is not a whole number or is below one, or `max_completion_tokens` is present and is not
+  a whole number of one or more (that check coming after `max_tokens`'s own), or the body carries
+  both `max_tokens` and `max_completion_tokens` (that check coming after both members' own shape
+  checks and before `seed`'s), or `seed` is present and is not a whole number,
+  or `stream` is present and is not a boolean (that check coming after `seed`), or `stream_options`
+  is present and is not a JSON object or holds an `include_usage` member that is not a boolean (that
+  check coming after `stream`'s own), or `session_id` is present and is not a string (that check
+  coming after `stream_options`'s own), or `30/FR-008` names a member
   whose value it refuses (those checks coming after the `session_id` check, in the order
   `30/FR-008` names them), or `stop` is present and is neither a string of one or more bytes nor an
   array of one to four such strings (that check coming after `30/FR-008`'s own), or `tools` is
@@ -157,7 +166,8 @@ end
   the server's one model over the file's window, its `positions` being the file's context length,
   and, IF the prompt's ids plus the budget minus one are more than the `positions` that model was
   built with, THEN THE SYSTEM SHALL answer `BadRequest` as FR-008 describes it, the message naming
-  `messages`, `max_tokens`, the prompt's id count, the budget and that `positions`. Its tests set
+  `messages`, the member the body carried as the budget as `52/FR-008` says, the prompt's id count,
+  the budget and that `positions`. Its tests set
   `f32` wherever they pin a reply.
 - FR-010 (US-005) WHEN `build` is called, THE SYSTEM SHALL load the file's tokenizer with
   `tokenizer.load` and hold it on the model it keeps, returning nil and that loader's line as its
