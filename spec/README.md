@@ -20,3 +20,4 @@ These rules bind every spec in this folder.
 - The core stays small: a feature a plugin can carry does not belong in the core.
 - Every `.tl` file typechecks and is formatted.
 - The project must be memory safe, no memory leaks, memory corruption bugs, use after frees, etc.
+- A spec that adds a config key names the level that owns it before it names what the key means.
