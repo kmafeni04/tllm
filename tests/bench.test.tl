@@ -801,6 +801,55 @@ test.it(
   end
 )
 
+test.it(
+  "bench takes the entry's numbers",
+  function()
+    if not support.found_device() then
+      test.skip(
+        "bench takes the entry's numbers (no CUDA device)", function() end
+      )
+      return
+    end
+
+    local file_path = meta_file(meta(260, nil, true), entries())
+    local named = profile_file('{"layer":0,"token":0,"experts":[1]}\n')
+    local seeded = path_for("c") .. ".json"
+    fs.write(
+      seeded,
+      '{"models":{"m":{"path":"'
+        .. file_path
+        .. '","vram":'
+        .. half_slot_vram(file_path)
+        .. ',"profile":"'
+        .. named
+        .. '"}}}'
+    )
+    local got = run(
+      {
+        "bench",
+        "m",
+        "--config",
+        seeded,
+        "--prefill-tokens",
+        "4",
+        "--decode-tokens",
+        "4",
+      }
+    )
+    test.equal(got.code, 0, table.concat(got.err, "\n"))
+    local line = experts_at(got.out, 4) as string
+    test.truthy(line, table.concat(got.out, "\n"))
+    test.truthy(
+      line:match(
+        "; 0%.0%% hit; 0 ahead, 0%.0%% landed; read ahead (%a+); "
+          .. "%d+%.%d%% over PCIe, pool %d+%.%d GB/s, link %d+%.%d GB/s; "
+          .. "%d+ direct$"
+      ),
+      line
+    )
+  end
+)
+
 -- the vram that holds every fixed tensor and the reservation and leaves no
 -- expert slot, so every expert a turn routes is a miss
 local function no_slot_vram(file_path: string): integer

@@ -1,12 +1,13 @@
 local process = require("process")
 local targs = require("targs")
 local bench = require("tllm.bench")
-local compute = require("tllm.compute")
 local config = require("tllm.config")
 local cores = require("tllm.cores")
 local serve = require("tllm.serve")
 
 local cli = {}
+
+local type ModelEntry = config.ModelEntry
 
 local function build(): targs.Parser
   local parser = targs.new(
@@ -85,7 +86,7 @@ local function model_of(command: targs.Parser): string | number | nil
   end
 end
 
-local function sorted_names(models: {string: string}): {string}
+local function sorted_names(models: {string: ModelEntry}): {string}
   local names: {string} = {}
   for name in pairs(models) do
     names[#names + 1] = name
@@ -97,6 +98,7 @@ end
 local record Chosen
   name: string
   path: string
+  entry: ModelEntry | nil
 end
 
 local type Starter = function(
@@ -113,7 +115,7 @@ end
 
 local function chosen_model(
   command: string,
-  models: {string: string},
+  models: {string: ModelEntry},
   word: string | nil,
   path_word: boolean,
   write_err: function(string)
@@ -127,7 +129,7 @@ local function chosen_model(
       )
       return nil
     end
-    return {name = word, path = word}
+    return {name = word, path = word, entry = nil}
   end
   if word is string then
     local configured = models[word]
@@ -135,7 +137,7 @@ local function chosen_model(
       write_err(one_line(command .. ": unknown model " .. word))
       return nil
     end
-    return {name = word, path = configured}
+    return {name = word, path = configured.path, entry = configured}
   end
 
   local names = sorted_names(models)
@@ -153,7 +155,8 @@ local function chosen_model(
     )
     return nil
   end
-  return {name = names[1], path = models[names[1]]}
+  local only = models[names[1]]
+  return {name = names[1], path = only.path, entry = only}
 end
 
 local function process_environment(): {string: string}
@@ -172,9 +175,6 @@ local function process_environment(): {string: string}
   end
   return environment
 end
-
--- 04/FR-011: the chunk bound a file names none keeps
-local DEFAULT_UBATCH: integer = 512
 
 -- 44/FR-006: the flag's count, nil when the flag was not given, and the
 -- refusal when it is not one ggml can hold
@@ -270,12 +270,6 @@ local function serve_code(
   local bind_host = given_host or settings.host or "127.0.0.1"
   local bind_port = given_port or settings.port or 8080
 
-  local cache_type: compute.CacheType = "f16"
-  local file_cache = settings.kv_cache
-  if file_cache is compute.CacheType then
-    cache_type = file_cache
-  end
-
   local threads = flag_count or settings.threads
   if threads is nil then
     threads = shared(cores.machine(), settings.workers or 1)
@@ -288,6 +282,7 @@ local function serve_code(
     return 1
   end
 
+  local values = config.model_values(settings, chosen.entry)
   return start(
     {
       host = bind_host,
@@ -295,14 +290,14 @@ local function serve_code(
       name = chosen.name,
       path = chosen.path,
       sessions = settings.sessions or 4,
-      kv_cache = cache_type,
+      kv_cache = values.kv_cache,
       context_path = settings.context_path,
       context_bytes = settings.context_bytes,
       workers = settings.workers or 1,
-      ubatch = settings.ubatch or DEFAULT_UBATCH,
-      vram = settings.vram,
-      profile = settings.profile,
-      prefetch = settings.prefetch,
+      ubatch = values.ubatch,
+      vram = values.vram,
+      profile = values.profile,
+      prefetch = values.prefetch,
       threads = threads,
     },
     write_err
@@ -388,24 +383,19 @@ local function bench_code(
     routing_path = routing
   end
 
-  local cache_type: compute.CacheType = "f16"
-  local file_cache = settings.kv_cache
-  if file_cache is compute.CacheType then
-    cache_type = file_cache
-  end
-
+  local values = config.model_values(settings, chosen.entry)
   return bench.run(
     {
       path = chosen.path,
       name = chosen.name,
       lengths = lengths,
       decode = decode,
-      kv_cache = cache_type,
+      kv_cache = values.kv_cache,
       routing_path = routing_path,
-      ubatch = settings.ubatch or DEFAULT_UBATCH,
-      vram = settings.vram,
-      profile = settings.profile,
-      prefetch = settings.prefetch,
+      ubatch = values.ubatch,
+      vram = values.vram,
+      profile = values.profile,
+      prefetch = values.prefetch,
       threads = flag_count or settings.threads or cores.machine(),
     },
     write_out,

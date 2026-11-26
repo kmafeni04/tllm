@@ -196,13 +196,12 @@ refusal lines through the second, and hands back the exit code. The `generation`
   Not testable: a module, its allocation and where it is called, visible in the tree; the numbers
   it produces are asserted by T-001.
 - FR-011 (US-004) THE SYSTEM SHALL build its server through `serve.build` with an endpoint whose
-  `path` is the resolved model's path, whose `kv_cache` is the config file's value or `f16`, whose
-  `sessions` is 1, whose `workers` is 1, whose `context_path` and `context_bytes` are nil, whose
-  `host` is `127.0.0.1`, whose `port` is 8080, whose `ubatch` is the config file's `ubatch` or
-  512 when it names none, and whose `vram` is the config file's `vram`, nil when it names none, and whose `profile` is
-  the config file's `profile`, nil when it names none, and whose `prefetch` is the config file's
-  `prefetch`, nil when it names none, and whose `threads` is the `--threads` value when given, then
-  the config file's `threads`, then the default `44/FR-004` defines, so
+  `path` is the resolved model's path, whose `kv_cache`, `ubatch`, `vram`, `profile` and
+  `prefetch` are the values resolved for the model it resolved as `53/FR-003` says, nil for
+  `vram`, `profile` and `prefetch` when neither level names one, whose `sessions` is 1, whose
+  `workers` is 1, whose `context_path` and `context_bytes` are nil, whose `host` is `127.0.0.1`,
+  whose `port` is 8080, and whose `threads` is the `--threads` value when given, then the config
+  file's `threads`, then the default `44/FR-004` defines, so
   a bench run measures the tier a server would have, binds no socket, starts no worker process and
   creates no context directory.
   Not testable: `sessions`, `workers`, `context_path`, `context_bytes`, `host` and `port` exist

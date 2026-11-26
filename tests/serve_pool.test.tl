@@ -1107,3 +1107,56 @@ test.it(
     test.equal(fs.isdir(dirs[1]), false)
   end
 )
+
+local record EndpointJson
+  kv_cache: string | nil
+  ubatch: integer | nil
+  vram: integer | nil
+  profile: string | nil
+  prefetch: boolean | nil
+end
+
+test.it(
+  "the endpoint json a worker starts from carries the entry's values",
+  function()
+    local bytes = meta_bytes(t001_meta(), t001_entries())
+    local given: {string} = {}
+    local function recording(
+      _name: string, _args: {string} | nil, opts: process.Options | nil
+    ): process.Child | nil, string | nil
+      if not (opts is nil) then
+        given[#given + 1] = (opts as process.Options).stdin
+      end
+      return nil, "no child is started"
+    end
+
+    local code = serve.start(
+      {
+        host = "127.0.0.1",
+        port = 9611,
+        name = "m",
+        path = fixture(bytes),
+        sessions = 4,
+        kv_cache = "q8_0",
+        context_path = temp_dir(),
+        context_bytes = POOL_BUDGET,
+        workers = 2,
+        ubatch = 128,
+        vram = 3072,
+        profile = "p.jsonl",
+        prefetch = true,
+      },
+      function(_line: string) end,
+      recording
+    )
+    test.equal(code, 1)
+    test.equal(#given, 1)
+
+    local decoded = tltp.json_decode(given[1]) as EndpointJson
+    test.equal(decoded.kv_cache, "q8_0")
+    test.equal(decoded.ubatch, 128)
+    test.equal(decoded.vram, 3072)
+    test.equal(decoded.profile, "p.jsonl")
+    test.equal(decoded.prefetch, true)
+  end
+)

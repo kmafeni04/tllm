@@ -109,7 +109,8 @@ path to a file `29/FR-008` writes: one JSON object per line, holding `layer`, `t
 - FR-007 (US-001) WHEN `serve.build` builds a model in its own process, THE SYSTEM SHALL give
   `compute.model` the endpoint's `profile`.
 - FR-008 (US-004) WHEN `bench` builds its server, THE SYSTEM SHALL set the endpoint's `profile` to
-  the `profile` the config file gave its `bench.Settings` beside `vram`, nil when it gave none.
+  the `profile` resolved for the model `bench` resolved as `53/FR-003` says, nil when neither its
+  entry nor the file names one.
 - FR-009 (US-001) WHEN a worker decodes its endpoint json, THE SYSTEM SHALL carry the `profile` the
   json holds into the endpoint it builds, so `serve.build` gives it to `compute.model` as FR-007
   says.
@@ -127,10 +128,12 @@ path to a file `29/FR-008` writes: one JSON object per line, holding `layer`, `t
   device mid-copy; T-002 proves the admitting pass serves none of the admitted expert and the next
   pass serves its landed copy, and a reader confirms that a slot is written only after one pass's
   arithmetic has returned and read only by graphs built after the next pass began.
-- FR-012 (US-001) WHEN a config file names `profile` as text, THE SYSTEM SHALL pass it to the start
-  function and to the `bench.Settings` a bench run builds; IF it is set and is not text, THEN THE
-  SYSTEM SHALL write one line naming `profile` and return exit code 1 without calling a start
-  function.
+- FR-012 (US-001) THE SYSTEM SHALL pass the start function and the `bench.Settings` a bench run
+  builds the `profile` resolved for the chosen model as `53/FR-003` says, nil when neither its
+  entry nor the file's top level names one; IF a `profile` is set and is not text, at either
+  level, THEN THE SYSTEM SHALL write one line naming `profile` and, for the entries holding one
+  that is not text, every such entry in ascending byte order, and return exit code 1 without
+  calling a start function.
 
 ## Non-goals
 

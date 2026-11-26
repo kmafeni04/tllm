@@ -164,11 +164,12 @@ are the queue the model took, so a case reads the size it was given without reac
 - FR-009 (US-004) WHEN `compute.model` is given `prefetch` true, THE SYSTEM SHALL hold read-ahead
   open from the build wherever the model holds a queue and make no decision at the gate; WHEN it is
   given false, THE SYSTEM SHALL hold read-ahead closed, take no queue and hand nothing over.
-- FR-010 (US-004) WHEN a config file names `prefetch` a boolean, THE SYSTEM SHALL pass it to the
-  start function, to the `bench.Settings` a bench run builds and to the endpoint `bench` and `serve`
-  build a model from, so `compute.model` is given it; IF it is set and is not a boolean, THEN THE
-  SYSTEM SHALL write one line naming `prefetch` and return exit code 1 without calling a start
-  function.
+- FR-010 (US-004) THE SYSTEM SHALL pass the start function, the `bench.Settings` a bench run
+  builds and the endpoint `bench` and `serve` build a model from the `prefetch` resolved for the
+  chosen model as `53/FR-003` says, so `compute.model` is given it; IF it is set and is not a
+  boolean, at either level, THEN THE SYSTEM SHALL write one line naming `prefetch` and, for the
+  entries holding one that is not a boolean, every such entry in ascending byte order, and return
+  exit code 1 without calling a start function.
 - FR-011 (US-005) WHEN `bench` writes a length's `experts` line, THE SYSTEM SHALL follow the hit
   rate text with `; A ahead, P% landed; read ahead S`, where A is the turn's
   `measure.prefetch_reads`, P is its `measure.prefetch_landed` over its `measure.prefetch_named`

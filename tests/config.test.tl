@@ -1,7 +1,10 @@
 local fs = require("fs")
 local test = require("lde-test")
 local cli = require("tllm.cli")
+local conf = require("tllm.config")
 local serve = require("tllm.serve")
+
+local type KeyLevel = conf.KeyLevel
 
 local STARTER = '{"host":"127.0.0.1","port":8080,"models":{}}'
 
@@ -234,7 +237,9 @@ test.it(
 
     local entries = {
       '{"port":8080,"models":{"alpha":{}}}',
-      '{"port":8080,"models":{"alpha":{"path":"' .. model .. '","extra":1}}}',
+      '{"port":8080,"models":{"alpha":{"path":"'
+        .. model
+        .. '","port":8080}}}',
     }
     for _, text in ipairs(entries) do
       local result = refused(text)
@@ -585,5 +590,345 @@ test.it(
     end
 
     cleanup({xdg})
+  end
+)
+
+-- the one line a refused file writes, with no start call
+local function refusal(file_path: string, word?: string): string
+  local got = run({"serve", word or "m", "--config", file_path}, {})
+  test.equal(got.code, 1)
+  test.equal(#got.err, 1)
+  test.equal(got.starts, 0)
+  return (got.err[1]:gsub("%s+$", ""))
+end
+
+test.it(
+  "an entry's values reach its model and not its neighbour's",
+  function()
+    local dir = temp_dir()
+    local first = dir .. "/a.gguf"
+    local second = dir .. "/b.gguf"
+    local held = dir .. "/p.jsonl"
+    fs.write(first, "model")
+    fs.write(second, "model")
+    fs.write(held, "{}")
+    local file_path = dir .. "/two.json"
+    fs.write(
+      file_path,
+      '{"ubatch":128,"models":{"a":{"path":"'
+        .. first
+        .. '","kv_cache":"q8_0","vram":3072,"profile":"'
+        .. held
+        .. '","prefetch":true},"b":{"path":"'
+        .. second
+        .. '"}}}'
+    )
+
+    local function served(word: string): serve.Endpoint
+      local got = run({"serve", word, "--config", file_path}, {})
+      test.equal(got.code, 0, word)
+      test.equal(got.starts, 1, word)
+      return got.endpoint as serve.Endpoint
+    end
+
+    local own = served("a")
+    test.equal(own.kv_cache, "q8_0")
+    test.equal(own.vram, 3072)
+    test.equal(own.profile, held)
+    test.equal(own.prefetch, true)
+    test.equal(own.ubatch, 128)
+
+    for _, word in ipairs({"b", first}) do
+      local neighbour = served(word)
+      test.equal(neighbour.kv_cache, "f16", word)
+      test.equal(neighbour.vram, nil, word)
+      test.equal(neighbour.profile, nil, word)
+      test.equal(neighbour.prefetch, nil, word)
+      test.equal(neighbour.ubatch, 128, word)
+    end
+
+    fs.write(
+      file_path,
+      '{"models":{"'
+        .. first
+        .. '":{"path":"'
+        .. second
+        .. '","kv_cache":"q8_0","vram":3072}}}'
+    )
+    local spelled = served(first)
+    test.equal(spelled.path, first)
+    test.equal(spelled.kv_cache, "f16")
+    test.equal(spelled.vram, nil)
+    test.equal(spelled.ubatch, 512)
+
+    cleanup({dir})
+  end
+)
+
+test.it(
+  "a both-levels key is refused and the key checks run in order",
+  function()
+    local dir = temp_dir()
+    local first = dir .. "/a.gguf"
+    local second = dir .. "/b.gguf"
+    fs.write(first, "model")
+    fs.write(second, "model")
+    local file_path = dir .. "/two.json"
+    local head = "config " .. file_path .. ": "
+    local entry_a = '"a":{"path":"' .. first .. '","kv_cache":"f32"}'
+    local entry_b = '"b":{"path":"' .. second .. '"}'
+
+    local both = '{"kv_cache":"f32","models":{'
+      .. entry_a
+      .. ","
+      .. entry_b
+      .. "}}"
+    local at_both = head .. "kv_cache is set at the top level and in models a"
+    for _, word in ipairs({"a", "b"}) do
+      fs.write(file_path, both)
+      test.equal(refusal(file_path, word), at_both, word)
+    end
+
+    fs.write(
+      file_path,
+      '{"kv_cache":"f32","models":{"b":{"path":"'
+        .. second
+        .. '","kv_cache":"f32"},'
+        .. entry_a
+        .. "}}"
+    )
+    test.equal(
+      refusal(file_path, "a"),
+      head .. "kv_cache is set at the top level and in models a, b"
+    )
+
+    fs.write(
+      file_path,
+      '{"kv_cache":"bogus","models":{' .. entry_a .. "," .. entry_b .. "}}"
+    )
+    test.equal(refusal(file_path, "a"), at_both)
+
+    fs.write(
+      file_path,
+      '{"prot":1,"models":{"a":{"path":"'
+        .. first
+        .. '","port":8080},"b":{"path":"'
+        .. second
+        .. '"}}}'
+    )
+    test.equal(refusal(file_path, "a"), head .. "unknown key prot")
+
+    fs.write(
+      file_path,
+      '{"prot":1,"kv_cache":"f32","models":{'
+        .. entry_a
+        .. ","
+        .. entry_b
+        .. "}}"
+    )
+    test.equal(refusal(file_path, "a"), head .. "unknown key prot")
+
+    fs.write(
+      file_path,
+      '{"kv_cache":"f32","models":{"a":{"path":"'
+        .. first
+        .. '","kv_cache":"f32","port":8080},"b":{"path":"'
+        .. second
+        .. '"}}}'
+    )
+    test.equal(refusal(file_path, "a"), at_both)
+
+    cleanup({dir})
+  end
+)
+
+test.it(
+  "a flag run still takes the entry's value",
+  function()
+    local dir = temp_dir()
+    local model = dir .. "/m.gguf"
+    fs.write(model, "model")
+    local file_path = dir .. "/threads.json"
+    fs.write(
+      file_path,
+      '{"threads":2,"models":{"m":{"path":"'
+        .. model
+        .. '","kv_cache":"q4_0"}}}'
+    )
+    local got = run({"serve", "m", "--config", file_path, "--threads", "3"}, {})
+    test.equal(got.code, 0)
+    test.equal(got.starts, 1)
+    local endpoint = got.endpoint as serve.Endpoint
+    test.equal(endpoint.threads, 3)
+    test.equal(endpoint.kv_cache, "q4_0")
+    cleanup({dir})
+  end
+)
+
+test.it(
+  "the level table names every key the file accepts and nothing else",
+  function()
+    local levels = conf.levels()
+    local top_only: {string} = {
+      "host",
+      "port",
+      "models",
+      "sessions",
+      "context",
+      "workers",
+      "threads",
+    }
+    local owned: {string} = {
+      "kv_cache", "ubatch", "vram", "profile", "prefetch"
+    }
+    local named = 0
+    for _ in pairs(levels) do
+      named = named + 1
+    end
+    test.equal(named, #top_only + #owned + 1)
+
+    local function rule(name: string): KeyLevel
+      local held = levels[name]
+      test.truthy(held, name)
+      return held as KeyLevel
+    end
+
+    for _, name in ipairs(top_only) do
+      test.deepEqual(rule(name), {wins = "top", top = true, entry = false})
+    end
+    for _, name in ipairs(owned) do
+      test.deepEqual(rule(name), {wins = "entry", top = true, entry = true})
+    end
+    test.deepEqual(rule("path"), {wins = "entry", top = false, entry = true})
+
+    local dir = temp_dir()
+    local first = dir .. "/a.gguf"
+    local second = dir .. "/b.gguf"
+    local model = dir .. "/m.gguf"
+    fs.write(first, "model")
+    fs.write(second, "model")
+    fs.write(model, "model")
+    local file_path = dir .. "/level.json"
+    local head = "config " .. file_path .. ": "
+
+    for _, key in ipairs(
+      {
+        "host",
+        "port",
+        "sessions",
+        "workers",
+        "context",
+        "threads",
+      }
+    ) do
+      fs.write(
+        file_path,
+        '{"models":{"m":{"path":"' .. model .. '","' .. key .. '":1}}}'
+      )
+      test.equal(
+        refusal(file_path),
+        head .. key .. " is not allowed in a models entry (m)",
+        key
+      )
+    end
+
+    fs.write(
+      file_path,
+      '{"models":{"b":{"path":"'
+        .. second
+        .. '","port":1},"a":{"path":"'
+        .. first
+        .. '","port":2}}}'
+    )
+    test.equal(
+      refusal(file_path), head .. "port is not allowed in a models entry (a, b)"
+    )
+
+    fs.write(file_path, '{"path":"' .. model .. '","models":{}}')
+    test.equal(refusal(file_path), head .. "unknown key path")
+
+    fs.write(file_path, '{"models":{"a":{"path":"' .. first .. '","prot":1}}}')
+    test.equal(
+      refusal(file_path, "a"),
+      head .. "prot is not allowed in a models entry (a)"
+    )
+
+    cleanup({dir})
+  end
+)
+
+test.it(
+  "an entry's bad value names the key and every entry at fault",
+  function()
+    local dir = temp_dir()
+    local first = dir .. "/a.gguf"
+    local second = dir .. "/b.gguf"
+    fs.write(first, "model")
+    fs.write(second, "model")
+    local file_path = dir .. "/values.json"
+    local head = "config " .. file_path .. ": "
+    local keys: {string} = {"kv_cache", "ubatch", "vram", "profile", "prefetch"}
+    local given: {string: string} = {
+      kv_cache = '"kv_cache":"q8_0x"',
+      ubatch = '"ubatch":0',
+      vram = '"vram":0',
+      profile = '"profile":1',
+      prefetch = '"prefetch":"yes"',
+    }
+    local fault: {string: string} = {
+      kv_cache = "kv_cache must be f32, f16, q8_0 or q4_0",
+      ubatch = "ubatch must be an integer of one or more",
+      vram = "vram must be an integer of one or more",
+      profile = "profile must be a string",
+      prefetch = "prefetch must be a boolean",
+    }
+
+    for _, key in ipairs(keys) do
+      fs.write(
+        file_path,
+        '{"models":{"a":{"path":"' .. first .. '",' .. given[key] .. "}}}"
+      )
+      test.equal(
+        refusal(file_path, "a"), head .. fault[key] .. " in models a", key
+      )
+    end
+
+    fs.write(
+      file_path,
+      '{"models":{"b":{"path":"'
+        .. second
+        .. '","ubatch":0},"a":{"path":"'
+        .. first
+        .. '","ubatch":0}}}'
+    )
+    test.equal(
+      refusal(file_path, "a"), head .. fault.ubatch .. " in models a, b"
+    )
+
+    fs.write(
+      file_path,
+      '{"models":{"a":{"kv_cache":"f32"},"b":{"path":"'
+        .. second
+        .. '","ubatch":0}}}'
+    )
+    test.equal(
+      refusal(file_path, "a"),
+      head .. "model a must be an object holding a path string"
+    )
+
+    fs.write(
+      file_path,
+      '{"models":{"b":{"path":"'
+        .. second
+        .. '","ubatch":0},"a":{"path":"'
+        .. first
+        .. '","kv_cache":"q8_0x"}}}'
+    )
+    local line = refusal(file_path, "a")
+    test.equal(line, head .. fault.kv_cache .. " in models a")
+    local beside = line:find("ubatch", 1, true)
+    test.falsy(beside)
+
+    cleanup({dir})
   end
 )

@@ -1,6 +1,6 @@
 # 53: The config's two levels: what a model owns
 
-**Status**: pending   **Depends on**: 04, 24, 27, 28, 29, 33, 35, 36, 38, 44
+**Status**: done   **Depends on**: 04, 24, 27, 28, 29, 33, 35, 36, 38, 44
 
 ## Problem & context
 
@@ -94,7 +94,7 @@ write it. The same rule now sits in `spec/README.md`'s Constraints.
 
 ## Tests
 
-- T-001 (FR-002, FR-003, FR-004): `an entry's values reach its model and not its neighbour's`, proves with one file holding entry `a` (a `kv_cache`, `vram`, `profile`, `prefetch`) and entry `b` (only a `path`) and a top-level `ubatch` 128, that `serve a` reaches the start function with the entry's four values and `ubatch` 128, that `serve b` reaches it with `f16`, nil, nil, nil and `ubatch` 128, and that `serve` with `a`'s path as the model word reaches it the way `b` does.
+- T-001 (FR-002, FR-003, FR-004): `an entry's values reach its model and not its neighbour's`, proves with one file holding entry `a` (a `kv_cache`, `vram`, `profile`, `prefetch`) and entry `b` (only a `path`) and a top-level `ubatch` 128, that `serve a` reaches the start function with the entry's four values and `ubatch` 128, that `serve b` reaches it with `f16`, nil, nil, nil and `ubatch` 128, and that `serve` with `a`'s path as the model word reaches it the way `b` does, and that a file whose only entry is keyed by `a`'s path and names another `path` beside `kv_cache` `q8_0` and `vram` 3072 still reaches `start` with `f16`, nil and `ubatch` 512 when that path is the model word, since a key spelled like a path names no entry.
 - T-002 (FR-005, FR-006): `a both-levels key is refused and the key checks run in order`, proves a file naming `kv_cache` at the top level and in entry `a` returns 1 with one stderr line holding `kv_cache` and `a` and no start call when `a` is the resolved model, and the same when `b` is the model word, that a file naming `kv_cache` at the top level and in entries `b` and `a` writes one line holding `kv_cache`, `a` and `b`, that a file naming `kv_cache` `bogus` at the top level and `kv_cache` `f32` in entry `a` writes one line holding `kv_cache` and `a` rather than the value fault's line, that a file holding `prot` at the top level and `port` in entry `a` writes one line holding `prot`, that a file holding `prot` and `kv_cache` at the top level and `kv_cache` in entry `a` writes one line holding `prot`, and that a file naming `kv_cache` at the top level and in entry `a` and holding `port` in entry `a` writes one line holding `kv_cache` and `a` rather than the `port` line.
 - T-003 (FR-003): `a flag run still takes the entry's value`, proves `--threads 3` against a file naming top-level `threads` 2 and an entry naming `kv_cache` reaches the start function with 3 and the entry's cache type.
 - T-004 (FR-001, FR-005): `the level table names every key the file accepts and nothing else`, proves the table the config module exposes names `host`, `port`, `models`, `sessions`, `context`, `workers` and `threads` at the top level only, `path` in an entry only, and `kv_cache`, `ubatch`, `vram`, `profile` and `prefetch` in an entry with the file's top level allowed as their default, and no other name at either level, that each of `host`, `port`, `sessions`, `workers`, `context`, `threads` inside an entry returns 1 with one stderr line holding that key and the model, that entries `b` and `a` each holding `port` write one line holding `port`, `a` and `b`, and that `path` at the top level returns 1 with one stderr line holding `path`, and that an entry `a` holding `prot` returns 1 with one stderr line holding `prot` and `a`.
@@ -108,14 +108,4 @@ write it. The same rule now sits in `spec/README.md`'s Constraints.
 
 ## Amendments
 
-- `04/FR-006`: the accepted set is one level table; the top-level check accepts the names the table allows at the top level, the five model keys included as defaults, and the entry check the names it allows in an entry, so `path` at the top level and a top-level-only key inside an entry are both refused, the entry fault naming the key and every entry holding it, both at `04/FR-006`'s position and before any value check. `04/T-006`'s entry-with-an-extra-key case becomes an entry holding `port`, and `53/T-004` covers an entry holding a name the table allows at neither level.
-- `04/FR-007`: `models` is set and is not a table whose every value is a table holding a `path` string plus, for each of `kv_cache`, `ubatch`, `vram`, `profile` and `prefetch` it holds, a value checked by the rule that key's top level uses. A value fault inside an entry names the key and every entry holding a value for it that breaks that rule, in ascending byte order, and is reported at the `models` position of the fault order after any entry that is not a table holding a `path` string.
-- `04/FR-011`: the `kv_cache`, `ubatch`, `vram`, `profile` and `prefetch` passed to `start` are the values resolved for the chosen model, entry then top level then default, not the file's top level.
-- `24/FR-001`: the cache type is the one resolved for the model a server builds, per model rather than one type for every model the server builds.
-- `24/FR-002`: f16 is what a model holds when neither its entry nor the file names `kv_cache`.
-- `24/FR-003`: a `kv_cache` that is not one of the four is refused whether it sits at the top level or in an entry, and the line names `kv_cache` and every entry holding a bad one when it sits in entries.
-- `33/FR-012`: the `ubatch` passed to `start` is the value resolved for the chosen model, 512 when neither level names one.
-- `36/FR-008`: `bench`'s endpoint `profile` is the value resolved for the model `bench` resolved.
-- `36/FR-012`: the `profile` passed to the start function and to the `bench.Settings` a bench run builds is the value resolved for the chosen model, nil when neither its entry nor the file's top level names one, and a `profile` that is not text in an entry names the key and every entry holding one.
-- `38/FR-010`: `prefetch` is the value resolved for the chosen model in the start function, in `bench.Settings` and in the endpoint, and a value that is not a boolean in an entry names the key and every entry holding one.
-- `29/FR-011`: `bench`'s endpoint `kv_cache`, `ubatch`, `vram`, `profile` and `prefetch` are the values resolved for the model it resolved, nil for `vram`, `profile` and `prefetch` when neither level names one.
+- None.

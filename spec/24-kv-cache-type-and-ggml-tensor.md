@@ -114,13 +114,17 @@ end
 
 ## Functional requirements
 
-- FR-001 (US-001) WHEN `config.json` sets `kv_cache` to `f32`, `f16`, `q8_0` or `q4_0`, THE SYSTEM
-  SHALL hold every prefix's keys and values in that type for every model the server builds.
-- FR-002 (US-002) WHEN `config.json` sets no `kv_cache`, THE SYSTEM SHALL hold every prefix's keys
-  and values in f16.
-- FR-003 (US-003) IF `kv_cache` is set and is not one of `f32`, `f16`, `q8_0` and `q4_0`, compared
-  case-sensitively, THEN THE SYSTEM SHALL write one line through the stderr writer naming
-  `kv_cache` and return exit code 1 without calling a start function.
+- FR-001 (US-001) WHEN a model's `kv_cache` resolves to `f32`, `f16`, `q8_0` or `q4_0` as
+  `53/FR-003` says, THE SYSTEM SHALL hold that model's prefix keys and values in that type, the
+  type being the one resolved for each model a server builds rather than one type for every model
+  it builds.
+- FR-002 (US-002) WHEN neither a model's `models` entry nor the file's top level names
+  `kv_cache`, THE SYSTEM SHALL hold that model's prefix keys and values in f16.
+- FR-003 (US-003) IF a `kv_cache` is set, at the file's top level or in a `models` entry, and is
+  not one of `f32`, `f16`, `q8_0` and `q4_0`, compared case-sensitively, THEN THE SYSTEM SHALL
+  write one line through the stderr writer naming `kv_cache` and, when the bad ones sit in
+  entries, every entry holding one in ascending byte order, and return exit code 1 without calling
+  a start function.
 - FR-004 (US-003) IF the cache type is `q8_0` or `q4_0` and the model's run holds a full-attention
   block whose `head_length` is not a multiple of 32, THEN THE SYSTEM SHALL return nil and one line
   naming the type and the head length, so that no cache of that type is made.
