@@ -35,3 +35,7 @@ These rules bind every spec in this folder.
 - Every `.tl` file typechecks and is formatted.
 - The project must be memory safe, no memory leaks, memory corruption bugs, use after frees, etc.
 - A spec that adds a config key names the level that owns it before it names what the key means.
+- A spec cites only specs that already exist in this folder, in its `**Depends on**` line, in a
+  requirement, in an amendment or in prose. A spec that has not been written has no number yet, so a
+  forward reference to one is a guess about ordering that breaks when the plan changes: name the thing
+  in plain words instead.
