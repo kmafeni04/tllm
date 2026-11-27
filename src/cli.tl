@@ -9,6 +9,16 @@ local cli = {}
 
 local type ModelEntry = config.ModelEntry
 
+-- 54: the five model keys a run may give for the model it names
+local function model_options(command: targs.Parser)
+  command:option({name = "kv-cache", placeholder = "TYPE"})
+  command:option({name = "ubatch", placeholder = "N", type = "number"})
+  command:option({name = "vram", placeholder = "N", type = "number"})
+  command:option({name = "profile", placeholder = "FILE"})
+  command:flag({name = "prefetch"})
+  command:flag({name = "no-prefetch"})
+end
+
 local function build(): targs.Parser
   local parser = targs.new(
     {
@@ -40,6 +50,7 @@ local function build(): targs.Parser
       type = "number",
     }
   )
+  model_options(serve_parser)
 
   local bench_parser = parser:command(
     {
@@ -71,6 +82,7 @@ local function build(): targs.Parser
       type = "number",
     }
   )
+  model_options(bench_parser)
 
   return parser
 end
@@ -196,6 +208,76 @@ local function flag_threads(
   return value as integer, false
 end
 
+-- 54/FR-006, FR-007: a count flag checked by the rule the config checks that
+-- key by, and the refusal line naming the flag and its value
+local function count_flag(
+  command: targs.Parser, name: string, write_err: function(string)
+): integer | nil, boolean
+  local value = command:get_option(name)
+  if not (value is number) then
+    return nil, false
+  end
+  if not config.whole_count(value) then
+    write_err(
+      one_line(
+        "'--"
+          .. name
+          .. "' expects an integer of one or more, got "
+          .. tostring(value)
+      )
+    )
+    return nil, true
+  end
+  return value as integer, false
+end
+
+-- 54/FR-001..FR-005, FR-008: the model keys the run gives, and the refusal
+local function model_flags(
+  command: targs.Parser, write_err: function(string)
+): config.Level | nil, boolean
+  local flags: config.Level = {}
+
+  local cache = command:get_option("kv-cache")
+  if cache is string then
+    local kind = config.cache_type(cache)
+    if kind is nil then
+      write_err(one_line("'--kv-cache' expects a cache type, got " .. cache))
+      return nil, true
+    end
+    flags.kv_cache = kind
+  end
+
+  local chunk, chunk_refused = count_flag(command, "ubatch", write_err)
+  if chunk_refused then
+    return nil, true
+  end
+  flags.ubatch = chunk
+
+  local room, room_refused = count_flag(command, "vram", write_err)
+  if room_refused then
+    return nil, true
+  end
+  flags.vram = room
+
+  local profile = command:get_option("profile")
+  if profile is string then
+    flags.profile = profile
+  end
+
+  local on = command:get_flag("prefetch")
+  local off = command:get_flag("no-prefetch")
+  if on and off then
+    write_err(one_line("'--prefetch' and '--no-prefetch' cannot both be given"))
+    return nil, true
+  end
+  if on then
+    flags.prefetch = true
+  elseif off then
+    flags.prefetch = false
+  end
+  return flags, false
+end
+
 -- 44/FR-005: the default shared among the file's workers
 local function shared(count: integer, workers: integer): integer
   local each = math.floor(count / workers)
@@ -244,6 +326,12 @@ local function serve_code(
     return 1
   end
 
+  -- 54/FR-009: before the model word is resolved and the file is read
+  local flags, flag_refused = model_flags(command, write_err)
+  if flag_refused then
+    return 1
+  end
+
   local word_value = model_of(command)
   local word: string | nil = nil
   if word_value is string then
@@ -282,7 +370,7 @@ local function serve_code(
     return 1
   end
 
-  local values = config.model_values(settings, chosen.entry)
+  local values = config.model_values(settings, chosen.entry, flags)
   return start(
     {
       host = bind_host,
@@ -313,7 +401,7 @@ local function bench_code(
   local lengths: {integer} = {512, 2048, 8192, 32768}
   local prefill = command:get_option("prefill-tokens")
   if prefill is number then
-    if not (prefill % 1 == 0 and prefill >= 1) then
+    if not config.whole_count(prefill) then
       write_err(
         one_line(
           "'--prefill-tokens' expects a positive integer, got "
@@ -328,7 +416,7 @@ local function bench_code(
   local decode = 128
   local count = command:get_option("decode-tokens")
   if count is number then
-    if not (count % 1 == 0 and count >= 1) then
+    if not config.whole_count(count) then
       write_err(
         one_line(
           "'--decode-tokens' expects a positive integer, got "
@@ -342,6 +430,12 @@ local function bench_code(
 
   local flag_count, refused = flag_threads(command, write_err)
   if refused then
+    return 1
+  end
+
+  -- 54/FR-009: before the model word is resolved and the file is read
+  local flags, flag_refused = model_flags(command, write_err)
+  if flag_refused then
     return 1
   end
 
@@ -383,7 +477,7 @@ local function bench_code(
     routing_path = routing
   end
 
-  local values = config.model_values(settings, chosen.entry)
+  local values = config.model_values(settings, chosen.entry, flags)
   return bench.run(
     {
       path = chosen.path,

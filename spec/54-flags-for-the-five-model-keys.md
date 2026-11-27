@@ -1,6 +1,6 @@
 # 54: The five model keys on the command line
 
-**Status**: pending   **Depends on**: 04, 24, 29, 33, 36, 38, 44, 53
+**Status**: done   **Depends on**: 04, 24, 29, 33, 36, 38, 44, 53
 
 ## Problem & context
 
@@ -20,11 +20,13 @@ as run flags (`--cache-type-k`, `--ubatch-size`) as well.
 
 The shape: `serve` and `bench` gain `--kv-cache TYPE`, `--ubatch N`, `--vram N`, `--profile FILE` and
 `--prefetch` / `--no-prefetch`. Each value is checked by the rule the config already checks that key
-by, and sits above both file levels in the order `53` sets: flag, entry, top level, default. That rule
-is the config module's own, the one `04/FR-007` holds for a value the file names and `53/FR-002`
-reuses for an entry's value, and the flag check calls it rather than holding its own copy: `53`'s whole
-point was that a key's rule is written once, and a command line with a second list of accepted cache
-types and a second whole-number test drifts from it with nothing to catch the drift. A flag that
+by, and sits above both file levels in the order `53` sets: flag, entry, top level, default. Those rules are the config module's own, the ones `04/FR-007` holds for a value the file names and
+`53/FR-002` reuses for an entry's value, and the flag check calls them rather than holding its own
+copy: `53`'s whole point was that a key's rule is written once, and a command line with a second list
+of accepted cache types and a second whole-number test drifts from it with nothing to catch the drift.
+In `src/config.tl` they are two functions, `cache_type` for the four cache types and `whole_count` for
+a whole number of one or more, and `value_ok`, the rule both file levels already used, now calls them
+too. A flag that
 breaks its rule is refused with one line naming the flag, before the model word is resolved and before
 the file is read, where `--port`, `--host` and `--threads` are refused today, and several flags at
 fault write the one line of the first of them. `prefetch` is a boolean and takes no value:
@@ -47,11 +49,11 @@ flag's value is always a string and that is all the config's rule for `profile` 
 - FR-003 (US-001, US-003) WHEN `serve` or `bench` is given `--profile P`, THE SYSTEM SHALL resolve that run's `profile` to P, in place of the resolved model's entry value and the file's top-level value.
 - FR-004 (US-001) WHEN `serve` or `bench` is given `--prefetch`, THE SYSTEM SHALL resolve that run's `prefetch` to true, in place of the resolved model's entry value and the file's top-level value.
 - FR-005 (US-001) WHEN `serve` or `bench` is given `--no-prefetch`, THE SYSTEM SHALL resolve that run's `prefetch` to false, in place of the resolved model's entry value and the file's top-level value.
-- FR-006 (US-002) IF `--kv-cache V` holds a V that the rule `04/FR-007` checks `kv_cache` by refuses, V being none of `f32`, `f16`, `q8_0` and `q4_0` compared case-sensitively, THEN THE SYSTEM SHALL reach that refusal by calling the rule the config module exposes for the key rather
+- FR-006 (US-002) IF `--kv-cache V` holds a V that the rule `04/FR-007` checks `kv_cache` by refuses, V being none of `f32`, `f16`, `q8_0` and `q4_0` compared case-sensitively, THEN THE SYSTEM SHALL reach that refusal by calling the cache-type rule the config module exposes rather
   than a list the command line holds, a clause no case separates from a copy and so one a reader
   confirms in `src/cli.tl`, and SHALL write one line through the stderr writer naming `--kv-cache` and
   V and return exit code 1 without calling a start function or building a model.
-- FR-007 (US-002) IF `--ubatch N` or `--vram N` holds an N that the rule `04/FR-007` checks that key by refuses, N not being a whole number of one or more, THEN THE SYSTEM SHALL reach that refusal by calling that same exposed rule rather than a whole-number test of its own, and SHALL write one line through the stderr writer naming that flag and N and return exit code 1 without calling a start function or building a model.
+- FR-007 (US-002) IF `--ubatch N` or `--vram N` holds an N that the rule `04/FR-007` checks that key by refuses, N not being a whole number of one or more, THEN THE SYSTEM SHALL reach that refusal by calling the whole-number rule that same module exposes rather than a whole-number test of its own, and SHALL write one line through the stderr writer naming that flag and N and return exit code 1 without calling a start function or building a model.
 - FR-008 (US-002) IF `serve` or `bench` is given both `--prefetch` and `--no-prefetch`, THEN THE SYSTEM SHALL write one line through the stderr writer naming both flags and return exit code 1 without calling a start function or building a model.
 - FR-009 (US-002) WHEN a flag is at fault under FR-006, FR-007 or FR-008, THE SYSTEM SHALL report it before the model word is resolved and before the config file is read, so a run whose flag and config file are both at fault writes only the flag's line.
 - FR-010 (US-002) WHEN more than one of the flags named in this requirement is at fault, THE SYSTEM SHALL write the one line of the first of them at fault, the prefetch pair counting as one fault naming both, in the order `--port`, `--host`, `--threads`, `--kv-cache`, `--ubatch`, `--vram`, `--prefetch` and `--no-prefetch`, and write no other flag's line.
@@ -76,9 +78,4 @@ flag's value is always a string and that is all the config's rule for `profile` 
 
 ## Amendments
 
-- `53/FR-003`: the resolution order gains a level above both file levels for the five keys, a flag the run gives winning over the entry, the file's top level and the default.
-- `53/FR-002`: the rule it checks an entry's value by is now also what a flag's value is checked by, and the config module exposes it so the command line calls it instead of holding a copy of the accepted values.
-- `24/FR-003`: a `kv_cache` may now also come from `--kv-cache`, and a flag value that is not one of the four types is refused with one line naming `--kv-cache` rather than `kv_cache`.
-- `33/FR-012`: `ubatch` may now also come from `--ubatch`, refused with one line naming the flag when it is not a whole number of one or more.
-- `36/FR-008`: the `profile` `bench` builds its server from may now also come from `--profile`.
-- `38/FR-010`: `prefetch` may now also come from `--prefetch` or `--no-prefetch`, neither of which holds a value for the non-boolean check to catch, so the only fault it can report from a flag is the two flags given in one run, refused with one line naming both.
+- None.

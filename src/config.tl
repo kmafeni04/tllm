@@ -31,7 +31,16 @@ local record config
     threads: integer | nil
   end
 
-  -- the values a model is served with, once its entry and the file are read
+  -- one level's five model values, each absent when that level names none
+  record Level
+    kv_cache: compute.CacheType | nil
+    ubatch: integer | nil
+    vram: integer | nil
+    profile: string | nil
+    prefetch: boolean | nil
+  end
+
+  -- the values a model is served with, once its levels are read
   record ModelValues
     kv_cache: compute.CacheType
     ubatch: integer
@@ -51,7 +60,13 @@ local record config
   is_model_path: function(word: string): boolean
   has_file: function(file_path: string): boolean
   levels: function(): {string: KeyLevel}
-  model_values: function(settings: Config, entry: ModelEntry | nil): ModelValues
+  -- 54/FR-006, 54/FR-007: the rules a value is checked by, at either file
+  -- level or on a flag: the cache type for kv_cache, the count for the rest
+  cache_type: function(value: string): compute.CacheType | nil
+  whole_count: function(value: number): boolean
+  model_values: function(
+    settings: Config, entry: ModelEntry | nil, flags: Level | nil
+  ): ModelValues
   load: function(
     environment: {string: string},
     explicit: string | nil,
@@ -61,6 +76,7 @@ local record config
 end
 
 local type Config = config.Config
+local type Level = config.Level
 local type ModelEntry = config.ModelEntry
 local type ModelValues = config.ModelValues
 local type KeyLevel = config.KeyLevel
@@ -278,14 +294,22 @@ local function entries_of(fields: Fields): Fields | nil
   return nil
 end
 
+function config.cache_type(value: string): compute.CacheType | nil
+  return CACHE_TYPES[value]
+end
+
+function config.whole_count(value: number): boolean
+  return value % 1 == 0 and value >= 1
+end
+
 -- 53/FR-002: the rule a model key's value is checked by, at either level
 local function value_ok(value: ConfigValue, key: string): boolean
   if key == "kv_cache" then
     if not (value is string) then
       return false
     end
-    local cache = CACHE_TYPES[value]
-    return not (cache is nil)
+    local kind = config.cache_type(value)
+    return not (kind is nil)
   end
   if key == "profile" then
     return value is string
@@ -293,7 +317,7 @@ local function value_ok(value: ConfigValue, key: string): boolean
   if key == "prefetch" then
     return value is boolean
   end
-  return value is number and value % 1 == 0 and value >= 1
+  return value is number and config.whole_count(value)
 end
 
 -- keep a checked value under its own key, in an entry or the file's top level
@@ -427,7 +451,7 @@ local function parse(
 
   local sessions = fields.sessions
   if sessions is number then
-    if not (sessions % 1 == 0 and sessions >= 1) then
+    if not config.whole_count(sessions) then
       return fault(
         "config " .. file_path .. ": sessions must be an integer of one or more"
       )
@@ -494,7 +518,7 @@ local function parse(
 
   local workers = fields.workers
   if workers is number then
-    if not (workers % 1 == 0 and workers >= 1) then
+    if not config.whole_count(workers) then
       return fault(
         "config " .. file_path .. ": workers must be an integer of one or more"
       )
@@ -595,40 +619,62 @@ local function fresh(environment: {string: string}): Config
   }
 end
 
--- 53/FR-003: the values a model is served with: its entry, then the file's
--- top level, then the default the file leaves
-function config.model_values(
-  settings: Config, entry: ModelEntry | nil
-): ModelValues
-  local values: ModelValues = {
-    kv_cache = settings.kv_cache or "f16",
-    ubatch = settings.ubatch or DEFAULT_UBATCH,
-    vram = settings.vram,
-    profile = settings.profile,
-    prefetch = settings.prefetch,
-  }
-  if not (entry is nil) then
-    local cache = entry.kv_cache
-    if not (cache is nil) then
-      values.kv_cache = cache
-    end
-    local ubatch = entry.ubatch
-    if not (ubatch is nil) then
-      values.ubatch = ubatch
-    end
-    local vram = entry.vram
-    if not (vram is nil) then
-      values.vram = vram
-    end
-    local profile = entry.profile
-    if not (profile is nil) then
-      values.profile = profile
-    end
-    local prefetch = entry.prefetch
-    if not (prefetch is nil) then
-      values.prefetch = prefetch
-    end
+-- one level's values over the ones already resolved
+local function overlay(values: ModelValues, held: Level | nil)
+  if held is nil then
+    return
   end
+  local cache = held.kv_cache
+  if not (cache is nil) then
+    values.kv_cache = cache
+  end
+  local ubatch = held.ubatch
+  if not (ubatch is nil) then
+    values.ubatch = ubatch
+  end
+  local vram = held.vram
+  if not (vram is nil) then
+    values.vram = vram
+  end
+  local profile = held.profile
+  if not (profile is nil) then
+    values.profile = profile
+  end
+  local prefetch = held.prefetch
+  if not (prefetch is nil) then
+    values.prefetch = prefetch
+  end
+end
+
+-- 53/FR-003, 54/FR-001..FR-005: the values a model is served with: the run's
+-- flags, then its entry, then the file's top level, then the default
+function config.model_values(
+  settings: Config, entry: ModelEntry | nil, flags: Level | nil
+): ModelValues
+  local values: ModelValues = {kv_cache = "f16", ubatch = DEFAULT_UBATCH}
+  overlay(
+    values,
+    {
+      kv_cache = settings.kv_cache,
+      ubatch = settings.ubatch,
+      vram = settings.vram,
+      profile = settings.profile,
+      prefetch = settings.prefetch,
+    }
+  )
+  if not (entry is nil) then
+    overlay(
+      values,
+      {
+        kv_cache = entry.kv_cache,
+        ubatch = entry.ubatch,
+        vram = entry.vram,
+        profile = entry.profile,
+        prefetch = entry.prefetch,
+      }
+    )
+  end
+  overlay(values, flags)
   return values
 end
 

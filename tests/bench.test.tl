@@ -850,6 +850,96 @@ test.it(
   end
 )
 
+test.it(
+  "bench takes the flags",
+  function()
+    if not support.found_device() then
+      test.skip("bench takes the flags (no CUDA device)", function() end)
+      return
+    end
+
+    local file_path = meta_file(meta(260, nil, true), entries())
+    local vram = half_slot_vram(file_path)
+    local named = profile_file('{"layer":0,"token":0,"experts":[1]}\n')
+
+    local closed = run(
+      {
+        "bench",
+        file_path,
+        "--vram",
+        tostring(vram),
+        "--profile",
+        named,
+        "--no-prefetch",
+        "--prefill-tokens",
+        "4",
+        "--decode-tokens",
+        "4",
+      }
+    )
+    test.equal(closed.code, 0, table.concat(closed.err, "\n"))
+    local line = experts_at(closed.out, 4) as string
+    test.truthy(line, table.concat(closed.out, "\n"))
+    test.truthy(
+      line:match(
+        "; 0%.0%% hit; 0 ahead, 0%.0%% landed; read ahead closed; "
+          .. "%d+%.%d%% over PCIe, pool %d+%.%d GB/s, link %d+%.%d GB/s; "
+          .. "%d+ direct$"
+      ),
+      line
+    )
+
+    local open = run(
+      {
+        "bench",
+        file_path,
+        "--vram",
+        tostring(vram),
+        "--profile",
+        named,
+        "--prefetch",
+        "--prefill-tokens",
+        "4",
+        "--decode-tokens",
+        "4",
+      }
+    )
+    test.equal(open.code, 0, table.concat(open.err, "\n"))
+    line = experts_at(open.out, 4) as string
+    test.truthy(line, table.concat(open.out, "\n"))
+    test.truthy(
+      line:match(
+        "; 0%.0%% hit; %d+ ahead, %d+%.%d%% landed; read ahead open; "
+          .. "%d+%.%d%% over PCIe, pool %d+%.%d GB/s, link %d+%.%d GB/s; "
+          .. "%d+ direct$"
+      ),
+      line
+    )
+
+    local typed = run(
+      {
+        "bench",
+        file_path,
+        "--kv-cache",
+        "q8_0",
+        "--prefill-tokens",
+        "4",
+        "--decode-tokens",
+        "4",
+      }
+    )
+    test.equal(typed.code, 1)
+    test.equal(#typed.err, 1)
+    test.includes(typed.err[1], "q8_0")
+    test.includes(typed.err[1], "cannot hold a head of 2 numbers")
+
+    local zero = run({"bench", file_path, "--vram", "0"})
+    test.equal(zero.code, 1)
+    test.equal(#zero.err, 1)
+    test.includes(zero.err[1], "--vram")
+  end
+)
+
 -- the vram that holds every fixed tensor and the reservation and leaves no
 -- expert slot, so every expert a turn routes is a miss
 local function no_slot_vram(file_path: string): integer

@@ -120,11 +120,11 @@ end
   it builds.
 - FR-002 (US-002) WHEN neither a model's `models` entry nor the file's top level names
   `kv_cache`, THE SYSTEM SHALL hold that model's prefix keys and values in f16.
-- FR-003 (US-003) IF a `kv_cache` is set, at the file's top level or in a `models` entry, and is
-  not one of `f32`, `f16`, `q8_0` and `q4_0`, compared case-sensitively, THEN THE SYSTEM SHALL
-  write one line through the stderr writer naming `kv_cache` and, when the bad ones sit in
-  entries, every entry holding one in ascending byte order, and return exit code 1 without calling
-  a start function.
+- FR-003 (US-003) IF a `kv_cache` is set, at the file's top level, in a `models` entry or by
+  `--kv-cache`, and is not one of `f32`, `f16`, `q8_0` and `q4_0`, compared case-sensitively, THEN
+  THE SYSTEM SHALL write one line through the stderr writer naming `kv_cache`, or `--kv-cache` and the
+  value when the flag gave it as `54/FR-006` says, and, when the bad ones sit in entries, every entry
+  holding one in ascending byte order, and return exit code 1 without calling a start function.
 - FR-004 (US-003) IF the cache type is `q8_0` or `q4_0` and the model's run holds a full-attention
   block whose `head_length` is not a multiple of 32, THEN THE SYSTEM SHALL return nil and one line
   naming the type and the head length, so that no cache of that type is made.

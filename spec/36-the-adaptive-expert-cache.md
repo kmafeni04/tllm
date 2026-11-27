@@ -109,8 +109,8 @@ path to a file `29/FR-008` writes: one JSON object per line, holding `layer`, `t
 - FR-007 (US-001) WHEN `serve.build` builds a model in its own process, THE SYSTEM SHALL give
   `compute.model` the endpoint's `profile`.
 - FR-008 (US-004) WHEN `bench` builds its server, THE SYSTEM SHALL set the endpoint's `profile` to
-  the `profile` resolved for the model `bench` resolved as `53/FR-003` says, nil when neither its
-  entry nor the file names one.
+  the `profile` resolved for the model `bench` resolved as `53/FR-003` says, the `--profile` flag of
+  `54/FR-003` first, nil when none of its entry, the file and the flag names one.
 - FR-009 (US-001) WHEN a worker decodes its endpoint json, THE SYSTEM SHALL carry the `profile` the
   json holds into the endpoint it builds, so `serve.build` gives it to `compute.model` as FR-007
   says.

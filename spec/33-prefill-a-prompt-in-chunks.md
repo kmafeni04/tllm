@@ -190,11 +190,13 @@ bound of its own.
   turns the scores of its own group's last row, so no turn is ever given no row and the pass holds
   more than `ubatch` rows only when there are more such turns than `ubatch`.
 - FR-012 (US-004) WHEN a config file is read or none is, THE SYSTEM SHALL pass `start` the
-  `ubatch` resolved for the chosen model as `53/FR-003` says, 512 when neither its entry nor the
-  file names one, and IF `ubatch` is present at either level and is not a whole number of one or
-  more, THEN THE SYSTEM SHALL write one line naming `ubatch` and, for the entries holding one that
-  is not, every such entry in ascending byte order, through the stderr writer and return exit code
-  1 without calling a start function.
+  `ubatch` resolved for the chosen model as `53/FR-003` says, 512 when none of its entry, the file or
+  the `--ubatch` flag names one, and IF `ubatch` is present at either level and is not a whole number
+  of one or more, THEN THE SYSTEM SHALL write one line naming `ubatch` and, for the entries holding one
+  that is not, every such entry in ascending byte order, through the stderr writer and return exit code
+  1 without calling a start function. A `--ubatch` value that is not a whole number of one or more is
+  refused by `54/FR-007` naming `--ubatch` instead, before the model word is resolved and the file is
+  read.
 - FR-013 (US-004) WHEN `serve.build` builds its model, THE SYSTEM SHALL build it with the endpoint's
   `ubatch`, 512 when the endpoint names none, and expose that number as the model's `ubatch`; and IF
   `compute.model` is given a `ubatch` below one, THEN THE SYSTEM SHALL return nil and one line naming

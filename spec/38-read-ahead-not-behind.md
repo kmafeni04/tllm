@@ -169,7 +169,10 @@ are the queue the model took, so a case reads the size it was given without reac
   chosen model as `53/FR-003` says, so `compute.model` is given it; IF it is set and is not a
   boolean, at either level, THEN THE SYSTEM SHALL write one line naming `prefetch` and, for the
   entries holding one that is not a boolean, every such entry in ascending byte order, and return
-  exit code 1 without calling a start function.
+  exit code 1 without calling a start function. A run may also give it with `--prefetch` or
+  `--no-prefetch` as `54/FR-004` and `54/FR-005` say; neither holds a value for this check to catch,
+  so the only fault this key reports from a flag is the two flags given in one run, refused with one
+  line naming both as `54/FR-008` says.
 - FR-011 (US-005) WHEN `bench` writes a length's `experts` line, THE SYSTEM SHALL follow the hit
   rate text with `; A ahead, P% landed; read ahead S`, where A is the turn's
   `measure.prefetch_reads`, P is its `measure.prefetch_landed` over its `measure.prefetch_named`
