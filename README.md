@@ -35,6 +35,7 @@ The first run compiles ggml and the CUDA backend, so it takes a while.
 ```sh
 lde run -- serve [MODEL] [--config FILE] [--host HOST] [--port PORT]
 lde run -- bench MODEL [--config FILE] [--prefill-tokens N] [--decode-tokens N] [--dump-routing FILE]
+lde run -- reference MODEL [--config FILE] [--reference FILE]
 ```
 
 `lde run --` runs this package, and everything after it goes to `tllm`.
@@ -60,6 +61,11 @@ config's `models` map. The config file is `tllm/config.json` under
 
 `bench` prints prefill and decode rates for a model, and `--dump-routing FILE`
 writes the expert routing of the run.
+
+`reference` checks the engine against a recorded answer from another engine,
+given by `--reference FILE`; `reference/qwen3.8-flash-next-iq3_s.json` holds
+the one for the Flash-Next pair. It prints what agrees and what differs, and
+exits 1 when something differs.
 
 ## Development
 

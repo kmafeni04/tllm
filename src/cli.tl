@@ -3,11 +3,13 @@ local targs = require("targs")
 local bench = require("tllm.bench")
 local config = require("tllm.config")
 local cores = require("tllm.cores")
+local reference = require("tllm.reference")
 local serve = require("tllm.serve")
 
 local cli = {}
 
 local type ModelEntry = config.ModelEntry
+local type Config = config.Config
 
 -- 54: the five model keys a run may give for the model it names
 local function model_options(command: targs.Parser)
@@ -83,6 +85,16 @@ local function build(): targs.Parser
     }
   )
   model_options(bench_parser)
+
+  local reference_parser = parser:command(
+    {
+      name = "reference",
+      description = "Check a model against a recorded answer",
+    }
+  )
+  reference_parser:argument({name = "model", max_length = 1, required = true})
+  reference_parser:option({name = "config", placeholder = "FILE"})
+  reference_parser:option({name = "reference", placeholder = "FILE"})
 
   return parser
 end
@@ -169,6 +181,47 @@ local function chosen_model(
   end
   local only = models[names[1]]
   return {name = names[1], path = only.path, entry = only}
+end
+
+-- 02/FR-003: the model word, the config file and the model it names, the same
+-- read for every command
+local function resolved(
+  command: targs.Parser,
+  name: string,
+  environment: {string: string},
+  starter: boolean,
+  write_err: function(string)
+): Chosen | nil, Config | nil
+  local word_value = model_of(command)
+  local word: string | nil = nil
+  if word_value is string then
+    word = word_value
+  end
+
+  local path_word = false
+  if word is string then
+    path_word = config.is_model_path(word)
+  end
+
+  local explicit = command:get_option("config")
+  local config_path: string | nil = nil
+  if explicit is string then
+    config_path = explicit
+  end
+
+  local settings, config_line = config.load(
+    environment, config_path, path_word, starter
+  )
+  if settings is nil then
+    write_err(one_line(config_line as string))
+    return nil, nil
+  end
+
+  local chosen = chosen_model(name, settings.models, word, path_word, write_err)
+  if chosen is nil then
+    return nil, nil
+  end
+  return chosen, settings
 end
 
 local function process_environment(): {string: string}
@@ -332,26 +385,10 @@ local function serve_code(
     return 1
   end
 
-  local word_value = model_of(command)
-  local word: string | nil = nil
-  if word_value is string then
-    word = word_value
-  end
-
-  local path_word = false
-  if word is string then
-    path_word = config.is_model_path(word)
-  end
-
-  local explicit = command:get_option("config")
-  local config_path: string | nil = nil
-  if explicit is string then
-    config_path = explicit
-  end
-
-  local settings, config_line = config.load(environment, config_path, path_word)
-  if settings is nil then
-    write_err(one_line(config_line as string))
+  local chosen, settings = resolved(
+    command, "serve", environment, true, write_err
+  )
+  if chosen is nil or settings is nil then
     return 1
   end
 
@@ -361,13 +398,6 @@ local function serve_code(
   local threads = flag_count or settings.threads
   if threads is nil then
     threads = shared(cores.machine(), settings.workers or 1)
-  end
-
-  local chosen = chosen_model(
-    "serve", settings.models, word, path_word, write_err
-  )
-  if chosen is nil then
-    return 1
   end
 
   local values = config.model_values(settings, chosen.entry, flags)
@@ -439,35 +469,10 @@ local function bench_code(
     return 1
   end
 
-  local word_value = model_of(command)
-  local word: string | nil = nil
-  if word_value is string then
-    word = word_value
-  end
-
-  local path_word = false
-  if word is string then
-    path_word = config.is_model_path(word)
-  end
-
-  local explicit = command:get_option("config")
-  local config_path: string | nil = nil
-  if explicit is string then
-    config_path = explicit
-  end
-
-  local settings, config_line = config.load(
-    environment, config_path, path_word, false
+  local chosen, settings = resolved(
+    command, "bench", environment, false, write_err
   )
-  if settings is nil then
-    write_err(one_line(config_line as string))
-    return 1
-  end
-
-  local chosen = chosen_model(
-    "bench", settings.models, word, path_word, write_err
-  )
-  if chosen is nil then
+  if chosen is nil or settings is nil then
     return 1
   end
 
@@ -491,6 +496,43 @@ local function bench_code(
       profile = values.profile,
       prefetch = values.prefetch,
       threads = flag_count or settings.threads or cores.machine(),
+    },
+    write_out,
+    write_err
+  )
+end
+
+local function reference_code(
+  command: targs.Parser,
+  write_out: function(string),
+  write_err: function(string),
+  environment: {string: string}
+): integer
+  local recording = command:get_option("reference")
+  if not (recording is string) then
+    write_err(one_line("'--reference' expects a recording file"))
+    return 1
+  end
+
+  local chosen, settings = resolved(
+    command, "reference", environment, false, write_err
+  )
+  if chosen is nil or settings is nil then
+    return 1
+  end
+
+  local values = config.model_values(settings, chosen.entry, nil)
+  return reference.run(
+    {
+      path = chosen.path,
+      name = chosen.name,
+      recording = recording as string,
+      kv_cache = values.kv_cache,
+      ubatch = values.ubatch,
+      vram = values.vram,
+      profile = values.profile,
+      prefetch = values.prefetch,
+      threads = settings.threads,
     },
     write_out,
     write_err
@@ -530,6 +572,16 @@ function cli.run(settings: Settings): integer
   if bench_command then
     return bench_code(
       bench_command, write_out, write_err, environment or process_environment()
+    )
+  end
+
+  local reference_command = parser:get_command("reference")
+  if reference_command then
+    return reference_code(
+      reference_command,
+      write_out,
+      write_err,
+      environment or process_environment()
     )
   end
 

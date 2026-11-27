@@ -49,6 +49,10 @@ local record generate
   text_ids: function(
     compute.Model, tokenizer.Tokenizer, {integer}, Options, sequence?: string
   ): Text | nil, string | nil
+
+  -- the count highest-scoring ids in the order a sample ranks them: the higher
+  -- score first, the lower id among equal scores
+  top: function(scores: {number}, count: integer): {integer}
 end
 
 local type Options = generate.Options
@@ -647,6 +651,11 @@ function generate.open(
     return nil, encode_line
   end
   return generate.open_ids(model, tokens, ids, options, sequence)
+end
+
+-- the count best ids of one score row, in the order a sample ranks them
+function generate.top(scores: {number}, count: integer): {integer}
+  return selected(scores, count)
 end
 
 function generate.text_ids(

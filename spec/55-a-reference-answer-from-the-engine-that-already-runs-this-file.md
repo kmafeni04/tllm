@@ -1,6 +1,6 @@
 # 55: A reference answer from the engine that already runs this file
 
-**Status**: pending   **Depends on**: 02, 04, 16, 29, 41
+**Status**: done   **Depends on**: 02, 04, 16, 29, 41
 
 ## Problem & context
 
@@ -100,8 +100,9 @@ first, the chosen one among them. `position` counts the ids it answered, from 0.
   `cold_tokens_per_second` and `steady_tokens_per_second`.
 - FR-003 (US-001) THE SYSTEM SHALL keep the recording for the Flash-Next pair at
   `reference/qwen3.8-flash-next-iq3_s.json` at the package root, holding three prompts, each with the
-  first 50 ids that engine answered and the five candidates at each of the first five positions,
-  recorded greedy at seed 0 with speculation off on this machine.
+  ids that engine answered within its `max_tokens` of 50 (one prompt ends at its own stop id, so it
+  holds 30) and the five candidates at each of the first five positions, recorded greedy at seed 0
+  with speculation off on this machine.
   Not testable: it is one run of the real 84 GB pair on the card strata already holds; the shape it
   holds is what FR-002 and T-001 assert.
 - FR-004 (US-002) WHEN the model is loaded, THE SYSTEM SHALL hash every shard of the loaded handle
@@ -180,6 +181,10 @@ what that fixture actually answers.
   the fixture under `m`, `reference m --config F --reference R` returns 0 with the `prompt 1:` line;
   that `--reference` naming an absent file returns 1 with one line holding that path; and that
   `reference --help` returns 0 with the usage text.
+- T-007 (FR-009): `a short answer fails the checkpoint`, proves that a recording holding more `ids`
+  than its own `max_tokens` lets this engine answer, with every answered id and every recorded
+  position agreeing, returns 1 with one `prompt 1:` line holding `2 of 4 ids` and `2 of 2 positions`
+  and a `reference: FAIL` line, and writes no difference line.
 
 `reference/qwen3.8-flash-next-iq3_s.json` itself is not a case: it is one run of the real file, and
 the specs that build those mechanisms are the ones that run it.
@@ -190,6 +195,4 @@ the specs that build those mechanisms are the ones that run it.
 
 ## Amendments
 
-- `02/FR-003`: `reference` joins the commands, with a required `MODEL` and the options `--config` and
-  `--reference FILE`.
-- `02/FR-005`: the command is `serve`, `bench` or `reference`; anything else is the refusal.
+- None.
